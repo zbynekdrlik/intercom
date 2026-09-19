@@ -449,3 +449,44 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 - **Live end-to-end (supervisor, needs the rig):** run the hub `--features ndi` against a live NDI
   source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
   in when the source drops.
+
+## M3 live findings on strih-lx / dev1 (19.9.2026) — read before the phone test or the M4 cut-over
+
+- **Janus picks a plain-RTP participant's codec from the join request's TOP-LEVEL `codec`
+  (`"pcmu"`/`"pcma"`/`"opus"`, default opus) — NOT from `rtp.payload_type`.** Without it Janus 1.1.2
+  answered `payload_type 100` (Opus), discarded the hub's PCMU and never sent it the mix (hub
+  `rx_packets` stayed 0 while a second participant was mixing). With `"codec":"pcmu"` the reply is
+  `payload_type 0` and PCMU flows both ways (verified: probe 300/300, hub rx 248 → 597). The hub's
+  `build_join` now sends it; the test pins it.
+- **The nginx `/janus` location MUST be an exact match (`location = /janus`)** — a prefix location
+  also swallows the PWA's vendored `/janus.js` and proxies it to the Janus WS server, which returns
+  403 to a plain GET, so the phone page never loads its signalling library.
+- **A quick packet-level Janus probe needs no browser:** the Janus HTTP API (`:8088/janus`) —
+  create → attach `janus.plugin.audiobridge` → `join` `{room, display, codec:"pcmu", rtp:{ip,port}}`
+  → long-poll the session for `joined` (carries Janus's `rtp.ip/port` to send to) → send 20 ms
+  PCMU packets of `0xFF` (µ-law silence — nothing audible reaches anyone; only the QPSK marker may
+  sound on the rig) and count what comes back; `leave` + `destroy`. Read the hub's
+  `phones.janus.rx_packets` before/after. See the 19.9. comments on issue 1345 for the script shape.
+- **`interkom.newlevel.media` is the owner's LIVE VDO.Ninja CNAME (proxied, since 2024) — never touch
+  it before M4.** The Linux hub's front is `interkom-lx.newlevel.media` (dev1 nginx,
+  `dev1-shading-https-install.sh --site interkom --hostname interkom-lx.newlevel.media --install`).
+  Under `sudo` that installer needs `HOME=/home/newlevel` (it resolves the airuleset Cloudflare
+  client and the token file from `$HOME`).
+- **`setup-strih.sh` stops at step 12 (the MiniFuse audio TODO, issue 1344) BEFORE step 14 (Janus)** —
+  until the audio step is wired, run step 14 standalone (the body of the step through its closing
+  `fi`, sourcing `scripts/lib/strih-provision.sh`). Follow-up: move the Janus step ahead of the audio
+  gate. Ubuntu's `janus` package auto-STARTS the service on install (before the jcfg exists) — restart
+  it after the step writes the room config. Janus runs as root there (User= empty), so the 0640
+  root-owned jcfg is readable; the production `intercom-hub.service` has `DynamicUser=yes` and cannot
+  read the 0600 root-owned room-secret file under `/etc/intercom-hub/` — reconcile
+  (`LoadCredential=`/a group) before M4. Janus HTTP is bound on `*:8088` and WS on `0.0.0.0:8188`
+  (the design wanted loopback HTTP) — tighten in the jcfg.
+- **A headless browser without a microphone ends in `Janus: mic chyba` and does NOT join** — the PWA
+  should join LISTEN-ONLY (recv-only offer, mic toggle disabled) when `getUserMedia` fails/denied:
+  exactly the cameraman who refuses the permission. Follow-up for M3b. While the hub is down the page
+  logs one Chromium `502` resource error per poll (network class, not a JS error) — expected.
+- **The live M3 test shape that worked:** transient `intercom-hub-m3` unit (NO DynamicUser, so the
+  room-secret file is readable) on a cam1 + cutters + phones(janus) matrix with
+  `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-LX (interkom)`); the PWA
+  showed the live cam1 picture through the HTTPS front at ~9.3 fps; stop the transient hub right
+  after — it is a second sender of stream `cam1` into cam1's headset.
