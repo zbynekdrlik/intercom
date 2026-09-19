@@ -1,0 +1,20 @@
+[Unit]
+Description=strih-lx intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# Ordered after the network is up so the VBAN receive socket (:6980) binds cleanly.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The hub loads its declarative matrix (generated from the VB-Matrix XML by
+# scripts/vbmatrix_to_intercom_toml.py) and fails loud on a malformed TOML or a bind failure.
+ExecStart=/usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.toml
+Restart=on-failure
+RestartSec=5
+# Journal captures the periodic `intercom-hub: status …` line (levels/underruns) a dev1 watchdog reads.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
