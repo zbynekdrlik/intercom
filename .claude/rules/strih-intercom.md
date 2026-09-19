@@ -77,8 +77,40 @@ cut-over. So:
   `setup-strih.sh` (step 13) — enabled, NEVER started/restarted. `verify-strih.sh` reports it
   report-only (an installed+enabled but inactive unit is correct while parallel).
 - Never run `intercom-hub` from a dev lane. M1b (the supervisor) does the first live test by
-  repointing ONLY dev cambox cam1 at strih-lx via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`
-  in `src/intercom.rs`, per the design) — cam2-7 stay on the Windows strih until M4.
+  repointing ONLY dev cambox cam1 at strih-lx via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
+  per the design) — cam2-7 stay on the Windows strih until M4.
+
+## M1b — repointing ONE cambox at the Linux hub (`CAMERA_BOX_INTERCOM_TARGET`)
+
+The cambox root filesystem is READ-ONLY, so `/etc/camera-box/config.toml` cannot be edited to change
+the intercom target host. camera-box therefore honours an env override:
+
+- **`CAMERA_BOX_INTERCOM_TARGET=<host>`** rewrites the `target_host` of the resolved intercom config.
+  Precedence is **env > `--intercom-target` CLI flag > `config.toml`** — the env is applied AFTER the
+  CLI-vs-config resolution in `main.rs`, and logs an `info!` note naming the env var + the new and old
+  hosts when it overrides. The pure resolver is `src/intercom_target.rs::resolve_intercom_target`
+  (a `None`/empty/whitespace value is a no-op); an empty override is treated as unset (falls through
+  to the CLI/config target).
+
+- **The `/run` drop-in** carries that env into the systemd unit without touching the ro root:
+  `scripts/lib/intercom-target-dropin.sh` builds the remote bash.
+  `INTERCOM_TARGET_DROPIN` defaults to `/run/systemd/system/camera-box.service.d/zz-intercom-target.conf`
+  — under `/run` (tmpfs), so a **reboot auto-reverts** to the deployed Windows-strih target.
+  - **Set** (repoint cam1 at strih-lx): `intercom_target_dropin_set_cmds strih-lx.lan` prints remote
+    text that writes `[Service]\nEnvironment=CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan`, `daemon-reload`s,
+    `restart`s camera-box, then reads `systemctl show -p Environment --value camera-box` back and greps
+    the var (fails loud if the override did not take). The host is validated (non-empty, no
+    whitespace/quote) before any text is emitted.
+  - **Clear** (revert to the deployed target): `intercom_target_dropin_clear_cmds` removes the drop-in,
+    `daemon-reload`s and `restart`s camera-box.
+  - Every emitted statement is `;`-terminated (the `$(...)` trailing-newline-strip gotcha).
+
+This lib is a **supervisor tool** — it is deliberately NOT wired into `recording-e2e.sh` / `rig-mode.sh`.
+The supervisor uses it by hand at the M1b live step (repoint cam1, run a cam1 ↔ strih-lx loopback with a
+real headset, then clear).
+
+**NEVER repoint cam2-7** at strih-lx before the M4 cut-over — those camboxes are on the LIVE Windows
+strih, and a second hub sending VBAN back to them is double talkback.
 
 ## Milestone map
 
