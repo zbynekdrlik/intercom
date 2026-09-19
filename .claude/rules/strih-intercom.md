@@ -142,6 +142,13 @@ strih, and a second hub sending VBAN back to them is double talkback.
   (19.9.: a per-block DNS lookup — destinations are now resolved once, off the hot path).
 - The cambox headset ADC runs ~+540 ppm against the hub's timer (cam1 `capture 48026 samp/s`) —
   without a per-stream rate servo that is one 128-frame overrun every ~5 s (an M2 item, not M1b).
+- **Put cam1 BACK on main's release build the moment the test ends** (`CAMERA_SET=cam1
+  scripts/deploy-fleet.sh` with no `--run` = main's latest artifact). The M1b test needs the DEV
+  build on cam1 (the env override is not in the release yet), but a single box left on a dev build
+  makes the release PR's Full-path E2E REFUSE at the camera-box version-parity gate (`!! GATE FAILED:
+  1 active box(es) are NOT on the pinned main camera-box`, 19.9.2026 PR 1348) — the auto-align only
+  heals a UNIFORMLY-stale fleet, never a MIXED one. Restoring cam1 is part of the test's cleanup,
+  same as the drop-in `clear` and the hub `stop`.
 
 ## Milestone map
 
