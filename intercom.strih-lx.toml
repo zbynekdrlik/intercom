@@ -1,0 +1,1452 @@
+# strih-lx intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).
+# DO NOT EDIT BY HAND. Regenerate:
+#   python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-lx.toml
+# The byte-for-byte parity is pinned by tests/python/test_vbmatrix_to_intercom_toml_1345.py.
+
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "cam1"
+role = "cambox"
+adapter = "vban"
+host = "cam1.lan"
+in_stream = "cam1"
+out_stream = "cam1"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cam2"
+role = "cambox"
+adapter = "vban"
+host = "cam2.lan"
+in_stream = "cam2"
+out_stream = "cam2"
+in_channels = 8
+out_channels = 2
+
+[[participant]]
+name = "cam3"
+role = "cambox"
+adapter = "vban"
+host = "cam3.lan"
+in_stream = "cam3"
+out_stream = "cam3"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cam4"
+role = "cambox"
+adapter = "vban"
+host = "cam4.lan"
+in_stream = "cam4"
+out_stream = "cam4"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cam5"
+role = "cambox"
+adapter = "vban"
+host = "cam5.lan"
+in_stream = "cam5"
+out_stream = "cam5"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cam6"
+role = "cambox"
+adapter = "vban"
+host = "cam6.lan"
+in_stream = "cam6"
+out_stream = "cam6"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cam7"
+role = "cambox"
+adapter = "vban"
+host = "cam7.lan"
+in_stream = "cam7"
+out_stream = "cam7"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "fohabl"
+role = "program_ref"
+adapter = "vban"
+host = "fohabl.lan"
+in_stream = "fohabl-strih"
+in_channels = 4
+out_channels = 0
+
+[[participant]]
+name = "lv1"
+role = "program_ref"
+adapter = "vban"
+host = "lv1.lan"
+in_stream = "lv1-strih"
+in_channels = 2
+out_channels = 0
+
+[[participant]]
+name = "mbc"
+role = "program_ref"
+adapter = "vban"
+host = "mbc.lan"
+in_stream = "mbc-strih"
+in_channels = 0
+out_channels = 0
+
+[[participant]]
+name = "cutters"
+role = "cutters"
+adapter = "none"
+in_channels = 2
+out_channels = 4
+
+[[participant]]
+name = "phones"
+role = "phones"
+adapter = "none"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "speakers"
+role = "speakers"
+adapter = "none"
+in_channels = 0
+out_channels = 2
+
+[[participant]]
+name = "line34"
+role = "line34"
+adapter = "none"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "program_monitor"
+role = "program_monitor"
+adapter = "none"
+in_channels = 0
+out_channels = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 1
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cutters"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "line34"
+in_ch = 1
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 8
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 8
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cam7"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 2
+dst = "cam7"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam1"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam2"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam3"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam4"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam5"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cam6"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "phones"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam1"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam2"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam3"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam4"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam5"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 2
+dst = "cam6"
+out_ch = 2
+
+[[point]]
+src = "fohabl"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+gain_db = -8.0
+
+[[point]]
+src = "fohabl"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+gain_db = -8.0
+
+[[point]]
+src = "fohabl"
+in_ch = 1
+dst = "speakers"
+out_ch = 1
+
+[[point]]
+src = "fohabl"
+in_ch = 1
+dst = "program_monitor"
+out_ch = 1
+
+[[point]]
+src = "fohabl"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+gain_db = -8.0
+
+[[point]]
+src = "fohabl"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+gain_db = -8.0
+
+[[point]]
+src = "fohabl"
+in_ch = 2
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "fohabl"
+in_ch = 2
+dst = "program_monitor"
+out_ch = 2
+
+[[point]]
+src = "fohabl"
+in_ch = 3
+dst = "cutters"
+out_ch = 1
+gain_db = -10.0
+
+[[point]]
+src = "fohabl"
+in_ch = 3
+dst = "cutters"
+out_ch = 2
+gain_db = -10.0
+
+[[point]]
+src = "fohabl"
+in_ch = 3
+dst = "cutters"
+out_ch = 3
+gain_db = -10.0
+
+[[point]]
+src = "fohabl"
+in_ch = 3
+dst = "cutters"
+out_ch = 4
+gain_db = -10.0
+
+[[point]]
+src = "fohabl"
+in_ch = 3
+dst = "speakers"
+out_ch = 1
+gain_db = -10.0
+
+[[point]]
+src = "fohabl"
+in_ch = 4
+dst = "speakers"
+out_ch = 2
+
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+gain_db = -8.0
+
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "cutters"
+out_ch = 3
+gain_db = -8.0
+
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "program_monitor"
+out_ch = 1
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+gain_db = -8.0
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "cutters"
+out_ch = 4
+gain_db = -8.0
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "program_monitor"
+out_ch = 2
+
