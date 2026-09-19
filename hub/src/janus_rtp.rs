@@ -154,6 +154,10 @@ pub fn build_join(
         "request": "join",
         "room": room,
         "display": display,
+        // The plain-RTP leg's codec is selected HERE (top-level `codec`), not by `rtp.payload_type`:
+        // without it Janus 1.1.2 defaults the participant to Opus (payload_type 100) and discards
+        // the PCMU we send (live strih-lx finding, 19.9.2026). G.711 mu-law = "pcmu".
+        "codec": "pcmu",
         "rtp": {
             "ip": local_ip,
             "port": local_port,
