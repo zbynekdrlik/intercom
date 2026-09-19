@@ -1,0 +1,617 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VBAudioMatrixSettings>
+<VBAudioMatrixDeviceConfiguration>
+	<OptionDev mme='1024' wdm='512' ks='512' asio='0' />
+	<OptionTalkback uniq='WIN1.IN' channel='0' />
+	<OptionMonitor uniq='WIN1.OUT' channel1='0' channel2='1' />
+	<OptionPreset>PresetPatchCoconut</OptionPreset>
+	<CLOCKSlot uniq='CLOCK' master='0' name="Sync by Internal Clock" ></CLOCKSlot>
+	<AMDevice uniq='ASIO32' master='1' type='256' color='0' guid='{9B2A3761-A0F5-4544-96AE-E45FB7B6E982}' name="MiniFuse ASIO Driver"  ODelayOn='0' ODelayMs='0.00' OResetResync='0' ></AMDevice>
+	<AMDevice uniq='WIN1.IN' master='0' type='1' color='0' name="Line 3-4 (3- MiniFuse 4)" ODelayOn='0' ODelayMs='0.00' ></AMDevice>
+	<AMDevice uniq='WIN1.OUT' master='0' type='4' color='0' name="Speakers (5- USB Audio CODEC )" ODelayOn='0' ODelayMs='0.00' ></AMDevice>
+	<VAIOSlot uniq='VAIO1' color='0' online='1' name="Matrix VAIO 1"  ODelayOn='0' ODelayMs='0.00' >vdo interkom</VAIOSlot>
+	<VAIOSlot uniq='VAIO2' color='0' online='0' name="Matrix VAIO 2"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO3' color='0' online='0' name="Matrix VAIO 3"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO4' color='0' online='0' name="Matrix VAIO 4"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO5' color='0' online='0' name="Matrix VAIO 5"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO6' color='0' online='0' name="Matrix VAIO 6"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO7' color='0' online='0' name="Matrix VAIO 7"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VAIOSlot uniq='VAIO8' color='0' online='0' name="Matrix VAIO 8"  ODelayOn='0' ODelayMs='0.00' ></VAIOSlot>
+	<VBANSlot uniq='VBAN1' color='0' online='1' name="VBAN Stream 1"  ODelayOn='0' ODelayMs='0.00' >cam1</VBANSlot>
+	<VBANSlot uniq='VBAN2' color='0' online='1' name="VBAN Stream 2"  ODelayOn='0' ODelayMs='0.00' >cam2</VBANSlot>
+	<VBANSlot uniq='VBAN3' color='0' online='1' name="VBAN Stream 3"  ODelayOn='0' ODelayMs='0.00' >cam3</VBANSlot>
+	<VBANSlot uniq='VBAN4' color='0' online='1' name="VBAN Stream 4"  ODelayOn='0' ODelayMs='0.00' >cam4</VBANSlot>
+	<VBANSlot uniq='VBAN5' color='0' online='1' name="VBAN Stream 5"  ODelayOn='0' ODelayMs='0.00' >cam5</VBANSlot>
+	<VBANSlot uniq='VBAN6' color='0' online='1' name="VBAN Stream 6"  ODelayOn='0' ODelayMs='0.00' >cam6</VBANSlot>
+	<VBANSlot uniq='VBAN7' color='0' online='1' name="VBAN Stream 7"  ODelayOn='0' ODelayMs='0.00' >cam7</VBANSlot>
+	<VBANSlot uniq='VBAN8' color='0' online='1' name="VBAN Stream 8"  ODelayOn='0' ODelayMs='0.00' ></VBANSlot>
+	<VBANSlot uniq='VBAN64' color='0' online='1' name="VBAN Stream 9"  ODelayOn='0' ODelayMs='0.00' ></VBANSlot>
+	<VBANSlot uniq='VBAN128' color='0' online='1' name="VBAN Stream 10"  ODelayOn='0' ODelayMs='0.00' ></VBANSlot>
+	<VASIOSlot uniq='VASIO8' color='0' online='1' latency='0' name="Virtual ASIO 8 I/O"  ODelayOn='0' ODelayMs='0.00' >obs</VASIOSlot>
+	<VASIOSlot uniq='VASIO128' color='0' online='0' latency='0' name="Virtual ASIO 128 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO64A' color='0' online='0' latency='0' name="Virtual ASIO 64 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO64B' color='0' online='0' latency='0' name="Virtual ASIO 64 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO256A' color='0' online='0' latency='0' name="Virtual ASIO 256 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO256B' color='0' online='0' latency='0' name="Virtual ASIO 256 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO32' color='0' online='0' latency='0' name="Virtual ASIO 32 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<VASIOSlot uniq='VASIO512' color='0' online='0' latency='0' name="Virtual ASIO 512 I/O"  ODelayOn='0' ODelayMs='0.00' ></VASIOSlot>
+	<MIDIDevIn index='1' name="-" />
+	<MIDIDevIn index='2' name="-" />
+	<MIDIDevOut index='1' name="-" />
+</VBAudioMatrixDeviceConfiguration>
+<VBAudioMatrixGridConfiguration>
+	<Point slotin='ASIO32' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='1' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='ASIO32' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='WIN1.IN' in='1' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VAIO1' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN1' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='8' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN2' in='8' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='1' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN3' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN4' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN5' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='1' slotout='VBAN7' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN6' in='2' slotout='VBAN7' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='ASIO32' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='ASIO32' out='3' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VAIO1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN1' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN2' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN3' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN4' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN5' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='1' slotout='VBAN6' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='ASIO32' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='ASIO32' out='4' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VAIO1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN1' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN2' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN3' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN4' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN5' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN7' in='2' slotout='VBAN6' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='1' slotout='ASIO32' out='1' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='1' slotout='ASIO32' out='3' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='1' slotout='WIN1.OUT' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='1' slotout='VASIO8' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='2' slotout='ASIO32' out='2' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='2' slotout='ASIO32' out='4' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='2' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='2' slotout='VASIO8' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='3' slotout='ASIO32' out='1' dBGain='-10.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='3' slotout='ASIO32' out='2' dBGain='-10.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='3' slotout='ASIO32' out='3' dBGain='-10.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='3' slotout='ASIO32' out='4' dBGain='-10.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='3' slotout='WIN1.OUT' out='1' dBGain='-10.00' mute='0' phase='0' />
+	<Point slotin='VBAN8' in='4' slotout='WIN1.OUT' out='2' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='1' slotout='ASIO32' out='1' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='1' slotout='ASIO32' out='3' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='1' slotout='VASIO8' out='1' dBGain='0.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='2' slotout='ASIO32' out='2' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='2' slotout='ASIO32' out='4' dBGain='-8.00' mute='0' phase='0' />
+	<Point slotin='VBAN64' in='2' slotout='VASIO8' out='2' dBGain='0.00' mute='0' phase='0' />
+</VBAudioMatrixGridConfiguration>
+<VBAudioMatrixMidiMap>
+	<MidiMapName>-noname-</MidiMapName>
+	<MidiMapItem id='PrevPreset' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='NextPreset' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='SelPresetRecall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='SelPresetApply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='SelPresetMute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='SelPresetPhase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='SelPresetGain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#1Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#1Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#1Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#1Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#1Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#2Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#2Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#2Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#2Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#2Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#3Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#3Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#3Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#3Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#3Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#4Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#4Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#4Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#4Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#4Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#5Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#5Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#5Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#5Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#5Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#6Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#6Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#6Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#6Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#6Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#7Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#7Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#7Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#7Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#7Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#8Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#8Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#8Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#8Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#8Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#9Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#9Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#9Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#9Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#9Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#10Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#10Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#10Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#10Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#10Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#11Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#11Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#11Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#11Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#11Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#12Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#12Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#12Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#12Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#12Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#13Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#13Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#13Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#13Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#13Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#14Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#14Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#14Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#14Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#14Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#15Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#15Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#15Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#15Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#15Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#16Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#16Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#16Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#16Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#16Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#17Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#17Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#17Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#17Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#17Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#18Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#18Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#18Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#18Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#18Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#19Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#19Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#19Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#19Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#19Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#20Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#20Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#20Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#20Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#20Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#21Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#21Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#21Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#21Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#21Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#22Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#22Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#22Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#22Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#22Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#23Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#23Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#23Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#23Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#23Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#24Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#24Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#24Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#24Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#24Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#25Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#25Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#25Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#25Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#25Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#26Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#26Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#26Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#26Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#26Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#27Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#27Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#27Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#27Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#27Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#28Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#28Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#28Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#28Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#28Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#29Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#29Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#29Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#29Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#29Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#30Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#30Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#30Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#30Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#30Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#31Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#31Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#31Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#31Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#31Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#32Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#32Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#32Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#32Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#32Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#33Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#33Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#33Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#33Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#33Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#34Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#34Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#34Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#34Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#34Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#35Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#35Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#35Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#35Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#35Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#36Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#36Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#36Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#36Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#36Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#37Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#37Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#37Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#37Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#37Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#38Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#38Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#38Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#38Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#38Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#39Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#39Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#39Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#39Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#39Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#40Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#40Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#40Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#40Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#40Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#41Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#41Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#41Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#41Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#41Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#42Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#42Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#42Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#42Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#42Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#43Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#43Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#43Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#43Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#43Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#44Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#44Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#44Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#44Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#44Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#45Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#45Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#45Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#45Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#45Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#46Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#46Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#46Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#46Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#46Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#47Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#47Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#47Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#47Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#47Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#48Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#48Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#48Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#48Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#48Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#49Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#49Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#49Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#49Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#49Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#50Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#50Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#50Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#50Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#50Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#51Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#51Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#51Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#51Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#51Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#52Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#52Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#52Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#52Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#52Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#53Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#53Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#53Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#53Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#53Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#54Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#54Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#54Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#54Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#54Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#55Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#55Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#55Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#55Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#55Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#56Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#56Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#56Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#56Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#56Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#57Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#57Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#57Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#57Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#57Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#58Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#58Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#58Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#58Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#58Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#59Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#59Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#59Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#59Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#59Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#60Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#60Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#60Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#60Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#60Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#61Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#61Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#61Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#61Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#61Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#62Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#62Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#62Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#62Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#62Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#63Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#63Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#63Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#63Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#63Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#64Recall' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#64Apply' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#64Mute' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#64Phase' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+	<MidiMapItem id='Preset#64Gain' b1='00' b2='00' b3='00' b4='00' b5='00' b6='00' coder='0' ptt='0' feed1='0' feed2='0' omni='0' disabled='0' feedOn='127' feedOff='0'/>
+</VBAudioMatrixMidiMap>
+<VBANConfiguration>
+	<VBAN status="1" username="" color="00AA9678" />
+	<VBANStreamIn index='1' status='1' name='cam1' ip='cam1.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='2' status='1' name='cam2' ip='cam2.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='3' status='1' name='cam3' ip='cam3.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='4' status='1' name='cam4' ip='cam4.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='5' status='1' name='cam5' ip='cam5.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='6' status='1' name='cam6' ip='cam6.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='7' status='1' name='cam7' ip='cam7.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='8' status='1' name='fohabl-strih' ip='fohabl.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='9' status='1' name='lv1-strih' ip='lv1.lan' port='6980' NQ='0' />
+	<VBANStreamIn index='10' status='1' name='mbc-strih' ip='mbc.lan' port='6980' NQ='0' />
+	<VBANDataIn index='1' status='0' name='MIDI1' ip='' port='6980' />
+	<VBANCommandIn index='1' status='0' name='Command1' mouse='0' ip='' port='6980' />
+	<VBANStreamOut index='1' status='1' name='cam1' ip='cam1.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='2' status='1' name='cam2' ip='cam2.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='3' status='1' name='cam3' ip='cam3.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='4' status='1' name='cam4' ip='cam4.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='5' status='1' name='cam5' ip='cam5.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='6' status='1' name='cam6' ip='cam6.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='7' status='1' name='cam7' ip='cam7.lan' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='8' status='0' name='Stream8' ip='' port='6980' SR='48000' ch='2' NQ='0' format='1' />
+	<VBANStreamOut index='9' status='0' name='Stream9' ip='' port='6980' SR='48000' ch='8' NQ='0' format='1' />
+	<VBANStreamOut index='10' status='0' name='Stream10' ip='' port='6980' SR='48000' ch='8' NQ='0' format='1' />
+	<VBANDataOut index='1' source='0' status='0' name='MIDI1' ip='' port='6980' />
+	<VBANFrameOut index='1' source='0' status='0' name='VIDEO1' ip='' port='6980' mbps='12' fps='20' cursor='0' format='JPG' quality='50' />
+</VBANConfiguration>
+</VBAudioMatrixSettings>
