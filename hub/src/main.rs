@@ -19,13 +19,15 @@ use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
-use intercom_hub::vban_io::{route_packet, JitterBuffer, OutBlock, VbanSender};
+use intercom_hub::vban_io::{resolve_vban_addr, route_packet, JitterBuffer, OutBlock, VbanSender};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
 
 /// Jitter buffer depth = 8 blocks per participant (older samples drop as an overrun).
 const JITTER_CAP_BLOCKS: usize = 8;
+/// How often the output hosts are re-resolved off the hot path (DHCP lease moves).
+const OUTPUT_RESOLVE_REFRESH_S: u64 = 60;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -75,6 +77,52 @@ async fn main() -> Result<()> {
     let input_streams = matrix.vban_input_streams();
     let outputs = matrix.vban_outputs();
     let n_outputs = outputs.len();
+    // Output destinations are resolved ONCE here and refreshed by a background task every
+    // OUTPUT_RESOLVE_REFRESH_S (a cambox on a new DHCP lease is picked up within a minute) — the
+    // block loop below only ever sends to a cached SocketAddr. A host STRING on that hot path was a
+    // synchronous getaddrinfo per 5.33 ms block (M1b live finding, 19.9.2026: ~95 pkt/s instead of
+    // 187.5 + a jitter-buffer overrun storm). A failed refresh keeps the last-known-good address.
+    let out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>> = Arc::new(Mutex::new(
+        outputs
+            .iter()
+            .map(|(_, stream, host)| {
+                let a = resolve_vban_addr(host, intercom_vban::VBAN_PORT);
+                match a {
+                    Some(addr) => tracing::info!(%stream, %host, %addr, "VBAN output resolved"),
+                    None => tracing::warn!(%stream, %host, "VBAN output UNRESOLVED at start — will retry every {OUTPUT_RESOLVE_REFRESH_S}s"),
+                }
+                a
+            })
+            .collect(),
+    ));
+    {
+        let out_addrs = out_addrs.clone();
+        let hosts: Vec<String> = outputs.iter().map(|(_, _, h)| h.clone()).collect();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
+            ticker.tick().await; // the first tick fires immediately; startup already resolved
+            loop {
+                ticker.tick().await;
+                let hosts = hosts.clone();
+                let fresh = tokio::task::spawn_blocking(move || {
+                    hosts
+                        .iter()
+                        .map(|h| resolve_vban_addr(h, intercom_vban::VBAN_PORT))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
+                    for (slot, a) in cur.iter_mut().zip(fresh) {
+                        if a.is_some() && *slot != a {
+                            tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
+                            *slot = a;
+                        }
+                    }
+                }
+            }
+        });
+    }
     let engine = Arc::new(Engine::new(matrix.clone()));
     let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(
         (0..n)
@@ -119,6 +167,7 @@ async fn main() -> Result<()> {
         let jitter = jitter.clone();
         let engine = engine.clone();
         let matrix = matrix.clone();
+        let out_addrs = out_addrs.clone();
         let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
         // Status push cadence: ~1 s worth of blocks.
         let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
@@ -151,8 +200,16 @@ async fn main() -> Result<()> {
 
                 let output = engine.mix_block(&input, block_frames);
 
-                // Send each cambox its mixed stereo stream.
-                for (id, stream, host) in &outputs {
+                // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
+                let addrs: Vec<Option<SocketAddr>> =
+                    out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
+                for (slot, (id, stream, host)) in outputs.iter().enumerate() {
+                    let Some(addr) = addrs.get(slot).copied().flatten() else {
+                        if cycle.is_multiple_of(status_every as u64) {
+                            tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
+                        }
+                        continue;
+                    };
                     let chans = matrix.participants[*id].out_channels.max(1) as u8;
                     let interleaved = output.interleaved(*id, block_frames);
                     frame_counter[*id] = frame_counter[*id].wrapping_add(1);
@@ -164,10 +221,10 @@ async fn main() -> Result<()> {
                         interleaved: &interleaved,
                         frames: block_frames,
                     };
-                    match sender.send_block((host.as_str(), intercom_vban::VBAN_PORT), &block) {
+                    match sender.send_block(addr, &block) {
                         Ok(()) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
                         Err(e) => {
-                            tracing::debug!(target: "vban_send", %stream, %host, error=%e, "VBAN send failed")
+                            tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
                         }
                     }
                 }

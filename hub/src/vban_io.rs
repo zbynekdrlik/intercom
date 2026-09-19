@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -243,6 +243,22 @@ pub struct VbanSender {
     socket: UdpSocket,
 }
 
+/// Resolve one VBAN destination (`host`, `port`) to its first address — a ONE-SHOT lookup the send
+/// loop performs at startup and refreshes off the hot path. NEVER hand a host STRING to the
+/// per-block send: `ToSocketAddrs` on a string is a synchronous getaddrinfo per call (~20 ms via
+/// systemd-resolved on strih-lx), which at 187.5 blocks/s halved the hub's send rate and overran
+/// every jitter buffer in the M1b live loopback (19.9.2026). `None` = unresolvable right now (the
+/// caller keeps its last-known-good address).
+pub fn resolve_vban_addr(host: &str, port: u16) -> Option<SocketAddr> {
+    if host.trim().is_empty() {
+        return None;
+    }
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+}
+
 impl VbanSender {
     /// Bind an ephemeral local UDP socket to send from.
     pub fn bind_ephemeral() -> io::Result<Self> {
@@ -251,7 +267,9 @@ impl VbanSender {
         })
     }
 
-    /// Send one interleaved PCM16 [`OutBlock`] as a VBAN packet to `addr` (`host:port`).
+    /// Send one interleaved PCM16 [`OutBlock`] as a VBAN packet to `addr`. Pass a RESOLVED
+    /// [`SocketAddr`] on the block hot path (see [`resolve_vban_addr`]); a host string here is a
+    /// per-block DNS lookup.
     pub fn send_block<A: ToSocketAddrs>(&self, addr: A, block: &OutBlock<'_>) -> Result<()> {
         let packet = encode_packet(block)?;
         self.socket.send_to(&packet, addr)?;
