@@ -22,7 +22,7 @@ intercom-vban = { path = "../vban" }
 # the watch channel the http layer reads (the bkshading service skeleton).
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }   # rc: Serialize for Arc<HubState> (the /api/state Json body)
 serde_json = "1"
 toml = "0.8"
 anyhow = "1"
