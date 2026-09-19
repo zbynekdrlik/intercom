@@ -68,13 +68,17 @@ pub fn decode_packet(data: &[u8]) -> Result<DecodedAudio> {
 
     let interleaved: Vec<i16> = match header.codec {
         c if c == VbanCodec::Pcm16 as u8 => payload
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect(),
         c if c == VbanCodec::Float32 as u8 => payload
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
-                let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                let f = f32::from_le_bytes(*c);
                 (f * 32767.0).clamp(-32768.0, 32767.0) as i16
             })
             .collect(),

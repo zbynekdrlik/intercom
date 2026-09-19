@@ -448,8 +448,10 @@ mod tests {
         // Recover every sample from the payload byte-for-byte.
         let payload = &packet[VBAN_HEADER_SIZE..];
         let recovered: Vec<i16> = payload
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(recovered, samples);
     }
