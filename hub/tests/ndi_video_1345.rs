@@ -25,7 +25,7 @@ fn mjpeg_part_frames_the_jpeg_exactly() {
 
 #[test]
 fn mjpeg_part_content_length_matches_payload() {
-    let jpeg = vec![0u8; 1234];
+    let jpeg = [0u8; 1234];
     let part = http::mjpeg_part(&jpeg);
     let text = String::from_utf8_lossy(&part);
     assert!(text.starts_with("--frame\r\n"), "boundary opens the part");
@@ -116,7 +116,7 @@ fn video_slot_publishes_only_on_a_new_frame() {
     // First frame → counter advances to 1, the frame is readable.
     state.publish(vec![1, 2, 3], 100);
     assert_eq!(state.frame_counter(), 1);
-    assert_eq!(state.latest_frame().as_deref(), Some(&vec![1, 2, 3]));
+    assert_eq!(state.latest_frame().as_deref(), Some(&[1u8, 2, 3].to_vec()));
     // Reading again WITHOUT a publish does not advance the counter (only a new frame does).
     let (_f1, c1) = state.latest().unwrap();
     let (_f2, c2) = state.latest().unwrap();
@@ -126,7 +126,7 @@ fn video_slot_publishes_only_on_a_new_frame() {
     // A second publish advances the counter and swaps the frame.
     state.publish(vec![9, 9], 200);
     assert_eq!(state.frame_counter(), 2);
-    assert_eq!(state.latest_frame().as_deref(), Some(&vec![9, 9]));
+    assert_eq!(state.latest_frame().as_deref(), Some(&[9u8, 9].to_vec()));
 }
 
 #[test]
