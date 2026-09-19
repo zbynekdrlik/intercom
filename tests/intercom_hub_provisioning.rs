@@ -43,8 +43,73 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
         "setup-strih must NOT restart intercom-hub (enable-only until the M4 cut-over)"
     );
     assert!(
-        s.contains("TOTAL_STEPS=14"),
-        "setup-strih TOTAL_STEPS must be bumped for the intercom step"
+        s.contains("TOTAL_STEPS=15"),
+        "setup-strih TOTAL_STEPS must be bumped for the intercom + janus steps"
+    );
+}
+
+#[test]
+fn setup_strih_installs_janus_enable_only() {
+    let s = read("scripts/setup-strih.sh");
+    // apt install janus + write both jcfg files via the pure renderers.
+    assert!(
+        s.contains("apt-get install -y janus"),
+        "setup-strih must apt-get install janus (M3a)"
+    );
+    assert!(
+        s.contains("strih_janus_audiobridge_jcfg_text")
+            && s.contains("/etc/janus/janus.plugin.audiobridge.jcfg"),
+        "setup-strih must render + write the audiobridge room jcfg"
+    );
+    assert!(
+        s.contains("strih_janus_ws_jcfg_text")
+            && s.contains("/etc/janus/janus.transport.websockets.jcfg"),
+        "setup-strih must render + write the WebSocket transport jcfg"
+    );
+    // The room secret is generated to a 0600 file and NEVER started/echoed.
+    assert!(
+        s.contains("/etc/intercom-hub/janus-room.secret") && s.contains("openssl rand -hex 16"),
+        "setup-strih must generate the 0600 room secret with openssl"
+    );
+    assert!(
+        s.contains("systemctl enable janus"),
+        "setup-strih must ENABLE janus"
+    );
+    // ENABLE-ONLY: the M4 cut-over starts it, never this provisioning step.
+    assert!(
+        !s.contains("systemctl start janus"),
+        "setup-strih must NOT start janus (enable-only until the M4 cut-over)"
+    );
+    assert!(
+        !s.contains("systemctl restart janus"),
+        "setup-strih must NOT restart janus (enable-only until the M4 cut-over)"
+    );
+}
+
+#[test]
+fn verify_strih_reports_janus_as_a_note_only() {
+    let v = read("scripts/verify-strih.sh");
+    // The janus items are NOTEs (report-only), never hard gate items while running parallel.
+    assert!(
+        v.contains("janus.service (enabled="),
+        "verify-strih must report the janus unit state"
+    );
+    assert!(
+        v.contains("strih_janus_room_jcfg_ok"),
+        "verify-strih must report the audiobridge room jcfg via the pure predicate"
+    );
+    let idx = v
+        .find("janus.service (enabled=")
+        .expect("verify-strih must carry the janus NOTE line");
+    let window = &v[idx.saturating_sub(400)..idx];
+    assert!(
+        window.contains("note "),
+        "the janus item must be a NOTE (report-only), not ok/bad"
+    );
+    // No hard FAIL on janus while parallel with the Windows strih.
+    assert!(
+        !v.contains("bad \"janus"),
+        "the janus items must never hard-FAIL (report-only until the M4 cut-over)"
     );
 }
 

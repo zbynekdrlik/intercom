@@ -61,4 +61,19 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
             .any(|pt| pt.src == fohabl && cams.contains(&pt.dst)),
         "program references must never reach a cambox output"
     );
+
+    // issue 1345 M3a: the deployed matrix carries the Janus audiobridge edge — the phones
+    // participant is the single `janus` participant, and the `[janus]` table parsed with defaults.
+    let phones = m
+        .janus_participant()
+        .expect("a janus participant (phones) is present");
+    assert_eq!(m.participants[phones].name, "phones");
+    assert_eq!(m.participants[phones].role, "phones");
+    let j = m.janus.as_ref().expect("the [janus] table is present");
+    assert_eq!(j.room, 1000);
+    assert_eq!(j.rtp_bind, "0.0.0.0:6990");
+    assert_eq!(
+        j.room_secret_file.as_deref(),
+        Some("/etc/intercom-hub/janus-room.secret")
+    );
 }

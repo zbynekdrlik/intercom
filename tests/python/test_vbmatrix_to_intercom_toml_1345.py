@@ -102,6 +102,31 @@ def test_model_shape_and_roles():
     assert by_name["cam1"]["out_channels"] == 2
 
 
+def test_phones_is_a_janus_participant():
+    # issue 1345 M3a: the phones participant is carried over the Janus audiobridge (adapter `janus`),
+    # replacing VDO.Ninja; it is the ONLY janus participant, and only on the phones role.
+    _hub, parts, _points = _model()
+    by_name = {p["name"]: p for p in parts}
+    assert by_name["phones"]["adapter"] == "janus"
+    janus = [p for p in parts if p["adapter"] == "janus"]
+    assert [p["name"] for p in janus] == ["phones"], janus
+    # The phones leg keeps its 2-in / 2-out shape (the adapter up/down-mixes mono<->stereo).
+    assert by_name["phones"]["in_channels"] == 2
+    assert by_name["phones"]["out_channels"] == 2
+
+
+def test_janus_table_emitted_with_defaults_and_no_inlined_secret():
+    # issue 1345 M3a: the converter emits the [janus] table with defaults; the room SECRET is never
+    # inlined (the hub reads it from the 0600 room_secret_file at start).
+    data = tomllib.loads(conv.convert(_xml()))
+    j = data["janus"]
+    assert j["api_url"] == "http://127.0.0.1:8088/janus"
+    assert j["room"] == 1000
+    assert j["room_secret_file"] == "/etc/intercom-hub/janus-room.secret"
+    assert j["rtp_bind"] == "0.0.0.0:6990"
+    assert "secret" not in j, "the room secret must NEVER be inlined in the TOML"
+
+
 def test_generated_toml_parses_into_the_matrix_shape():
     data = tomllib.loads(conv.convert(_xml()))
     assert data["hub"]["sample_rate"] == 48000
