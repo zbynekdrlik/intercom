@@ -1,0 +1,17 @@
+[package]
+name = "intercom-vban"
+version.workspace = true
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "Shared VBAN codec — the one wire format for the appliance + the strih-lx intercom hub (issue 1345)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[lib]
+name = "intercom_vban"
+path = "src/lib.rs"
+
+[dependencies]
+# The codec's only dependency (moved verbatim from src/vban.rs). Pure, cross-platform — no heavy
+# deps, so the appliance's minimal dep tree is untouched when it takes this as a path dependency.
+anyhow = "1"

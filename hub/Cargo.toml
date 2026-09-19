@@ -1,0 +1,31 @@
+[package]
+name = "intercom-hub"
+version.workspace = true
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "strih-lx intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[lib]
+name = "intercom_hub"
+path = "src/lib.rs"
+
+[[bin]]
+name = "intercom-hub"
+path = "src/main.rs"
+
+[dependencies]
+# The ONE shared VBAN codec (byte-identical to the appliance's src/vban.rs re-export).
+intercom-vban = { path = "../vban" }
+# axum `ws` = the /ws live-state push; tokio `net`+`time`+`sync` = the UDP adapter + block ticker +
+# the watch channel the http layer reads (the bkshading service skeleton).
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
