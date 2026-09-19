@@ -25,6 +25,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 serde = { version = "1", features = ["derive", "rc"] }   # rc: Serialize for Arc<HubState> (the /api/state Json body)
 serde_json = "1"
 toml = "0.8"
+# The Janus HTTP API client (issue 1345 M3a). rustls-tls ONLY (never native openssl); `json` for the
+# create/attach/join/keepalive request+response bodies. The api_url default is loopback HTTP, but the
+# rustls backend lets a deployment point it at an https front without an openssl build dep.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

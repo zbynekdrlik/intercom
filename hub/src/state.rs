@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 
+use crate::janus_rtp::JanusStats;
 use crate::matrix::Matrix;
 
 /// Per-participant runtime counters, gathered from its jitter buffer + tx side each tick.
@@ -17,6 +18,8 @@ pub struct RuntimeStats {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
+    pub janus: Option<JanusStats>,
 }
 
 /// One participant's serialized state.
@@ -32,6 +35,10 @@ pub struct ParticipantState {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The Janus audiobridge facet (joined / session age / rejoins / rtp packet counts), present
+    /// only for the janus participant — omitted from the JSON for every other participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub janus: Option<JanusStats>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -64,6 +71,7 @@ impl HubState {
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
                     level_dbfs: s.level_dbfs,
+                    janus: s.janus,
                 }
             })
             .collect();
@@ -138,6 +146,7 @@ out_channels = 4
                 overruns: 0,
                 last_rx_age_ms: Some(5),
                 level_dbfs: -12.0,
+                janus: None,
             },
             RuntimeStats::default(),
         ];

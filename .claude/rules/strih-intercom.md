@@ -150,6 +150,84 @@ strih, and a second hub sending VBAN back to them is double talkback.
   heals a UNIFORMLY-stale fleet, never a MIXED one. Restoring cam1 is part of the test's cleanup,
   same as the drop-in `clear` and the hub `stop`.
 
+## M3a — the Janus audio edge (issue 1345, DONE — this lane)
+
+M3 replaces the phones' VDO.Ninja leg with a supervised **Janus audiobridge** room the hub joins as
+a plain-RTP participant. **M3a is the AUDIO edge only** (the phone PWA + TLS front = M3b, the MJPEG
+Interkom picture = M3c — both out of this lane).
+
+### Topology
+
+```
+phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ Janus WS :8188 (strih-lx)
+                                                                       │  audiobridge room "interkom" (id 1000)
+                                                          plain RTP PCMU (8 kHz, PT 0)
+                                                                       ▼
+             hub `janus_rtp` adapter (participant `phones`) ◀──▶ engine N-1 ◀──▶ vban_io (cam1–7 + program refs)
+```
+
+The hub sends the phones' N-1 mix INTO the room as PCMU and receives the room mix minus itself (=
+the phones' mics), feeding the existing engine unchanged. Janus's HTTP API stays loopback (:8088);
+only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss on the box).
+
+### The plain-RTP participant contract (pinned to the Janus AudioBridge docs)
+
+- **`join`** with `body.rtp = {ip, port, payload_type: 0}` (our `[janus].rtp_bind`). Janus answers
+  with its OWN `rtp.ip`/`rtp.port` in the `joined` reply — that is where we send our PCMU AND where
+  the room mix comes back. The pure builders/parsers live in `intercom/hub/src/janus_rtp.rs`
+  (`build_create/attach/join/configure/keepalive/leave`, `parse_success_id/joined/error`), pinned
+  in `intercom/hub/tests/janus_rtp.rs` against the documented shapes.
+- **RTP PCMU:** 12-byte header, PT 0, 160 samples / 20 ms, a fixed SSRC per run, seq + timestamp
+  continuity, the marker bit only on the first packet after start-up/silence (`RtpPacketizer`).
+- **Session lifecycle:** `create → attach(audiobridge) → join(rtp) → configure(muted:false)`,
+  keepalive < 60 s, re-join on ANY error with a bounded 1→30 s backoff (`run_janus_participant`;
+  `establish_session` is exercised against a fake-Janus axum server in `janus_session.rs`).
+- **G.711 trade-off:** µ-law is telephone-band (~3.4 kHz) talkback — the design's stability trade
+  (zero extra codec/GPU installs; every hop is Janus's own or pure Rust already in-repo). **Opus
+  upgrade path:** the `janus_rtp` PCMU leg is the seam to swap for the vendored `opus` crate if
+  quality is short — the adapter boundary and the engine stay unchanged.
+- The adapter up/down-mixes mono↔stereo, so the `phones` participant keeps its 2-in / 2-out matrix
+  shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (one-pole LP +
+  decimate/ZOH), verified against the ITU reference vectors.
+
+### Config (`[janus]` table) + the room secret
+
+`matrix.rs` gains an optional `[janus]` table (`JanusConfig`): `api_url` (default
+`http://127.0.0.1:8088/janus`), `room` (u64, default 1000), `room_secret_file` (optional path, read
+0600 at start — the value is **NEVER** in the TOML, in a log, or in an argv), `rtp_bind` (default
+`0.0.0.0:6990`). `Matrix::from_toml` accepts adapter `janus` **ONLY on role `phones`**, and at most
+ONE janus participant (a single audiobridge room). The converter
+(`scripts/vbmatrix_to_intercom_toml.py`) emits adapter `janus` for the phones participant + the
+`[janus]` table with defaults; the byte-parity fixture test is updated in the same commit (never
+hand-edit the TOML). `/api/state` gains a per-participant `janus` facet (`joined`, `session_age_s`,
+`rejoin_count`, `rx_packets`, `tx_packets`) rendered ONLY for the janus participant.
+
+### Provisioning — enable-only, never live-start
+
+`setup-strih.sh` step 14 `apt-get install -y janus`, generates the 0600 room secret with
+`openssl rand -hex 16` if absent (never printed), writes `/etc/janus/janus.plugin.audiobridge.jcfg`
+(room 1000 `interkom`, `sampling_rate = 48000`, `allow_rtp_participants = true`, `record = false`,
+the secret substituted from the file via a bash var — no argv exposure) + `janus.transport.websockets.jcfg`
+(ws :8188, no wss), and `systemctl enable janus` — **NEVER start** it (the M4 cut-over starts it
+with the hub, same rule as `intercom-hub.service`). The pure jcfg renderers live in
+`scripts/lib/strih-provision.sh` (`strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` —
+placeholder secret, never inlined — and `strih_janus_ws_jcfg_text LAN_IP`), pinned in
+`tests/strih_provision_pure_functions.rs`. `verify-strih.sh` item 17 is REPORT-ONLY (janus
+installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_room_jcfg_ok`).
+
+### Tier-0 story (M3a)
+
+- **Locally:** `cargo fmt --all --check` (parses all the new Rust), a standalone `rustc --test`
+  replica of `mulaw.rs` + the pure RTP/JSON builders (RED→GREEN), the converter pytest, `bash -n` +
+  `shellcheck -S warning` on the scripts, the doc-lazy grep, the anchor occurrence sweep, and the
+  first-compile lint hand-audit (`chunks_exact`, `Json<Arc<T>>`+serde `rc`, dead fields, checked
+  div, `too_many_arguments`, `map_or`→`is_some_and`, `redundant_locals` on a `let x = x;`).
+- **At CI (first real compile):** the `intercom-hub` job type-checks + runs the new tests
+  (`mulaw_g711`, `janus_rtp`, `janus_config`, `janus_session` — the fake-Janus tokio test —
+  + the updated `deployed_matrix`) and clippy `-D warnings` (reqwest rustls, no openssl). The
+  sourced-lib janus renderer harness runs in the appliance `test` job. Expect a Rust TYPE mistake
+  to surface at CI, not locally.
+
 ## Milestone map
 
 - **M1 (this lane):** the vban crate extraction + hub engine + VBAN adapter + converter + TOML +
@@ -159,7 +237,9 @@ strih, and a second hub sending VBAN back to them is double talkback.
   −8/−10 dB program refs into the cutters' cans only (= issue 1344, needs the MiniFuse plugged into
   strih-lx).
 - **M3:** Janus (apt) audiobridge/streaming + the phone PWA + the Interkom video (`STRIH-LX (interkom)`
-  NDI republish, issue 1347).
+  NDI republish, issue 1347). **M3a (the audio edge: `mulaw` + `janus_rtp` + `[janus]` config +
+  converter + setup/verify) is DONE** — see the "M3a — the Janus audio edge" section above; M3b (PWA
+  + TLS front) + M3c (MJPEG video) remain.
 - **M4:** the cut-over — repoint the 7 camboxes + fohabl/lv1/mbc VBAN targets to strih-lx, retire
   VB-Matrix + the OBS browser source.
 

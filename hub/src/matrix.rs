@@ -14,10 +14,15 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
-/// Adapters a participant is reached through. Only `Vban` is live in M1; `None` marks a participant
-/// declared for routing fidelity whose real I/O (PipeWire / Janus) arrives in M2/M3.
+/// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
+/// `phones` participant over the Janus audiobridge plain-RTP leg; `None` marks a participant
+/// declared for routing fidelity whose real I/O (PipeWire) arrives in M2.
 pub const ADAPTER_VBAN: &str = "vban";
 pub const ADAPTER_NONE: &str = "none";
+pub const ADAPTER_JANUS: &str = "janus";
+
+/// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
+pub const JANUS_ONLY_ROLE: &str = "phones";
 
 /// Roles a participant plays (informational + validated at load; the engine never branches on it).
 const KNOWN_ROLES: &[&str] = &[
@@ -29,6 +34,35 @@ const KNOWN_ROLES: &[&str] = &[
     "line34",
     "program_monitor",
 ];
+
+/// The Janus audiobridge edge config (the optional `[janus]` table, M3a). Absent → the hub runs the
+/// VBAN legs only; present → the single `phones` participant is carried over the audiobridge room.
+/// The room secret is NEVER inlined here — it is read from `room_secret_file` (0600) at start.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JanusConfig {
+    /// The Janus HTTP API base URL (loopback: TLS terminates on the dev1 front, not here).
+    #[serde(default = "default_janus_api_url")]
+    pub api_url: String,
+    /// The audiobridge room id the hub joins as a plain-RTP participant.
+    #[serde(default = "default_janus_room")]
+    pub room: u64,
+    /// Path to the 0600 file holding the room secret (value NEVER logged / never in the TOML).
+    #[serde(default)]
+    pub room_secret_file: Option<String>,
+    /// The local UDP `host:port` the plain-RTP leg binds (our PCMU send + the room-mix receive).
+    #[serde(default = "default_janus_rtp_bind")]
+    pub rtp_bind: String,
+}
+
+fn default_janus_api_url() -> String {
+    "http://127.0.0.1:8088/janus".to_string()
+}
+fn default_janus_room() -> u64 {
+    1000
+}
+fn default_janus_rtp_bind() -> String {
+    "0.0.0.0:6990".to_string()
+}
 
 /// Hub-wide config (the `[hub]` table).
 #[derive(Debug, Clone, Deserialize)]
@@ -102,16 +136,20 @@ pub struct Point {
 #[derive(Debug, Deserialize)]
 struct MatrixToml {
     hub: HubConfig,
+    #[serde(default)]
+    janus: Option<JanusConfig>,
     #[serde(default, rename = "participant")]
     participants: Vec<Participant>,
     #[serde(default, rename = "point")]
     points: Vec<PointToml>,
 }
 
-/// The loaded routing matrix: hub config + participants + resolved points.
+/// The loaded routing matrix: hub config + the optional Janus edge config + participants + resolved
+/// points.
 #[derive(Debug, Clone)]
 pub struct Matrix {
     pub hub: HubConfig,
+    pub janus: Option<JanusConfig>,
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
@@ -139,11 +177,13 @@ impl Matrix {
         }
 
         let mut index: HashMap<String, usize> = HashMap::new();
+        let mut janus_count = 0usize;
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
             }
-            if p.adapter != ADAPTER_VBAN && p.adapter != ADAPTER_NONE {
+            if p.adapter != ADAPTER_VBAN && p.adapter != ADAPTER_NONE && p.adapter != ADAPTER_JANUS
+            {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
             if p.adapter == ADAPTER_VBAN && p.out_stream.is_some() && p.host.is_none() {
@@ -151,6 +191,22 @@ impl Matrix {
                     "participant '{}': vban out_stream needs a host to send to",
                     p.name
                 );
+            }
+            // The Janus audiobridge leg is ONLY for the phones participant, and there is at most one
+            // (a single audiobridge room / plain-RTP participant). Fail loud otherwise (M3a).
+            if p.adapter == ADAPTER_JANUS {
+                if p.role != JANUS_ONLY_ROLE {
+                    bail!(
+                        "participant '{}': adapter 'janus' is only allowed on role '{}' (got '{}')",
+                        p.name,
+                        JANUS_ONLY_ROLE,
+                        p.role
+                    );
+                }
+                janus_count += 1;
+                if janus_count > 1 {
+                    bail!("at most one 'janus' participant is allowed (one audiobridge room)");
+                }
             }
             if index.insert(p.name.clone(), id).is_some() {
                 bail!("duplicate participant name '{}'", p.name);
@@ -200,6 +256,7 @@ impl Matrix {
 
         Ok(Matrix {
             hub: raw.hub,
+            janus: raw.janus,
             participants: raw.participants,
             index,
             points,
@@ -209,6 +266,13 @@ impl Matrix {
     /// The participant id for a name, if any.
     pub fn id_of(&self, name: &str) -> Option<usize> {
         self.index.get(name).copied()
+    }
+
+    /// The id of the single `janus`-adapter participant (the phones leg), if one is declared.
+    pub fn janus_participant(&self) -> Option<usize> {
+        self.participants
+            .iter()
+            .position(|p| p.adapter == ADAPTER_JANUS)
     }
 
     /// Map of VBAN input stream name → participant id (for the receiver's demux). Only participants

@@ -28,6 +28,8 @@ const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
 const JITTER_CAP_BLOCKS: usize = 8;
 /// How often the output hosts are re-resolved off the hot path (DHCP lease moves).
 const OUTPUT_RESOLVE_REFRESH_S: u64 = 60;
+/// The fixed RTP SSRC of the hub's Janus plain-RTP leg ("STRL"), stable for a run (M3a).
+const JANUS_SSRC: u32 = 0x5354_524C;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -130,6 +132,61 @@ async fn main() -> Result<()> {
             .collect(),
     ));
 
+    // --- Janus audiobridge edge (issue 1345 M3a): the phones participant's plain-RTP leg ---------
+    // When the matrix declares a `janus` participant AND a `[janus]` table, spawn the adapter task:
+    // it establishes the HTTP session, sends the phones' N-1 mix as PCMU (fed by the block loop over
+    // an mpsc), and pushes the received room mix into the phones jitter buffer the engine already
+    // pops. A dropped mix block on backpressure is tolerable talkback jitter. Never started from a
+    // dev lane (the live Janus is the M4/supervisor step); absent config = the VBAN-only hub.
+    let mut janus_mix_tx: Option<tokio::sync::mpsc::Sender<Vec<i16>>> = None;
+    let janus_report: Option<(usize, Arc<intercom_hub::janus_rtp::JanusSharedStats>)> = match (
+        matrix.janus_participant(),
+        matrix.janus.clone(),
+    ) {
+        (Some(pid), Some(jcfg)) => {
+            // The room secret is read from its 0600 file and NEVER logged.
+            let secret = match &jcfg.room_secret_file {
+                Some(path) => match std::fs::read_to_string(path) {
+                    Ok(s) => Some(s.trim().to_string()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "janus: room_secret_file unreadable — joining without a secret");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let rtp_bind: SocketAddr = jcfg
+                .rtp_bind
+                .parse()
+                .with_context(|| format!("invalid janus rtp_bind '{}'", jcfg.rtp_bind))?;
+            let rt = intercom_hub::janus_rtp::JanusRuntimeConfig {
+                api_url: jcfg.api_url.clone(),
+                room: jcfg.room,
+                secret,
+                rtp_bind,
+                display: "strih-lx-hub".to_string(),
+            };
+            let stats = Arc::new(intercom_hub::janus_rtp::JanusSharedStats::default());
+            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+            janus_mix_tx = Some(tx);
+            tokio::spawn(intercom_hub::janus_rtp::run_janus_participant(
+                rt,
+                JANUS_SSRC,
+                rx,
+                jitter.clone(),
+                pid,
+                stats.clone(),
+            ));
+            tracing::info!(
+                room = jcfg.room,
+                participant = pid,
+                "janus: audiobridge adapter enabled for the phones participant"
+            );
+            Some((pid, stats))
+        }
+        _ => None,
+    };
+
     // Seed the live channel so a client connecting before the first tick sees current state.
     let initial = Arc::new(HubState::snapshot(
         &matrix,
@@ -168,6 +225,8 @@ async fn main() -> Result<()> {
         let engine = engine.clone();
         let matrix = matrix.clone();
         let out_addrs = out_addrs.clone();
+        // `janus_mix_tx` + `janus_report` are captured by the `async move` below (the block loop is
+        // their sole feeder + facet reader); nothing uses them after this spawn.
         let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
         // Status push cadence: ~1 s worth of blocks.
         let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
@@ -199,6 +258,16 @@ async fn main() -> Result<()> {
                 }
 
                 let output = engine.mix_block(&input, block_frames);
+
+                // Feed the phones participant's mixed output into the Janus adapter (M3a). Best-effort
+                // try_send: a dropped 20 ms block on backpressure is tolerable talkback jitter, never
+                // a reason to block the mix loop.
+                if let (Some(tx), Some((pid, _))) = (&janus_mix_tx, &janus_report) {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
 
                 // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
                 let addrs: Vec<Option<SocketAddr>> =
@@ -232,6 +301,12 @@ async fn main() -> Result<()> {
                 if cycle.is_multiple_of(status_every as u64) {
                     for (id, s) in rx_stats.iter_mut().enumerate() {
                         s.tx_packets = tx_packets[id];
+                    }
+                    // Attach the Janus facet to the phones participant's stats (M3a).
+                    if let Some((pid, jstats)) = &janus_report {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.janus = Some(jstats.snapshot());
+                        }
                     }
                     let snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
                     tracing::info!("{}", snapshot.status_line());
