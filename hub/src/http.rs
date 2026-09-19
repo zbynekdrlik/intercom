@@ -288,9 +288,10 @@ async fn mjpeg_pump(video: Arc<VideoState>, tx: mpsc::Sender<Result<Bytes, std::
     loop {
         tokio::time::sleep(poll).await;
         let now = now_ms();
-        let counter = video.frame_counter();
-        if counter > 0 && last_sent != Some(counter) {
-            if let Some(jpeg) = video.latest_frame() {
+        // Read the frame + its counter as ONE paired snapshot (VideoState::latest) so the counter we
+        // record always matches the frame we sent — avoids re-sending a frame as a duplicate part.
+        if let Some((jpeg, counter)) = video.latest() {
+            if last_sent != Some(counter) {
                 if tx.send(Ok(Bytes::from(mjpeg_part(&jpeg)))).await.is_err() {
                     return; // client gone
                 }
