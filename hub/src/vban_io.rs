@@ -265,6 +265,19 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn resolve_vban_addr_is_a_one_shot_lookup_with_the_vban_port() {
+        // M1b live finding (19.9.2026): a `ToSocketAddrs` STRING on the per-block send path meant one
+        // synchronous getaddrinfo per 5.33 ms block (~20 ms via systemd-resolved on strih-lx), which
+        // halved the hub's send rate and overran every jitter buffer. Destinations are resolved once,
+        // off the hot path, into a SocketAddr.
+        let a = resolve_vban_addr("127.0.0.1", intercom_vban::VBAN_PORT).expect("literal resolves");
+        assert_eq!(a.ip().to_string(), "127.0.0.1");
+        assert_eq!(a.port(), intercom_vban::VBAN_PORT);
+        // An unresolvable/empty host is None (the caller keeps its last-known-good address), never a panic.
+        assert!(resolve_vban_addr("", intercom_vban::VBAN_PORT).is_none());
+    }
+
+    #[test]
     fn encode_decode_roundtrip_planar() {
         // Stereo interleaved L,R per frame.
         let interleaved: Vec<i16> = vec![1, -1, 2, -2, 3, -3, 4, -4];
