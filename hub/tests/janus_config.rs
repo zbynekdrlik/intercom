@@ -142,6 +142,44 @@ out_ch = 1
 }
 
 #[test]
+fn janus_adapter_requires_two_in_two_out_channels() {
+    // The mono<->stereo up/down-mix assumes 2/2; a 1-channel janus participant must be refused
+    // rather than silently mangle the mix (F4).
+    let bad = r#"
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "phones"
+role = "phones"
+adapter = "janus"
+in_channels = 1
+out_channels = 1
+
+[[participant]]
+name = "cam1"
+role = "cambox"
+adapter = "vban"
+host = "cam1.lan"
+in_stream = "cam1"
+out_stream = "cam1"
+in_channels = 2
+out_channels = 2
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "phones"
+out_ch = 1
+"#;
+    let err = Matrix::from_toml(bad).unwrap_err().to_string();
+    assert!(err.contains("requires 2 in / 2 out"), "got: {err}");
+}
+
+#[test]
 fn janus_table_defaults_when_absent_or_empty() {
     // No [janus] table -> None (a VBAN-only hub).
     let m = Matrix::from_toml(&toml_with_phones("none", "")).unwrap();

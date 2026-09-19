@@ -121,7 +121,7 @@ pub fn upsample_8k_to_48k(input: &[i16]) -> Vec<i16> {
 }
 
 /// Down-mix an interleaved stereo PCM16 block (L,R,L,R,…) to mono by averaging each L/R pair. A
-/// trailing odd sample (a malformed block) is passed through as-is.
+/// trailing odd sample (a malformed block) is DROPPED, so the function never panics.
 pub fn stereo_to_mono(interleaved: &[i16]) -> Vec<i16> {
     let mut out = Vec::with_capacity(interleaved.len() / 2);
     let mut i = 0;

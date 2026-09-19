@@ -203,6 +203,17 @@ impl Matrix {
                         p.role
                     );
                 }
+                // The janus adapter's plain-RTP leg carries MONO PCMU, up/down-mixed to/from the
+                // engine's STEREO block — that mono<->stereo conversion assumes exactly 2 channels
+                // each way, so refuse any other channel count rather than silently mangle the mix.
+                if p.in_channels != 2 || p.out_channels != 2 {
+                    bail!(
+                        "participant '{}': adapter 'janus' requires 2 in / 2 out channels (mono<->stereo), got {} in / {} out",
+                        p.name,
+                        p.in_channels,
+                        p.out_channels
+                    );
+                }
                 janus_count += 1;
                 if janus_count > 1 {
                     bail!("at most one 'janus' participant is allowed (one audiobridge room)");

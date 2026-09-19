@@ -524,21 +524,37 @@ pub async fn run_janus_participant(
             }
         };
 
-        // configure (unmuted) — best-effort; a failure just re-establishes.
+        // configure (unmuted). A transport error OR a Janus error in the response body (Janus can
+        // answer HTTP 200 with `{"janus":"error",…}`) re-establishes WITH the bounded backoff — a
+        // bare `continue` here would bypass the backoff (F2) and, if configure alone keeps failing
+        // while create/attach/join succeed, spin create→attach→join at RTT and orphan a session
+        // each pass.
         let session_url = format!(
             "{}/{}",
             cfg.api_url.trim_end_matches('/'),
             session.session_id
         );
         let handle_url = format!("{session_url}/{}", session.handle_id);
-        if let Err(e) = client
+        let configure_err: Option<String> = match client
             .post(&handle_url)
             .json(&build_configure("configure", false))
             .send()
             .await
         {
-            tracing::warn!(error = %e, "janus: configure failed — re-establishing");
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(v) => {
+                    parse_error(&v).map(|e| format!("configure error {}: {}", e.code, e.reason))
+                }
+                Err(e) => Some(format!("configure decode: {e}")),
+            },
+            Err(e) => Some(format!("configure POST: {e}")),
+        };
+        if let Some(msg) = configure_err {
+            tracing::warn!(error = %msg, backoff_s = backoff.as_secs(), "janus: configure failed — backing off");
             stats.mark_left();
+            stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(BACKOFF_MAX);
             continue;
         }
 
@@ -593,9 +609,20 @@ pub async fn run_janus_participant(
                     }
                 }
                 _ = keepalive.tick() => {
-                    if let Err(e) = client.post(&session_url).json(&build_keepalive("keepalive")).send().await {
-                        tracing::warn!(error = %e, "janus: keepalive failed — re-establishing");
-                        break 'io false;
+                    // A keepalive that returns a Janus error body (e.g. "No such session", HTTP 200)
+                    // is how a Janus-side session teardown is detected within one keepalive period —
+                    // otherwise the hub would keep sending PCMU into a dead session (F3).
+                    match client.post(&session_url).json(&build_keepalive("keepalive")).send().await {
+                        Ok(resp) => match resp.json::<Value>().await {
+                            Ok(v) => {
+                                if let Some(e) = parse_error(&v) {
+                                    tracing::warn!(code = e.code, reason = %e.reason, "janus: keepalive returned an error — re-establishing");
+                                    break 'io false;
+                                }
+                            }
+                            Err(e) => { tracing::warn!(error = %e, "janus: keepalive decode failed — re-establishing"); break 'io false; }
+                        },
+                        Err(e) => { tracing::warn!(error = %e, "janus: keepalive failed — re-establishing"); break 'io false; }
                     }
                 }
             }
