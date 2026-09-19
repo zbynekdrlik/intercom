@@ -15,6 +15,15 @@ RestartSec=5
 # Journal captures the periodic `intercom-hub: status …` line (levels/underruns) a dev1 watchdog reads.
 StandardOutput=journal
 StandardError=journal
+# Production-by-default hardening: the hub needs no root (it binds only the unprivileged UDP :6980
+# + TCP panel port and reads its world-readable config), so run it as a transient dedicated user
+# and sandbox it. These directives intentionally do NOT restrict address families / DNS, so the
+# VBAN + camN.lan resolution the live bring-up (M1b/M4) exercises is untouched.
+DynamicUser=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=default.target

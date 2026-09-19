@@ -164,7 +164,10 @@ def build_model(xml_text):
                 "dst": slot_to_part[so],
                 "out_ch": int(e.get("out")),
                 "gain_db": float(e.get("dBGain")),
-                "mute": e.get("mute") != "0",
+                # A point is muted ONLY when it explicitly says so (`mute='1'`); an absent/`'0'`
+                # attribute means routed (never treat a missing attribute as MUTED — that would
+                # silently DROP the point, inverting the converter's fail-loud ethos).
+                "mute": e.get("mute") == "1",
             }
         )
 

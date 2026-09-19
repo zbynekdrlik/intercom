@@ -174,8 +174,8 @@ impl JitterBuffer {
     }
 
     /// Pop one block of `frames` frames as planar channels, padding any short channel with silence
-    /// and counting ONE underrun if any channel was short. A buffer that has never received a
-    /// packet returns silence (and one underrun).
+    /// and counting ONE underrun if a PREVIOUSLY-LIVE stream ran short. A buffer that has never
+    /// received a packet returns silence WITHOUT counting an underrun (see the guard below).
     pub fn pop_block(&mut self, frames: usize) -> Vec<Vec<i16>> {
         let n_ch = self.channels.len().max(1);
         let mut out = Vec::with_capacity(n_ch);
@@ -196,7 +196,11 @@ impl JitterBuffer {
             }
             out.push(ch);
         }
-        if short {
+        // Count an underrun ONLY for a stream that was previously LIVE and ran dry — never for a
+        // buffer that has NEVER received a packet (a not-yet-connected vban leg, or an M1
+        // `adapter="none"` participant that never receives VBAN at all). Otherwise every such
+        // participant would emit an underrun every block and swamp the watchdog status line.
+        if short && self.last_rx.is_some() {
             self.underruns += 1;
         }
         out
@@ -308,6 +312,24 @@ mod tests {
         let block2 = jb.pop_block(256);
         assert_eq!(block2[0], full);
         assert_eq!(jb.underruns, 1); // unchanged
+    }
+
+    #[test]
+    fn jitter_never_received_pops_silence_without_underrun() {
+        // A participant that never gets a packet (an M1 adapter="none" leg, or a not-yet-connected
+        // vban leg) must NOT accrue an underrun every block — else it swamps the watchdog line.
+        let mut jb = JitterBuffer::new(4096);
+        for _ in 0..5 {
+            let block = jb.pop_block(256);
+            assert_eq!(block.len(), 1);
+            assert!(block[0].iter().all(|&s| s == 0));
+        }
+        assert_eq!(
+            jb.underruns, 0,
+            "a never-received buffer must not count underruns"
+        );
+        assert_eq!(jb.rx_packets, 0);
+        assert_eq!(jb.last_rx_age_ms(), None);
     }
 
     #[test]

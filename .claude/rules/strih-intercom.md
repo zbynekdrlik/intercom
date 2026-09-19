@@ -93,6 +93,20 @@ cut-over. So:
 - **M4:** the cut-over — repoint the 7 camboxes + fohabl/lv1/mbc VBAN targets to strih-lx, retire
   VB-Matrix + the OBS browser source.
 
+## Gotchas folded from the M1 review
+
+- **Jitter underruns count ONLY for a previously-LIVE stream that ran dry** (`vban_io.rs::pop_block`
+  guards on `last_rx.is_some()`). A buffer that has NEVER received a packet — an `adapter="none"`
+  participant, an unrouted program ref, or a vban leg before startup — pops silence with NO
+  underrun, so the watchdog status line isn't swamped by ~1 phantom underrun/participant/block.
+- **`mbc` is a declared-but-unrouted `program_ref`** (`in_channels=0`/`out_channels=0`): the captured
+  VB-Matrix routes fohabl + lv1 as program refs but not mbc, and the parity test pins that fidelity.
+  If mbc should carry program audio, re-capture the VB-Matrix XML when it is active, then regenerate.
+- **The deployed matrix is load-tested through the REAL `Matrix::from_toml`** (not just tomllib) by
+  `intercom/hub/tests/deployed_matrix.rs` (`include_str!("../../intercom.strih-lx.toml")`) — so a
+  future converter/XML change that produces a byte-parity-passing but daemon-REJECTED TOML fails at
+  CI, not at rig startup. Keep that test's expected shape (15 participants / 216 points) in sync.
+
 ## Tier-0 (issue 557) — what verifies locally vs at CI
 
 - **Locally:** `cargo fmt --all --check` (parses all the new Rust), the converter pytest, `python3 -c
