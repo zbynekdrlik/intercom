@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Interkom">
+  <rect width="64" height="64" rx="12" fill="#14171c"/>
+  <path d="M 12.8 34.56 A 19.2 19.2 0 0 1 51.2 34.56" fill="none" stroke="#4f9dff" stroke-width="4.16"/>
+  <rect x="8.7" y="31.5" width="10.9" height="20.5" rx="4" fill="#262c36"/>
+  <rect x="44.4" y="31.5" width="10.9" height="20.5" rx="4" fill="#262c36"/>
+  <circle cx="16.3" cy="35.8" r="1.6" fill="#e7ecf2"/>
+  <circle cx="47.7" cy="35.8" r="1.6" fill="#e7ecf2"/>
+</svg>

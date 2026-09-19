@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Interkom — telefón kameramana</title>
+  <link rel="stylesheet" href="/style.css" />
+  <!-- issue 1345 M3b: installable phone web app (PWA). The manifest + service worker (registered
+       in app.js) let the phone install this page as a windowed app with its own icon. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#14171c" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">Interkom</h1>
+    <!-- version-on-dashboard: the hub injects its version here at serve time. -->
+    <span id="app-version" class="app-version" data-role="version" data-testid="version">v{{VERSION}}</span>
+  </header>
+
+  <!-- The Interkom monitor picture (issue 1347 / M3c serves /interkom.mjpeg). Until that route
+       exists the picture stays hidden and the placeholder shows; app.js only sets the <img> src
+       once the hub is reachable, and retries every 5 s. -->
+  <div class="picture-wrap" data-role="picture-wrap">
+    <img id="interkom" class="picture" data-role="picture" alt="Interkom obraz" hidden />
+    <div id="picture-placeholder" class="picture-placeholder" data-role="picture-placeholder">
+      Obraz zatiaľ nie je k dispozícii
+    </div>
+  </div>
+
+  <!-- The ONE big primary action: the tap that grants autoplay + is the getUserMedia gesture.
+       After connecting it turns into a Disconnect button (app.js toggles the label/state). -->
+  <button type="button" id="connect-btn" class="btn btn-primary" data-role="connect">Pripojiť</button>
+
+  <!-- The rare mic control. Default OFF (muted); turns red when ON. -->
+  <div class="mic-row">
+    <label class="mic-select-label" for="mic-select">Mikrofón (vstup)</label>
+    <select id="mic-select" class="mic-select" data-role="mic-select" aria-label="Výber mikrofónu">
+      <option value="">Predvolený mikrofón</option>
+    </select>
+    <button type="button" id="mic-toggle" class="btn btn-mic" data-role="mic-toggle"
+            aria-pressed="false" data-muted="true">Mikrofón vypnutý</button>
+  </div>
+
+  <!-- The short display name, typed once and remembered in localStorage. -->
+  <div class="name-row">
+    <label class="name-label" for="name-input">Meno</label>
+    <input type="text" id="name-input" class="name-input" data-role="name" maxlength="24"
+           placeholder="napr. Kamera 1" autocomplete="off" />
+  </div>
+
+  <!-- Status chips: hub, Janus, zvuk (bytes received climbing), obraz (frame age). Every
+       fetch/WS failure is shown here, never thrown to the console. -->
+  <div class="chips" data-role="chips">
+    <span class="chip" id="chip-hub" data-role="chip-hub" data-state="wait">Hub: spájam…</span>
+    <span class="chip" id="chip-janus" data-role="chip-janus" data-state="idle">Janus: nepripojené</span>
+    <span class="chip" id="chip-audio" data-role="chip-audio" data-state="idle">Zvuk: —</span>
+    <span class="chip" id="chip-picture" data-role="chip-picture" data-state="wait">Obraz: čakám…</span>
+  </div>
+
+  <!-- The remote intercom audio sink. Autoplay + playsinline so iOS Safari plays it after the
+       "Pripojiť" gesture without opening a full-screen player. -->
+  <audio id="remote-audio" data-role="remote-audio" autoplay playsinline></audio>
+
+  <script src="/janus.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
