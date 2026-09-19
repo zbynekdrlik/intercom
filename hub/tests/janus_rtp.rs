@@ -115,6 +115,12 @@ fn build_join_plain_rtp_participant_shape() {
     assert_eq!(body["rtp"]["ip"], "10.77.9.203");
     assert_eq!(body["rtp"]["port"], 6990);
     assert_eq!(body["rtp"]["payload_type"], PCMU_PAYLOAD_TYPE);
+    // Live finding (strih-lx Janus 1.1.2, 19.9.2026): the plain-RTP leg's CODEC is chosen by the
+    // top-level `codec` field of the join request, NOT by `rtp.payload_type` -- without it Janus
+    // defaults the participant to Opus (its `joined` reply carried payload_type 100) and silently
+    // discards the PCMU the hub sends (hub rx stayed 0 while a second participant was mixing). With
+    // `"codec":"pcmu"` Janus answers payload_type 0 and PCMU flows both ways.
+    assert_eq!(body["codec"], "pcmu");
     // No secret/pin keys when not supplied.
     assert!(body.get("secret").is_none());
     assert!(body.get("pin").is_none());
