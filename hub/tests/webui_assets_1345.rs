@@ -21,9 +21,9 @@ fn pwa_manifest_is_installable_standalone() {
     assert!(srcs.contains(&"/icon-192.png"), "192 icon listed");
     assert!(srcs.contains(&"/icon-512.png"), "512 icon listed");
     assert!(
-        icons
-            .iter()
-            .any(|i| i["purpose"].as_str().is_some_and(|p| p.contains("maskable"))),
+        icons.iter().any(|i| i["purpose"]
+            .as_str()
+            .is_some_and(|p| p.contains("maskable"))),
         "a maskable icon entry is present"
     );
     assert_eq!(http::MANIFEST_CONTENT_TYPE, "application/manifest+json");
@@ -32,8 +32,14 @@ fn pwa_manifest_is_installable_standalone() {
 #[test]
 fn pwa_service_worker_is_passthrough_no_cache() {
     let sw = http::sw_js_asset();
-    assert!(!sw.contains("caches"), "sw.js must not use the Cache Storage API");
-    assert!(sw.contains("fetch(event.request)"), "sw.js is a pure passthrough");
+    assert!(
+        !sw.contains("caches"),
+        "sw.js must not use the Cache Storage API"
+    );
+    assert!(
+        sw.contains("fetch(event.request)"),
+        "sw.js is a pure passthrough"
+    );
     assert_eq!(http::SW_JS_CONTENT_TYPE, "text/javascript; charset=utf-8");
 }
 
@@ -47,7 +53,10 @@ fn pwa_icons_are_png_and_favicon_is_svg() {
         http::icon_512_asset().starts_with(b"\x89PNG\r\n\x1a\n"),
         "icon-512 is a PNG"
     );
-    assert!(http::favicon_svg_asset().contains("<svg"), "favicon is an SVG");
+    assert!(
+        http::favicon_svg_asset().contains("<svg"),
+        "favicon is an SVG"
+    );
     assert_eq!(http::PNG_CONTENT_TYPE, "image/png");
     assert_eq!(http::SVG_CONTENT_TYPE, "image/svg+xml");
 }
@@ -56,18 +65,36 @@ fn pwa_icons_are_png_and_favicon_is_svg() {
 fn index_is_the_pwa_and_injects_the_version() {
     let html = http::rendered_index();
     // The placeholder must be substituted (version-on-dashboard reads it straight from the DOM).
-    assert!(!html.contains("{{VERSION}}"), "the version placeholder is substituted");
-    assert!(html.contains("/manifest.webmanifest"), "the PWA index links the manifest");
-    assert!(html.contains("data-role=\"connect\""), "the connect gesture button is present");
-    assert!(html.contains("id=\"interkom\""), "the Interkom picture <img> is present");
-    assert!(html.contains("/janus.js"), "the vendored janus.js is loaded");
+    assert!(
+        !html.contains("{{VERSION}}"),
+        "the version placeholder is substituted"
+    );
+    assert!(
+        html.contains("/manifest.webmanifest"),
+        "the PWA index links the manifest"
+    );
+    assert!(
+        html.contains("data-role=\"connect\""),
+        "the connect gesture button is present"
+    );
+    assert!(
+        html.contains("id=\"interkom\""),
+        "the Interkom picture <img> is present"
+    );
+    assert!(
+        html.contains("/janus.js"),
+        "the vendored janus.js is loaded"
+    );
 }
 
 #[test]
 fn app_and_janus_assets_are_served_with_js_type() {
     let app = http::app_js_asset();
     assert!(app.contains("audiobridge"), "app.js drives the audiobridge");
-    assert!(app.contains("/janus"), "app.js uses the path-relative /janus WS endpoint");
+    assert!(
+        app.contains("/janus"),
+        "app.js uses the path-relative /janus WS endpoint"
+    );
     assert!(app.contains("muted: true"), "app.js joins muted");
     // The vendored library keeps its MIT header.
     assert!(
@@ -80,8 +107,12 @@ fn app_and_janus_assets_are_served_with_js_type() {
 }
 
 #[test]
-fn version_and_state_routes_are_still_declared() {
-    // A cheap guard that the M1 observability API is preserved alongside the new PWA routes: the
-    // router builds without panicking and the const version is populated.
-    assert!(!http::pkg_version().is_empty(), "the hub version const is populated");
+fn hub_version_const_is_populated() {
+    // The version-on-dashboard surface (`/api/version` + the DOM) reads this const; the M1
+    // observability API (`/api/version`, `/api/state`, `/ws`) is otherwise exercised by the M1
+    // tests in `http.rs` and remains declared in `router()` alongside the new PWA routes.
+    assert!(
+        !http::pkg_version().is_empty(),
+        "the hub version const is populated"
+    );
 }
