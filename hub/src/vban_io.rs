@@ -40,19 +40,29 @@ impl DecodedAudio {
 
 /// Encode an interleaved PCM16 block as a VBAN packet, byte-identical to what `src/intercom.rs`
 /// puts on the wire (header via the shared codec + little-endian i16 payload).
-pub fn encode_packet(
-    stream_name: &str,
-    sample_rate: u32,
-    channels: u8,
-    frame_counter: u32,
-    interleaved: &[i16],
-    frames: usize,
-) -> Result<Vec<u8>> {
-    let mut header = VbanHeader::new(stream_name, sample_rate, channels, VbanCodec::Pcm16)?;
-    header.frame_counter = frame_counter;
-    let mut packet = header.encode(frames).to_vec();
-    packet.reserve(interleaved.len() * 2);
-    for &s in interleaved {
+/// One outgoing VBAN audio block: the header fields plus the interleaved PCM16 payload (`frames`
+/// frames × `channels`). Borrowed, so a per-tick send allocates nothing beyond the packet itself.
+#[derive(Debug, Clone, Copy)]
+pub struct OutBlock<'a> {
+    pub stream_name: &'a str,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub frame_counter: u32,
+    pub interleaved: &'a [i16],
+    pub frames: usize,
+}
+
+pub fn encode_packet(block: &OutBlock<'_>) -> Result<Vec<u8>> {
+    let mut header = VbanHeader::new(
+        block.stream_name,
+        block.sample_rate,
+        block.channels,
+        VbanCodec::Pcm16,
+    )?;
+    header.frame_counter = block.frame_counter;
+    let mut packet = header.encode(block.frames).to_vec();
+    packet.reserve(block.interleaved.len() * 2);
+    for &s in block.interleaved {
         packet.extend_from_slice(&s.to_le_bytes());
     }
     Ok(packet)
@@ -85,11 +95,7 @@ pub fn decode_packet(data: &[u8]) -> Result<DecodedAudio> {
         other => anyhow::bail!("unsupported VBAN codec 0x{other:02x} (only PCM16/Float32)"),
     };
 
-    let frames = if n_ch == 0 {
-        0
-    } else {
-        interleaved.len() / n_ch
-    };
+    let frames = interleaved.len().checked_div(n_ch).unwrap_or(0);
     let mut channels = vec![Vec::with_capacity(frames); n_ch];
     for (i, &s) in interleaved.iter().enumerate() {
         if n_ch == 0 {
@@ -245,25 +251,9 @@ impl VbanSender {
         })
     }
 
-    /// Send one interleaved PCM16 block as a VBAN packet named `stream_name` to `addr` (`host:port`).
-    pub fn send_block<A: ToSocketAddrs>(
-        &self,
-        addr: A,
-        stream_name: &str,
-        sample_rate: u32,
-        channels: u8,
-        frame_counter: u32,
-        interleaved: &[i16],
-        frames: usize,
-    ) -> Result<()> {
-        let packet = encode_packet(
-            stream_name,
-            sample_rate,
-            channels,
-            frame_counter,
-            interleaved,
-            frames,
-        )?;
+    /// Send one interleaved PCM16 [`OutBlock`] as a VBAN packet to `addr` (`host:port`).
+    pub fn send_block<A: ToSocketAddrs>(&self, addr: A, block: &OutBlock<'_>) -> Result<()> {
+        let packet = encode_packet(block)?;
         self.socket.send_to(&packet, addr)?;
         Ok(())
     }
@@ -279,7 +269,15 @@ mod tests {
         // Stereo interleaved L,R per frame.
         let interleaved: Vec<i16> = vec![1, -1, 2, -2, 3, -3, 4, -4];
         let frames = 4;
-        let pkt = encode_packet("cam5", 48000, 2, 7, &interleaved, frames).unwrap();
+        let pkt = encode_packet(&OutBlock {
+            stream_name: "cam5",
+            sample_rate: 48000,
+            channels: 2,
+            frame_counter: 7,
+            interleaved: &interleaved,
+            frames,
+        })
+        .unwrap();
         let audio = decode_packet(&pkt).unwrap();
         assert_eq!(audio.stream_name, "cam5");
         assert_eq!(audio.frames, 4);
@@ -373,11 +371,23 @@ mod tests {
 
         let sender = VbanSender::bind_ephemeral().unwrap();
         let interleaved: Vec<i16> = (0..256 * 2).map(|i| i as i16).collect();
+        let known_block = OutBlock {
+            stream_name: "cam1",
+            sample_rate: 48000,
+            channels: 2,
+            frame_counter: 0,
+            interleaved: &interleaved,
+            frames: 256,
+        };
+        sender.send_block(addr, &known_block).unwrap();
         sender
-            .send_block(addr, "cam1", 48000, 2, 0, &interleaved, 256)
-            .unwrap();
-        sender
-            .send_block(addr, "cam9", 48000, 2, 0, &interleaved, 256)
+            .send_block(
+                addr,
+                &OutBlock {
+                    stream_name: "cam9",
+                    ..known_block
+                },
+            )
             .unwrap();
 
         let mut buf = [0u8; 8192];

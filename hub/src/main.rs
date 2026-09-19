@@ -19,7 +19,7 @@ use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
-use intercom_hub::vban_io::{route_packet, JitterBuffer, VbanSender};
+use intercom_hub::vban_io::{route_packet, JitterBuffer, OutBlock, VbanSender};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
                 cycle = cycle.wrapping_add(1);
 
                 // Pop one block per participant + gather rx stats under the lock.
-                let mut input = InputBlock::silent(n, block_frames);
+                let mut input = InputBlock::silent(n);
                 let mut rx_stats = vec![RuntimeStats::default(); n];
                 if let Ok(mut jb) = jitter.lock() {
                     for (id, b) in jb.iter_mut().enumerate() {
@@ -156,15 +156,15 @@ async fn main() -> Result<()> {
                     let chans = matrix.participants[*id].out_channels.max(1) as u8;
                     let interleaved = output.interleaved(*id, block_frames);
                     frame_counter[*id] = frame_counter[*id].wrapping_add(1);
-                    match sender.send_block(
-                        (host.as_str(), intercom_vban::VBAN_PORT),
-                        stream,
+                    let block = OutBlock {
+                        stream_name: stream,
                         sample_rate,
-                        chans,
-                        frame_counter[*id],
-                        &interleaved,
-                        block_frames,
-                    ) {
+                        channels: chans,
+                        frame_counter: frame_counter[*id],
+                        interleaved: &interleaved,
+                        frames: block_frames,
+                    };
+                    match sender.send_block((host.as_str(), intercom_vban::VBAN_PORT), &block) {
                         Ok(()) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
                         Err(e) => {
                             tracing::debug!(target: "vban_send", %stream, %host, error=%e, "VBAN send failed")

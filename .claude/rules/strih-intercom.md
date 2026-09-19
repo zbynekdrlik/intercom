@@ -150,3 +150,13 @@ strih, and a second hub sending VBAN back to them is double talkback.
   (matrix/engine/vban_io/state/http, incl. the random-port VBAN loopback) + the moved codec tests;
   the appliance `test` job runs `tests/intercom_hub_provisioning.rs` (the static anchors). Expect a
   Rust TYPE mistake to surface at CI, not locally.
+- **What the first compile actually caught (19.9.2026, three CI rounds — hand-audit these BEFORE the
+  next new crate lands):** (1) `chunks_exact(N)` with a constant N → the Rust 1.98 deny lint
+  `chunks_exact_to_as_chunks` (use `as_chunks::<N>().0.iter()` + `from_le_bytes(*c)`; bkshading.md
+  lists the same trap); (2) an axum handler returning `Json<Arc<T>>` fails the `Handler` bound
+  (E0277) unless serde's **`rc`** feature is on — serde has no `Serialize for Arc<T>` otherwise;
+  (3) clippy `-D warnings` on the hub: a struct field only ever WRITTEN (`dead_code`), `if n == 0 {0}
+  else {a / n}` (manual checked division → `a.checked_div(n).unwrap_or(0)`), and a fn with 8 params
+  incl. `self` (`too_many_arguments`, cap 7 → group them in a borrowed `OutBlock<'_>` struct, not an
+  `#[allow]`). A lib lint stops clippy before the bin/tests are linted, so each round can reveal a
+  NEW layer — audit main.rs + tests with the same list rather than waiting for the next round.

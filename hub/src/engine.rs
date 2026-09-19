@@ -16,15 +16,14 @@ use crate::matrix::Matrix;
 #[derive(Debug, Clone)]
 pub struct InputBlock {
     per_participant: Vec<Vec<Vec<i16>>>,
-    frames: usize,
 }
 
 impl InputBlock {
-    /// An all-silent input block for `n` participants of `frames` frames each.
-    pub fn silent(n: usize, frames: usize) -> Self {
+    /// An all-silent input block for `n` participants (the block length is the mixer's `frames`
+    /// argument — a block carries no length of its own; short/long channels are tolerated at mix time).
+    pub fn silent(n: usize) -> Self {
         InputBlock {
             per_participant: vec![Vec::new(); n],
-            frames,
         }
     }
 
@@ -229,7 +228,7 @@ out_ch = 1
             engine.matrix().id_of("p3").unwrap(),
         );
         let frames = 4;
-        let mut input = InputBlock::silent(engine.participant_count(), frames);
+        let mut input = InputBlock::silent(engine.participant_count());
         // Distinct constant tones so a leak is obvious.
         input.set(p1, vec![vec![100, 100, 100, 100]]);
         input.set(p2, vec![vec![200, 200, 200, 200]]);
@@ -256,7 +255,7 @@ out_ch = 1
             engine.matrix().id_of("p3").unwrap(),
         );
         let frames = 4;
-        let mut input = InputBlock::silent(engine.participant_count(), frames);
+        let mut input = InputBlock::silent(engine.participant_count());
         input.set(p2, vec![vec![10, 10, 10, 10]]);
         input.set(p3, vec![vec![20, 20, 20, 20]]);
         let out = engine.mix_block(&input, frames);
@@ -274,7 +273,7 @@ out_ch = 1
             engine.matrix().id_of("p3").unwrap(),
         );
         let frames = 2;
-        let mut input = InputBlock::silent(engine.participant_count(), frames);
+        let mut input = InputBlock::silent(engine.participant_count());
         input.set(p2, vec![vec![30000, 30000]]);
         input.set(p3, vec![vec![30000, 30000]]);
         // p1 = 60000 → clamped to i16::MAX.
@@ -325,7 +324,7 @@ out_ch = 2
         let src = engine.matrix().id_of("src").unwrap();
         let cam1 = engine.matrix().id_of("cam1").unwrap();
         let frames = 2;
-        let mut input = InputBlock::silent(engine.participant_count(), frames);
+        let mut input = InputBlock::silent(engine.participant_count());
         input.set(src, vec![vec![1, 2], vec![3, 4]]); // L=[1,2], R=[3,4]
         let out = engine.mix_block(&input, frames);
         // Interleaved: frame0 L,R ; frame1 L,R = [1,3, 2,4].
