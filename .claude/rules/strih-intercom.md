@@ -112,6 +112,37 @@ real headset, then clear).
 **NEVER repoint cam2-7** at strih-lx before the M4 cut-over — those camboxes are on the LIVE Windows
 strih, and a second hub sending VBAN back to them is double talkback.
 
+### The M1b live-loopback recipe (ran 19.9.2026 — what actually worked)
+
+- **Never start the enabled `intercom-hub.service` with the full checked-in matrix while the Windows
+  strih is the live hub** — the hub SENDS `camN` to every `vban` participant with `out_channels > 0`,
+  i.e. cam1–7. Run the test hub as a TRANSIENT unit on a cam1-only matrix instead: filter
+  `intercom/intercom.strih-lx.toml` down to participants `{cam1, cutters}` + the points between them
+  (a 20-line `tomllib` script), install it as `/etc/intercom-hub/intercom.m1b-cam1.toml`, then
+  `systemd-run --unit intercom-hub-m1b --property=DynamicUser=yes --property=Restart=no
+  /usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.m1b-cam1.toml`; `systemctl stop
+  intercom-hub-m1b` ends it. The production unit stays `enabled` + `inactive` until M4.
+- **Even the cam1-only hub is a SECOND sender of stream `cam1` into cam1:6980** (the Windows VB-Matrix
+  keeps sending its own `cam1` mix) — cam1's receiver has no source filter, so its headset audio is
+  interleaved/garbled for the duration. Keep the window short: start the hub right before the
+  drop-in `set`, stop it right after the `clear`.
+- **cam1's intercom mic starts MUTED** (`src/intercom.rs`: `muted = AtomicBool::new(true)`, toggled by
+  the physical power button via evdev). For a hands-off test, FIRST verify `loginctl show-logind |
+  grep HandlePowerKey=ignore` on the box (provisioning sets it; without it a KEY_POWER would power the
+  box off), then inject one synthetic press on the ACPI node: a 24-byte `input_event` `(EV_KEY=1,
+  KEY_POWER=116, 1)` + `EV_SYN`, then `(…, 0)` + `EV_SYN`, written to `/dev/input/event1` with a
+  python3 `struct.pack("llHHi", …)` one-off (python3 exists on the boxes; no evemu). The journal
+  confirms `🎤 Microphone UNMUTED (via /dev/input/event1)`. The `clear` step's camera-box restart
+  re-mutes by construction — no second injection needed.
+- **What "live" looks like:** hub `/api/state` (`:8790`) for cam1 → `rx_packets` climbing at cam1's
+  `send` rate (375 pkt/s = 128 mono frames/pkt at 48 k), `last_rx_age_ms` ≈ 1, `level_dbfs` ≈ −50
+  (room/headset floor, −120 = silence), `tx_packets` at 187.5/s (256-frame blocks); cam1's
+  `Intercom: recv N pkt/s` rises by the hub's tx rate over the Windows-only ~466 pkt/s. A hub `tx`
+  far below 187.5/s at 0 % CPU + an `overruns` storm = the block loop is BLOCKING on something
+  (19.9.: a per-block DNS lookup — destinations are now resolved once, off the hot path).
+- The cambox headset ADC runs ~+540 ppm against the hub's timer (cam1 `capture 48026 samp/s`) —
+  without a per-stream rate servo that is one 128-frame overrun every ~5 s (an M2 item, not M1b).
+
 ## Milestone map
 
 - **M1 (this lane):** the vban crate extraction + hub engine + VBAN adapter + converter + TOML +
