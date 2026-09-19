@@ -84,11 +84,7 @@ fn downsample_length_and_dc_preservation() {
         out.iter().all(|&s| s == 1000),
         "a DC input maps to that constant"
     );
-    assert_eq!(
-        downsample_48k_to_8k(&vec![0i16; 47]).len(),
-        7,
-        "floor: 47 -> 7"
-    );
+    assert_eq!(downsample_48k_to_8k(&[0i16; 47]).len(), 7, "floor: 47 -> 7");
     assert!(downsample_48k_to_8k(&[]).is_empty());
 }
 
@@ -122,8 +118,8 @@ fn resample_roundtrip_preserves_dc_and_length() {
 fn stereo_mono_conversions() {
     // Down-mix averages L/R; up-mix duplicates.
     let interleaved = [100i16, 300, -50, -150];
-    assert_eq!(stereo_to_mono(&interleaved), vec![200, -100]);
-    assert_eq!(mono_to_stereo(&[7, -8]), vec![7, 7, -8, -8]);
+    assert_eq!(stereo_to_mono(&interleaved), [200, -100]);
+    assert_eq!(mono_to_stereo(&[7, -8]), [7, 7, -8, -8]);
     // A trailing odd sample is dropped from the down-mix (a malformed block never panics).
-    assert_eq!(stereo_to_mono(&[10, 20, 99]), vec![15]);
+    assert_eq!(stereo_to_mono(&[10, 20, 99]), [15]);
 }

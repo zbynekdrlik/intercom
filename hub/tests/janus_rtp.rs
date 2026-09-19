@@ -16,7 +16,7 @@ use serde_json::json;
 #[test]
 fn rtp_header_exact_bytes_of_a_known_packet() {
     let mut p = RtpPacketizer::new(0x1122_3344);
-    let payload = vec![0x7Fu8; 160];
+    let payload = [0x7Fu8; 160];
     let pkt = p.packetize(&payload);
     // V=2 (0x80); marker set on the FIRST packet + PT 0 => 0x80; seq 0; ts 0; ssrc 0x11223344.
     assert_eq!(
@@ -29,7 +29,7 @@ fn rtp_header_exact_bytes_of_a_known_packet() {
 #[test]
 fn rtp_seq_and_timestamp_continuity_and_marker_only_first() {
     let mut p = RtpPacketizer::new(0xDEAD_BEEF);
-    let payload = vec![0u8; 160];
+    let payload = [0u8; 160];
     let p0 = p.packetize(&payload);
     let p1 = p.packetize(&payload);
     let p2 = p.packetize(&payload);
