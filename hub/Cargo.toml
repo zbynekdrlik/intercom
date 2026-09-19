@@ -15,6 +15,19 @@ path = "src/lib.rs"
 name = "intercom-hub"
 path = "src/main.rs"
 
+[features]
+# Real NDI receive for the Interkom picture (issue 1345 M3c) is ON by default (the bkshading service
+# model + the features-default-on rule: a needed feature is on by default, never a forgettable
+# toggle). The real recv path (src/ndi_video/ndi_source.rs) loads libndi at RUNTIME via libloading
+# and mirrors the appliance's verified src/ndi.rs at bandwidth LOWEST — so the DEFAULT build still
+# compiles on CI with NO libndi installed. A host without libndi degrades gracefully: the worker logs
+# a loud WARN naming the missing runtime + backs off + retries forever, never a stub image.
+default = ["ndi"]
+# The stub (test-pattern) picture source is the `--no-default-features` build: a libndi-free source
+# for a quick local compile / a host that genuinely has no NDI. CI keeps a `--no-default-features`
+# step so this path stays proven and can't bit-rot (mirrors the bkshading service).
+ndi = ["dep:libloading"]
+
 [dependencies]
 # The ONE shared VBAN codec (byte-identical to the appliance's src/vban.rs re-export).
 intercom-vban = { path = "../vban" }
@@ -33,3 +46,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Interkom MJPEG picture (issue 1345 M3c). jpeg-encoder = pure-Rust JPEG (default `std` only, no
+# simd/C → cross-compiles cleanly), the bkshading preview choice; tokio-stream = the ReceiverStream
+# wrapper for the axum `Body::from_stream` multipart response; libloading = the RUNTIME dynamic load
+# of libndi (feature `ndi` only).
+jpeg-encoder = "0.7"
+tokio-stream = "0.1"
+libloading = { version = "0.8", optional = true }

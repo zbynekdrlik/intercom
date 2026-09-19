@@ -372,3 +372,80 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 - **At CI (first compile):** the `intercom-hub` job type-checks + runs the Rust route/asset unit
   tests. Expect a Rust TYPE mistake to surface at CI, not locally (the M1 first-compile list above
   still applies — axum `Json<Arc<T>>` needs serde `rc` (already on), `chunks_exact` deny lint, etc.).
+
+## M3c — Interkom picture (MJPEG) (issue 1345)
+
+M3c is the VIDEO half of M3: the phone's Interkom monitor picture. It does NOT touch the M3a audio
+edge or the M3b PWA client (those are the sibling lanes' files) — it adds the SERVER route the M3b
+`<img src="/interkom.mjpeg">` already expects. Design: issue 1345 comment "Design (main, 19.9.2026)",
+Prístup 1 ("Video: MJPEG, not WebRTC video").
+
+### The pipe: NDI low-bandwidth → decimate → JPEG → multipart
+
+`intercom/hub/src/ndi_video.rs` (+ its `ndi_video/` submodules) is a feature-`ndi` (DEFAULT ON)
+picture leg, mirroring the bkshading service preview VERBATIM (`bkshading/service/src/preview/*.rs`,
+copied WITH a `keep in sync` header — the hub does NOT depend on the bkshading crate). One dedicated
+OS thread (`worker.rs`, NOT tokio — the NDI recv is a blocking FFI call) connects the
+`[video].ndi_source_name` NDI source at **bandwidth LOWEST + the BGRX/BGRA colour format** (the
+minimal recv FFI copied from `src/ndi.rs` → `bkshading .../ndi_source.rs`, recv name
+`intercom-video`), thins it to `[video].fps` on a MONOTONIC `Instant` (`decimate::Decimator`),
+converts BGRX→RGB (`convert::bgra_to_rgb`), and JPEG-encodes at `[video].jpeg_quality`
+(`jpeg-encoder 0.7`, pure Rust) into the shared `slot::VideoState` (the design's
+`Arc<RwLock<Option<Arc<Vec<u8>>>>>` + a wall-clock `updated_ms` + a monotonic frame counter).
+
+### Keep-alive runtime (reconnect-safe)
+
+The libndi runtime is loaded ONCE per process and kept alive for the process lifetime
+(`shared_runtime::SharedRuntime` + `ndi_source::NdiLib::shared()`) — the SDK's destroy is
+process-GLOBAL, so a per-connect load would tear the SDK down under any other receiver on a routine
+reconnect. Only the RECEIVER handle is per-source. Any failure (runtime missing / source not found /
+capture timeout) logs ONE `tracing::warn!` per transition, backs off (1 → 10 s) and retries FOREVER —
+fail-loud, non-crashing, never a stub image (the `--features ndi` default). The `--no-default-features`
+build swaps the real receiver for the stub test-pattern source so the libndi-free path can't bit-rot
+(CI runs the `--no-default-features` clippy/test step pair, exactly like the bkshading job).
+
+### The routes (`intercom/hub/src/http.rs`)
+
+- `GET /interkom.mjpeg` → `multipart/x-mixed-replace; boundary=frame`, `Cache-Control: no-store`.
+  A background pump polls the slot at ~`fps × 2` (never a busy-loop) and streams a
+  `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: N\r\n\r\n<jpeg>\r\n` part whenever the
+  slot's frame counter ADVANCES. **The stale-stream-ends contract with the PWA:** a client with no
+  new frame for **> 5 s** gets the stream ENDED (the pump returns → the body closes), so the M3b
+  `<img>` `onerror` placeholder + 5 s retry kicks in — never a hung connection. Uses
+  `axum::body::Body::from_stream` over a `tokio-stream` `ReceiverStream`.
+- `GET /interkom.jpg` → the latest single JPEG (200), or 503 + a short text body when there is no
+  frame yet / video is disabled. A curl-able liveness check.
+- Pure helpers `mjpeg_part(&[u8]) -> Vec<u8>` (the framing) + `frame_is_stale(updated, now, max_age)`
+  are unit-tested WITHOUT a server (`intercom/hub/tests/ndi_video_1345.rs`).
+- `/api/state` gains a HUB-LEVEL additive `video` facet (`slot::VideoStats`:
+  `{source, connected, fps_actual, last_frame_age_ms, frames, last_error}`), present only when a
+  `[video]` config is declared (`#[serde(skip_serializing_if = "Option::is_none")]`) — the M3a janus
+  facet's additive shape, one level up (on `HubState`, not per-participant).
+
+### Config (`[video]` table) + the dev source pointer
+
+`matrix.rs` gains an optional `[video]` table (`VideoConfig`): `ndi_source_name` (default
+`STRIH-LX (interkom)`), `fps` (default 10, validated **1..=30**), `jpeg_quality` (default 70,
+validated **30..=95**), `enabled` (default true). `Matrix::from_toml` validates the bounds at load
+(fail-closed). The converter (`scripts/vbmatrix_to_intercom_toml.py`) emits the `[video]` table with
+defaults; the byte-parity fixture test is regenerated in the SAME commit (never hand-edit the TOML).
+**Until issue 1347 builds the `STRIH-LX (interkom)` NDI republish output, the supervisor points
+`ndi_source_name` at `CAM1 (usb)`** (a config edit on the box — no code change, no re-generate).
+Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
+
+### How to verify
+
+- Curl-able liveness once the hub runs against a live NDI source:
+  `curl -o f.jpg http://strih-lx:8790/interkom.jpg` (200 + a JPEG when a frame is flowing; 503 until
+  the first frame). The `video` facet is on `curl http://strih-lx:8790/api/state`.
+- **Tier-0 (locally, no cargo):** `cargo fmt --all --check`; a standalone `rustc --edition 2021
+  --test` replica of the pure pieces (framing / stale / decimator / BGRX→RGB) run RED→GREEN; the
+  converter pytest; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`; the
+  doc-lazy grep. CI (the `intercom-hub` job, default + `--no-default-features`) is the first real
+  compile — hand-audit the M1/M3a first-compile lint layer (`chunks_exact`, `Json<Arc<T>>`+serde
+  `rc`, dead fields, `map_or`→`is_some_and`, `manual_range_contains`→`(a..=b).contains`,
+  `too_many_arguments`); the ndi-gated `ndi_source.rs` compiles ONLY under `--features ndi`, so a
+  `-D warnings` lint there surfaces at CI, not locally.
+- **Live end-to-end (supervisor, needs the rig):** run the hub `--features ndi` against a live NDI
+  source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
+  in when the source drops.

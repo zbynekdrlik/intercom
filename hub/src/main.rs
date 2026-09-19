@@ -187,6 +187,25 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
+    // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
+    // OS thread — the NDI recv is a blocking FFI call). The shared slot feeds `/interkom.mjpeg`,
+    // `/interkom.jpg`, and the `/api/state` `video` facet. Absent/disabled → the hub serves no picture.
+    let video_state: Option<Arc<intercom_hub::ndi_video::VideoState>> = match &matrix.video {
+        Some(v) if v.enabled => {
+            let st = intercom_hub::ndi_video::start(v);
+            tracing::info!(source = %v.ndi_source_name, fps = v.fps, jpeg_quality = v.jpeg_quality, "interkom-video picture leg enabled");
+            Some(st)
+        }
+        Some(_) => {
+            tracing::info!(
+                "interkom-video picture leg present but disabled ([video].enabled = false)"
+            );
+            None
+        }
+        None => None,
+    };
+
     // Seed the live channel so a client connecting before the first tick sees current state.
     let initial = Arc::new(HubState::snapshot(
         &matrix,
@@ -225,6 +244,7 @@ async fn main() -> Result<()> {
         let engine = engine.clone();
         let matrix = matrix.clone();
         let out_addrs = out_addrs.clone();
+        let video_for_loop = video_state.clone();
         // `janus_mix_tx` + `janus_report` are captured by the `async move` below (the block loop is
         // their sole feeder + facet reader); nothing uses them after this spawn.
         let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
@@ -308,7 +328,15 @@ async fn main() -> Result<()> {
                             s.janus = Some(jstats.snapshot());
                         }
                     }
-                    let snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                    let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                    // Attach the Interkom picture facet (M3c) when the video leg is running.
+                    if let Some(vs) = &video_for_loop {
+                        let now_wall = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        snapshot.video = Some(vs.snapshot(now_wall));
+                    }
                     tracing::info!("{}", snapshot.status_line());
                     let _ = live_tx.send(Arc::new(snapshot));
                 }
@@ -325,7 +353,10 @@ async fn main() -> Result<()> {
         "intercom-hub starting"
     );
 
-    let state = AppState { live: live_rx };
+    let state = AppState {
+        live: live_rx,
+        video: video_state,
+    };
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;

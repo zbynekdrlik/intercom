@@ -8,20 +8,33 @@
 //! the WebRTC audio; the picture is the MJPEG route M3c (issue 1347) will add.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{header, HeaderName},
+    http::{header, HeaderName, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
 
+use crate::ndi_video::VideoState;
 use crate::state::HubState;
+
+// issue 1345 M3c: the Interkom MJPEG picture. `/interkom.mjpeg` streams `multipart/x-mixed-replace`
+// parts as new frames arrive; `/interkom.jpg` returns the single latest frame (a curl-able liveness
+// check). The picture frames come from the NDI receiver in `ndi_video`.
+/// The multipart MIME + boundary the MJPEG stream uses (the `<img>` MJPEG contract the PWA reads).
+pub const MJPEG_CONTENT_TYPE: &str = "multipart/x-mixed-replace; boundary=frame";
+/// A client with no NEW frame for longer than this gets the stream ENDED (so the PWA's `<img>`
+/// `onerror` placeholder + retry kicks in) — never a hung connection.
+pub const MJPEG_MAX_AGE_MS: u64 = 5000;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -96,6 +109,9 @@ pub struct AppState {
     /// The latest hub state, published by the block-status pump. Keeping a receiver here means the
     /// pump's `send` never fails for "no receivers".
     pub live: watch::Receiver<Arc<HubState>>,
+    /// The Interkom picture slot (issue 1345 M3c), present only when the hub has a `[video]` config.
+    /// `/interkom.mjpeg` + `/interkom.jpg` serve from it; `None` → those routes report 503.
+    pub video: Option<Arc<VideoState>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -111,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon_svg))
         .route("/api/version", get(version))
         .route("/api/state", get(api_state))
+        .route("/interkom.mjpeg", get(interkom_mjpeg))
+        .route("/interkom.jpg", get(interkom_jpg))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
 }
@@ -200,6 +218,110 @@ async fn ws_push(mut socket: WebSocket, mut rx: watch::Receiver<Arc<HubState>>) 
 /// Serialize a hub state for the WS wire (the exact text a `/ws` frame carries).
 pub fn ws_encode(state: &HubState) -> Result<String, serde_json::Error> {
     serde_json::to_string(state)
+}
+
+// --- The Interkom MJPEG picture (issue 1345 M3c) ---------------------------------------------
+
+/// One `multipart/x-mixed-replace` part: `--frame\r\nContent-Type: image/jpeg\r\nContent-Length:
+/// N\r\n\r\n<jpeg>\r\n`. Pure so the exact framing bytes are unit-tested without a server.
+pub fn mjpeg_part(jpeg: &[u8]) -> Vec<u8> {
+    let header = format!(
+        "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+        jpeg.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + jpeg.len() + 2);
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(jpeg);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Whether the latest frame is older than `max_age_ms`. A backwards clock (`now < updated`) saturates
+/// to age 0 → never stale. Pure so the >5 s stream-ends boundary is unit-tested.
+pub fn frame_is_stale(updated_ms: u64, now_ms: u64, max_age_ms: u64) -> bool {
+    now_ms.saturating_sub(updated_ms) > max_age_ms
+}
+
+/// Wall-clock ms (for the MJPEG stale check).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The MJPEG slot poll cadence for a target `fps` (~fps × 2, clamped 10..=500 ms, never a busy-loop).
+fn mjpeg_poll_interval(target_fps: u32) -> Duration {
+    let ms = (500 / target_fps.max(1)).clamp(10, 500);
+    Duration::from_millis(ms as u64)
+}
+
+/// `GET /interkom.mjpeg` — stream `multipart/x-mixed-replace` parts as the slot's frame counter
+/// advances (poll ~fps × 2, never a busy-loop). A client with no new frame for > 5 s gets the stream
+/// ENDED so the PWA's `<img>` `onerror` placeholder + retry kicks in. 503 when video is disabled.
+async fn interkom_mjpeg(State(state): State<AppState>) -> Response {
+    let Some(video) = state.video.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "interkom video disabled").into_response();
+    };
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::spawn(mjpeg_pump(video, tx));
+    let body = Body::from_stream(ReceiverStream::new(rx));
+    (
+        [
+            (header::CONTENT_TYPE, MJPEG_CONTENT_TYPE),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Push MJPEG parts to one client: on every poll, send a new part iff the slot's counter advanced;
+/// end (drop the sender → stream closes) once no new frame has arrived for [`MJPEG_MAX_AGE_MS`]. Ends
+/// immediately when the client disconnects (a failed `send`).
+async fn mjpeg_pump(video: Arc<VideoState>, tx: mpsc::Sender<Result<Bytes, std::io::Error>>) {
+    let poll = mjpeg_poll_interval(video.target_fps());
+    let mut last_sent: Option<u64> = None;
+    // Reference time for the stale check: the connection start, then each frame we send. A client
+    // therefore waits up to MJPEG_MAX_AGE_MS for the FIRST frame before the stream ends.
+    let mut last_activity = now_ms();
+    loop {
+        tokio::time::sleep(poll).await;
+        let now = now_ms();
+        let counter = video.frame_counter();
+        if counter > 0 && last_sent != Some(counter) {
+            if let Some(jpeg) = video.latest_frame() {
+                if tx.send(Ok(Bytes::from(mjpeg_part(&jpeg)))).await.is_err() {
+                    return; // client gone
+                }
+                last_sent = Some(counter);
+                last_activity = now;
+                continue;
+            }
+        }
+        if frame_is_stale(last_activity, now, MJPEG_MAX_AGE_MS) {
+            return; // no new frame for > 5 s → end the stream (PWA onerror + retry)
+        }
+    }
+}
+
+/// `GET /interkom.jpg` — the latest single JPEG frame (200), or 503 with a short text body when there
+/// is no frame yet / video is disabled. A curl-able liveness check.
+async fn interkom_jpg(State(state): State<AppState>) -> Response {
+    match state.video.as_ref().and_then(|v| v.latest_frame()) {
+        Some(jpeg) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            (*jpeg).clone(),
+        )
+            .into_response(),
+        None if state.video.is_some() => {
+            (StatusCode::SERVICE_UNAVAILABLE, "no interkom frame yet").into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, "interkom video disabled").into_response(),
+    }
 }
 
 #[cfg(test)]

@@ -64,6 +64,39 @@ fn default_janus_rtp_bind() -> String {
     "0.0.0.0:6990".to_string()
 }
 
+/// The Interkom picture (MJPEG) config (the optional `[video]` table, M3c). Absent → the hub serves no
+/// picture; present + `enabled` → the hub runs the NDI low-bandwidth receiver → decimate → JPEG →
+/// `/interkom.mjpeg` pipe. Until issue 1347 builds the `STRIH-LX (interkom)` NDI output, a dev override
+/// points `ndi_source_name` at `CAM1 (usb)`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoConfig {
+    /// The NDI source name the receiver looks for (default `STRIH-LX (interkom)`).
+    #[serde(default = "default_video_source")]
+    pub ndi_source_name: String,
+    /// Target picture rate, frames/sec (validated 1..=30 at load).
+    #[serde(default = "default_video_fps")]
+    pub fps: u32,
+    /// JPEG encode quality (validated 30..=95 at load — a monitor picture, not an archival master).
+    #[serde(default = "default_video_jpeg_quality")]
+    pub jpeg_quality: u8,
+    /// Whether the picture leg runs at all (default true).
+    #[serde(default = "default_video_enabled")]
+    pub enabled: bool,
+}
+
+fn default_video_source() -> String {
+    "STRIH-LX (interkom)".to_string()
+}
+fn default_video_fps() -> u32 {
+    10
+}
+fn default_video_jpeg_quality() -> u8 {
+    70
+}
+fn default_video_enabled() -> bool {
+    true
+}
+
 /// Hub-wide config (the `[hub]` table).
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubConfig {
@@ -138,6 +171,8 @@ struct MatrixToml {
     hub: HubConfig,
     #[serde(default)]
     janus: Option<JanusConfig>,
+    #[serde(default)]
+    video: Option<VideoConfig>,
     #[serde(default, rename = "participant")]
     participants: Vec<Participant>,
     #[serde(default, rename = "point")]
@@ -150,6 +185,7 @@ struct MatrixToml {
 pub struct Matrix {
     pub hub: HubConfig,
     pub janus: Option<JanusConfig>,
+    pub video: Option<VideoConfig>,
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
@@ -174,6 +210,17 @@ impl Matrix {
         }
         if raw.hub.block_frames == 0 {
             bail!("hub.block_frames must be > 0");
+        }
+
+        // The Interkom picture (M3c): validate the `[video]` bounds at load — an out-of-range fps or
+        // JPEG quality is a config error, caught here, never at rig startup.
+        if let Some(v) = &raw.video {
+            if !(1..=30).contains(&v.fps) {
+                bail!("video.fps {} out of range 1..=30", v.fps);
+            }
+            if !(30..=95).contains(&v.jpeg_quality) {
+                bail!("video.jpeg_quality {} out of range 30..=95", v.jpeg_quality);
+            }
         }
 
         let mut index: HashMap<String, usize> = HashMap::new();
@@ -268,6 +315,7 @@ impl Matrix {
         Ok(Matrix {
             hub: raw.hub,
             janus: raw.janus,
+            video: raw.video,
             participants: raw.participants,
             index,
             points,

@@ -47,6 +47,18 @@ JANUS = {
     "rtp_bind": "0.0.0.0:6990",
 }
 
+# The Interkom picture (MJPEG) config emitted into the `[video]` table (issue 1345 M3c). The hub
+# receives the `STRIH-LX (interkom)` NDI source in LOW-bandwidth mode, decimates to `fps`, JPEG-encodes
+# at `jpeg_quality`, and serves it as `multipart/x-mixed-replace` at `/interkom.mjpeg`. Until issue
+# 1347 builds the `STRIH-LX (interkom)` NDI output, the supervisor points `ndi_source_name` at
+# `CAM1 (usb)` (a config edit on the box, no code change / no re-generate).
+VIDEO = {
+    "ndi_source_name": "STRIH-LX (interkom)",
+    "fps": 10,
+    "jpeg_quality": 70,
+    "enabled": True,
+}
+
 # Participant emit order: camboxes, then the program references, then the interface participants.
 _ROLE_ORDER = {
     "cambox": 0,
@@ -233,6 +245,14 @@ def render(model):
     out.append(f'room = {JANUS["room"]}')
     out.append(f'room_secret_file = "{JANUS["room_secret_file"]}"')
     out.append(f'rtp_bind = "{JANUS["rtp_bind"]}"')
+    out.append("")
+
+    # The Interkom picture (issue 1345 M3c) — the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe.
+    out.append("[video]")
+    out.append(f'ndi_source_name = "{VIDEO["ndi_source_name"]}"')
+    out.append(f'fps = {VIDEO["fps"]}')
+    out.append(f'jpeg_quality = {VIDEO["jpeg_quality"]}')
+    out.append(f'enabled = {"true" if VIDEO["enabled"] else "false"}')
     out.append("")
 
     for p in participants:

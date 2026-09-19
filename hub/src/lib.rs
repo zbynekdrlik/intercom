@@ -20,5 +20,6 @@ pub mod http;
 pub mod janus_rtp;
 pub mod matrix;
 pub mod mulaw;
+pub mod ndi_video;
 pub mod state;
 pub mod vban_io;

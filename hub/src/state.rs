@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::janus_rtp::JanusStats;
 use crate::matrix::Matrix;
+use crate::ndi_video::VideoStats;
 
 /// Per-participant runtime counters, gathered from its jitter buffer + tx side each tick.
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,6 +49,10 @@ pub struct HubState {
     pub sample_rate: u32,
     pub block_frames: usize,
     pub participants: Vec<ParticipantState>,
+    /// The Interkom picture (MJPEG) facet (source/connected/fps_actual/last_frame_age_ms/frames/
+    /// last_error), present only when the hub has a `[video]` config (M3c) — omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoStats>,
 }
 
 impl HubState {
@@ -80,6 +85,9 @@ impl HubState {
             sample_rate: matrix.hub.sample_rate,
             block_frames: matrix.hub.block_frames,
             participants,
+            // The video facet is attached by the daemon (main.rs) after the snapshot when a `[video]`
+            // config is present; the pure snapshot has no picture state of its own.
+            video: None,
         }
     }
 
