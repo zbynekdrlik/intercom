@@ -10,6 +10,7 @@
 //! no matter what the TOML says.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
@@ -69,6 +70,31 @@ fn default_janus_room() -> u64 {
 }
 fn default_janus_rtp_bind() -> String {
     "0.0.0.0:6990".to_string()
+}
+
+/// The systemd credential name the production `intercom-hub.service` exposes the room secret under
+/// (`LoadCredential=janus-room.secret:<file>`). When systemd runs the hub it sets
+/// `$CREDENTIALS_DIRECTORY` and drops each loaded credential there, readable by the (dynamic) user
+/// even under `DynamicUser=yes`.
+pub const JANUS_ROOM_SECRET_CRED: &str = "janus-room.secret";
+
+/// Resolve WHERE to read the Janus room secret from, preferring systemd's credential store over the
+/// configured file path. `credentials_dir` is `$CREDENTIALS_DIRECTORY` (`Some` when the unit sets
+/// `LoadCredential=`); `configured` is the `[janus].room_secret_file`. Returns the path to READ, or
+/// `None` when neither is available (the hub then joins without a secret). This NEVER returns or
+/// logs the secret VALUE — only the path. An empty/whitespace credentials dir is treated as unset so
+/// a stray env var can never resolve to a bare `/janus-room.secret`.
+pub fn resolve_secret_path(
+    credentials_dir: Option<&str>,
+    configured: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = credentials_dir {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Some(Path::new(dir).join(JANUS_ROOM_SECRET_CRED));
+        }
+    }
+    configured.map(Path::to_path_buf)
 }
 
 /// The Interkom picture (MJPEG) config (the optional `[video]` table, M3c). Absent → the hub serves no

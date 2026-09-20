@@ -34,7 +34,9 @@
        After connecting it turns into a Disconnect button (app.js toggles the label/state). -->
   <button type="button" id="connect-btn" class="btn btn-primary" data-role="connect">Pripojiť</button>
 
-  <!-- The rare mic control. Default OFF (muted); turns red when ON. -->
+  <!-- The rare mic control. Default OFF (muted); turns red when ON. When the phone has no
+       microphone or the permission is denied, app.js joins the room LISTEN-ONLY and DISABLES
+       this select + toggle (the chip then reads "Mikrofón: nedostupný (počúvate)"). -->
   <div class="mic-row">
     <label class="mic-select-label" for="mic-select">Mikrofón (vstup)</label>
     <select id="mic-select" class="mic-select" data-role="mic-select" aria-label="Výber mikrofónu">

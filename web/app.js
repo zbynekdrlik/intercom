@@ -59,6 +59,7 @@ let janus = null; // the Janus session
 let bridge = null; // the audiobridge plugin handle
 let joined = false;
 let muted = true; // the mic starts OFF (design: joins MUTED)
+let listenOnly = false; // set when we joined recv-only (no mic / permission denied)
 let lastAudioBytes = 0;
 let lastFrameAt = 0;
 let statsTimer = null;
@@ -212,6 +213,7 @@ function attachRemote(track) {
 }
 
 function connect() {
+  resetMicControls(); // a fresh cycle re-enables the mic (re-grant path after a listen-only join)
   chip(chipJanus, "Janus: spájam…", "wait");
   // debug:false → Janus.log/warn/error are all no-ops, so janus.js never writes to the console.
   Janus.init({
@@ -266,21 +268,73 @@ function attachBridge() {
   });
 }
 
+// A getUserMedia rejection (no microphone, or the user denied the permission) surfaces here as the
+// createOffer error. Its DOMException `.name` is one of the getUserMedia error names; we also accept
+// a message match so a wrapped error still routes to the listen-only fallback. Anything else is a
+// real signalling error and is NOT silently turned into listen-only.
+function isMicError(err) {
+  if (!err) return false;
+  const name = (err.name || (err.error && err.error.name) || "") + "";
+  const micNames = [
+    "NotFoundError",
+    "NotAllowedError",
+    "NotReadableError",
+    "OverconstrainedError",
+    "SecurityError",
+    "AbortError",
+    "PermissionDeniedError",
+    "DevicesNotFoundError",
+    "TrackStartError",
+  ];
+  if (micNames.indexOf(name) !== -1) return true;
+  const text = ((err && err.message) || err || "") + "";
+  return /getusermedia|permission|denied|microphone|mikrof|audio.?input|no.?(audio.?)?device/i.test(
+    text
+  );
+}
+
+// Try a SEND+RECV offer (publishes our muted mic so we can later unmute). If getUserMedia fails
+// (no mic / permission denied) fall back to LISTEN-ONLY instead of dead-ending — the cameraman who
+// refuses the permission still HEARS the intercom. muted:true keeps us silent until an unmute.
+function joinWithMic() {
+  const capture = micSelect.value ? { deviceId: { exact: micSelect.value } } : true;
+  bridge.createOffer({
+    tracks: [{ type: "audio", capture, recv: true }],
+    success: (offerJsep) => {
+      bridge.send({ message: { request: "configure", muted: true }, jsep: offerJsep });
+      startStats();
+    },
+    error: (err) => {
+      if (isMicError(err)) {
+        joinListenOnly();
+      } else {
+        chip(chipJanus, "Janus: spojenie zlyhalo", "bad");
+      }
+    },
+  });
+}
+
+// RECV-ONLY offer: a recv track with NO `capture`, so janus.js never calls getUserMedia. We only
+// RECEIVE the room mix (kept playing on the <audio> sink), disable the mic controls, and show the
+// listening chip. A later re-grant re-negotiates WITH send on the next "Pripojiť" cycle.
+function joinListenOnly() {
+  bridge.createOffer({
+    tracks: [{ type: "audio", recv: true }],
+    success: (offerJsep) => {
+      bridge.send({ message: { request: "configure", muted: true }, jsep: offerJsep });
+      enterListenOnly();
+      startStats();
+    },
+    error: () => chip(chipJanus, "Janus: spojenie zlyhalo", "bad"),
+  });
+}
+
 function onBridgeMessage(msg, jsep) {
   const event = msg && msg.audiobridge;
   if (event === "joined") {
     joined = true;
     chip(chipJanus, "Janus: v miestnosti", "ok");
-    // Publish our (muted) mic so we RECEIVE the room mix. muted:true keeps us silent until unmute.
-    const capture = micSelect.value ? { deviceId: { exact: micSelect.value } } : true;
-    bridge.createOffer({
-      tracks: [{ type: "audio", capture, recv: true }],
-      success: (offerJsep) => {
-        bridge.send({ message: { request: "configure", muted: true }, jsep: offerJsep });
-        startStats();
-      },
-      error: () => chip(chipJanus, "Janus: mic chyba", "bad"),
-    });
+    joinWithMic();
   } else if (event === "event" && msg.error) {
     chip(chipJanus, "Janus: " + msg.error, "bad");
   }
@@ -289,7 +343,28 @@ function onBridgeMessage(msg, jsep) {
   }
 }
 
+// Enter listen-only: disable the mic toggle + device select (there is no mic to unmute) and show
+// the listening chip. Called from the recv-only join path. The LEAVE direction is resetMicControls().
+function enterListenOnly() {
+  listenOnly = true;
+  muted = true;
+  micToggle.disabled = true;
+  micToggle.dataset.muted = "true";
+  micToggle.setAttribute("aria-pressed", "false");
+  micToggle.textContent = "Mikrofón vypnutý";
+  micSelect.disabled = true;
+  chip(chipJanus, "Mikrofón: nedostupný (počúvate)", "warn");
+}
+
+// Re-enable the mic controls for a fresh connect (a re-granted mic then re-negotiates WITH send).
+function resetMicControls() {
+  listenOnly = false;
+  micToggle.disabled = false;
+  micSelect.disabled = false;
+}
+
 function setMuted(next) {
+  if (listenOnly) return; // no mic to (un)mute in listen-only mode
   muted = next;
   micToggle.dataset.muted = muted ? "true" : "false";
   micToggle.setAttribute("aria-pressed", muted ? "false" : "true");
@@ -352,6 +427,7 @@ function teardown() {
   }
   janus = null;
   bridge = null;
+  resetMicControls(); // a disconnected page shows the mic controls enabled (self-corrects a listen-only session)
   setConnectedUi(false);
 }
 

@@ -20,6 +20,11 @@ StandardError=journal
 # and sandbox it. These directives intentionally do NOT restrict address families / DNS, so the
 # VBAN + camN.lan resolution the live bring-up (M1b/M4) exercises is untouched.
 DynamicUser=yes
+# The Janus room secret file is root-owned 0600; DynamicUser cannot read it directly. systemd's
+# credential store loads it 0400 owned by the (dynamic) user into $CREDENTIALS_DIRECTORY, which the
+# hub prefers over the configured room_secret_file (matrix::resolve_secret_path). The secret VALUE
+# never appears here — only the file path (issue 1345 M3 follow-up).
+LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

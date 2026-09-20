@@ -149,12 +149,19 @@ async fn main() -> Result<()> {
         matrix.janus.clone(),
     ) {
         (Some(pid), Some(jcfg)) => {
-            // The room secret is read from its 0600 file and NEVER logged.
-            let secret = match &jcfg.room_secret_file {
-                Some(path) => match std::fs::read_to_string(path) {
+            // The room secret is read from its 0600 file and NEVER logged. Prefer systemd's
+            // credential store ($CREDENTIALS_DIRECTORY, set by LoadCredential=) so the production
+            // unit can read it under DynamicUser=yes; fall back to the configured room_secret_file.
+            let cred_dir = std::env::var("CREDENTIALS_DIRECTORY").ok();
+            let configured = jcfg.room_secret_file.as_deref().map(std::path::Path::new);
+            let secret = match intercom_hub::matrix::resolve_secret_path(
+                cred_dir.as_deref(),
+                configured,
+            ) {
+                Some(path) => match std::fs::read_to_string(&path) {
                     Ok(s) => Some(s.trim().to_string()),
                     Err(e) => {
-                        tracing::warn!(error = %e, "janus: room_secret_file unreadable — joining without a secret");
+                        tracing::warn!(error = %e, "janus: room secret unreadable — joining without a secret");
                         None
                     }
                 },
