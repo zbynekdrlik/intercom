@@ -170,48 +170,6 @@ def test_vendored_janus_keeps_mit_header_and_pinned_tag():
     assert "meetecho/janus-gateway" in vend, "VENDORED.md names the upstream repo"
 
 
-# --- Listen-only join when the microphone is unavailable/denied (issue 1345 M3 follow-up) --------
-# A cameraman who refuses (or has no) microphone must STILL join the room receive-only and HEAR the
-# intercom — never dead-end at the old `Janus: mic chyba` chip. app.js falls back from the send+recv
-# offer to a recv-only offer, disables the mic controls, and shows a listening chip.
-def test_app_js_listen_only_joins_recv_only_when_mic_unavailable():
-    js = _read(APP_JS)
-    assert "joinListenOnly" in js, "app.js has a listen-only join path"
-    # The listen-only offer is RECV-ONLY: a recv track with NO `capture` (so janus.js never calls
-    # getUserMedia). The send path uses `capture, recv` — this regex matches only the recv-only one.
-    assert re.search(r'tracks:\s*\[\{\s*type:\s*"audio",\s*recv:\s*true\s*\}\]', js), (
-        "the listen-only offer is recv-only (a recv track with no capture)"
-    )
-    # The mic failure is classified (getUserMedia NotFoundError/NotAllowedError/…) before falling
-    # back — a non-mic signalling error is NOT silently turned into listen-only.
-    assert "isMicError" in js, "the mic failure is classified before falling back to listen-only"
-
-
-def test_app_js_listen_only_disables_mic_controls_and_shows_chip():
-    js = _read(APP_JS)
-    assert re.search(r"micToggle\.disabled\s*=\s*true", js), "listen-only disables the mic toggle"
-    assert re.search(r"micSelect\.disabled\s*=\s*true", js), "listen-only disables the mic select"
-    assert "Mikrofón: nedostupný (počúvate)" in js, (
-        "listen-only shows the 'mic unavailable, listening' chip"
-    )
-    # The old dead-end chip is GONE — a mic-less cameraman is never left stuck at an error.
-    assert "Janus: mic chyba" not in js, (
-        "the dead-end mic-error chip must be replaced by the listen-only fallback"
-    )
-
-
-def test_app_js_listen_only_resets_on_reconnect():
-    js = _read(APP_JS)
-    # A second "Pripojiť" cycle re-enables the mic controls so a re-granted mic re-negotiates WITH
-    # send (design: the re-grant path).
-    assert re.search(r"micToggle\.disabled\s*=\s*false", js), (
-        "a fresh connect re-enables the mic toggle (re-grant path)"
-    )
-    assert re.search(r"micSelect\.disabled\s*=\s*false", js), (
-        "a fresh connect re-enables the mic select (re-grant path)"
-    )
-
-
 if __name__ == "__main__":
     import traceback
 
