@@ -18,6 +18,7 @@
 pub mod engine;
 pub mod http;
 pub mod janus_rtp;
+pub mod local_audio;
 pub mod matrix;
 pub mod mulaw;
 pub mod ndi_video;

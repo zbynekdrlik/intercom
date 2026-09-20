@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 use crate::janus_rtp::JanusStats;
+use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
 
@@ -21,6 +22,9 @@ pub struct RuntimeStats {
     pub level_dbfs: f32,
     /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
     pub janus: Option<JanusStats>,
+    /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
+    /// `program_out` sink + the talkback capture (issue 1344).
+    pub local_audio: Option<LocalAudioFacet>,
 }
 
 /// One participant's serialized state.
@@ -40,6 +44,10 @@ pub struct ParticipantState {
     /// only for the janus participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub janus: Option<JanusStats>,
+    /// The local PipeWire facet (tx/rx blocks, pw-cat spawns/exits), present only for a
+    /// `pipewire`-adapter participant — omitted from the JSON for every other participant (issue 1344).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_audio: Option<LocalAudioFacet>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -77,6 +85,7 @@ impl HubState {
                     last_rx_age_ms: s.last_rx_age_ms,
                     level_dbfs: s.level_dbfs,
                     janus: s.janus,
+                    local_audio: s.local_audio,
                 }
             })
             .collect();
@@ -155,6 +164,7 @@ out_channels = 4
                 last_rx_age_ms: Some(5),
                 level_dbfs: -12.0,
                 janus: None,
+                local_audio: None,
             },
             RuntimeStats::default(),
         ];

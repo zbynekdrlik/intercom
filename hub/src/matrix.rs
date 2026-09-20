@@ -20,9 +20,15 @@ use serde::Deserialize;
 pub const ADAPTER_VBAN: &str = "vban";
 pub const ADAPTER_NONE: &str = "none";
 pub const ADAPTER_JANUS: &str = "janus";
+/// The local PipeWire adapter (issue 1344): the `program_out` sink (egress) + the talkback capture
+/// (ingress) that replace the last VB-Matrix function on the strih-lx notebook.
+pub const ADAPTER_PIPEWIRE: &str = "pipewire";
 
 /// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
 pub const JANUS_ONLY_ROLE: &str = "phones";
+
+/// The role of the local PipeWire program sink OBS captures (`ASIO zvuk`) — issue 1344.
+pub const PROGRAM_OUT_ROLE: &str = "program_out";
 
 /// Roles a participant plays (informational + validated at load; the engine never branches on it).
 const KNOWN_ROLES: &[&str] = &[
@@ -33,6 +39,7 @@ const KNOWN_ROLES: &[&str] = &[
     "speakers",
     "line34",
     "program_monitor",
+    "program_out",
 ];
 
 /// The Janus audiobridge edge config (the optional `[janus]` table, M3a). Absent → the hub runs the
@@ -128,6 +135,20 @@ pub struct Participant {
     /// The VBAN stream name we SEND this participant's output as (e.g. `cam1`).
     #[serde(default)]
     pub out_stream: Option<String>,
+    /// The PipeWire SINK node the `program_out` participant's mixed output is written to (pipewire
+    /// adapter only), e.g. `strih-program` — issue 1344.
+    #[serde(default)]
+    pub pipewire_target: Option<String>,
+    /// The PipeWire CAPTURE node this participant's input is read from (pipewire adapter only), e.g.
+    /// the MiniFuse 4 pro-input node feeding the operator's talkback into the N-1 mix — issue 1344.
+    #[serde(default)]
+    pub pipewire_source: Option<String>,
+    /// For a `program_out`: the VBAN stream names the program mix is fed by (informational + verified:
+    /// each must be a received VBAN `in_stream`, and none may collide with a cambox stream). The
+    /// engine sums them via the matrix `[[point]]`s; this list is what `verify-strih.sh` asserts rx>0
+    /// on and what `/api/state` reports — issue 1344.
+    #[serde(default)]
+    pub source_streams: Vec<String>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -229,7 +250,10 @@ impl Matrix {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
             }
-            if p.adapter != ADAPTER_VBAN && p.adapter != ADAPTER_NONE && p.adapter != ADAPTER_JANUS
+            if p.adapter != ADAPTER_VBAN
+                && p.adapter != ADAPTER_NONE
+                && p.adapter != ADAPTER_JANUS
+                && p.adapter != ADAPTER_PIPEWIRE
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
@@ -268,6 +292,81 @@ impl Matrix {
             }
             if index.insert(p.name.clone(), id).is_some() {
                 bail!("duplicate participant name '{}'", p.name);
+            }
+        }
+
+        // The local PipeWire adapter (issue 1344): validate the `program_out` sink + the talkback
+        // capture inputs. AT MOST ONE program_out (one OBS `ASIO zvuk` sink); a program_out needs a
+        // `pipewire_target` + a non-empty `source_streams`, each of which must be a received VBAN
+        // `in_stream` and must NOT collide with a cambox stream (a program feed is never a cambox);
+        // any OTHER pipewire participant is a capture input and needs a `pipewire_source`.
+        let cambox_streams: std::collections::HashSet<&str> = raw
+            .participants
+            .iter()
+            .filter(|p| p.role == "cambox")
+            .filter_map(|p| p.in_stream.as_deref())
+            .collect();
+        let vban_in_streams: std::collections::HashSet<&str> = raw
+            .participants
+            .iter()
+            .filter(|p| p.adapter == ADAPTER_VBAN)
+            .filter_map(|p| p.in_stream.as_deref())
+            .collect();
+        let mut program_out_count = 0usize;
+        for p in raw.participants.iter() {
+            if p.role == PROGRAM_OUT_ROLE {
+                program_out_count += 1;
+                if program_out_count > 1 {
+                    bail!(
+                        "at most one 'program_out' participant is allowed (one OBS program sink)"
+                    );
+                }
+                if p.adapter != ADAPTER_PIPEWIRE {
+                    bail!(
+                        "participant '{}': role 'program_out' requires the 'pipewire' adapter (got '{}')",
+                        p.name,
+                        p.adapter
+                    );
+                }
+            }
+            if p.adapter != ADAPTER_PIPEWIRE {
+                continue;
+            }
+            if p.role == PROGRAM_OUT_ROLE {
+                if p.pipewire_target.as_deref().unwrap_or("").is_empty() {
+                    bail!(
+                        "participant '{}': program_out needs a non-empty pipewire_target (the sink node)",
+                        p.name
+                    );
+                }
+                if p.source_streams.is_empty() {
+                    bail!(
+                        "participant '{}': program_out needs at least one source_stream",
+                        p.name
+                    );
+                }
+                for s in &p.source_streams {
+                    if cambox_streams.contains(s.as_str()) {
+                        bail!(
+                            "participant '{}': program_out source_stream '{}' collides with a cambox stream",
+                            p.name,
+                            s
+                        );
+                    }
+                    if !vban_in_streams.contains(s.as_str()) {
+                        bail!(
+                            "participant '{}': program_out source_stream '{}' is not a received VBAN in_stream",
+                            p.name,
+                            s
+                        );
+                    }
+                }
+            } else if p.pipewire_source.as_deref().unwrap_or("").is_empty() {
+                // A non-program_out pipewire participant is a capture input (the talkback mic).
+                bail!(
+                    "participant '{}': pipewire adapter needs a pipewire_source (capture node) unless it is the program_out",
+                    p.name
+                );
             }
         }
 
@@ -346,6 +445,38 @@ impl Matrix {
             }
         }
         m
+    }
+
+    /// The single local PipeWire program sink (issue 1344), as `(participant id, target sink node,
+    /// source stream names)`, or `None` when the matrix declares no `program_out`.
+    pub fn program_out(&self) -> Option<(usize, String, Vec<String>)> {
+        self.participants.iter().enumerate().find_map(|(id, p)| {
+            if p.adapter == ADAPTER_PIPEWIRE && p.role == PROGRAM_OUT_ROLE {
+                let target = p.pipewire_target.clone()?;
+                Some((id, target, p.source_streams.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The local PipeWire CAPTURE inputs (the talkback mic), as `(participant id, capture node,
+    /// in_channels)` — every pipewire-adapter participant that carries a `pipewire_source` (issue
+    /// 1344).
+    pub fn local_inputs(&self) -> Vec<(usize, String, usize)> {
+        self.participants
+            .iter()
+            .enumerate()
+            .filter_map(|(id, p)| {
+                if p.adapter == ADAPTER_PIPEWIRE {
+                    p.pipewire_source
+                        .clone()
+                        .map(|node| (id, node, p.in_channels))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Participants that receive a VBAN output from us (adapter `vban`, an `out_stream` + `host`),

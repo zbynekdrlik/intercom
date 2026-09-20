@@ -49,9 +49,11 @@ adding/regenerating the matrix, never hand-add a self-route — it will fail to 
 (the checked-in live matrix). Slot roles are DERIVED from the XML's own attributes, not hard-coded:
 an active `VBANStreamOut` (`status=1`) makes a slot a `cambox` (cam1..7), else a `program_ref`
 (fohabl/lv1/mbc = the stream name minus `-strih`); `AMDevice` type 256/4/1 → cutters/speakers/line34;
-online VAIO1 → phones, VASIO8 → program_monitor. Per-participant `in_channels`/`out_channels` = the
-max channel routed (this preserves cam2's 8-ch input + the cam3 ch-2 asymmetry). Only the VBAN
-adapter is live in M1; every non-VBAN participant is declared `adapter = "none"`.
+online VAIO1 → phones, VASIO8 → **program_out** (issue 1344 — was `program_monitor` in M1).
+Per-participant `in_channels`/`out_channels` = the max channel routed (this preserves cam2's 8-ch
+input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); VASIO8 →
+`program_out` is a `pipewire` sink (the OBS `ASIO zvuk` capture) and `cutters` (MiniFuse) is a
+`pipewire` capture input (issue 1344); `speakers`/`line34` stay `adapter = "none"`.
 
 **PARITY IS PINNED:** `tests/python/test_vbmatrix_to_intercom_toml_1345.py` regenerates from the
 fixture (`intercom/tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
@@ -150,6 +152,76 @@ strih, and a second hub sending VBAN back to them is double talkback.
   heals a UNIFORMLY-stale fleet, never a MIXED one. Restoring cam1 is part of the test's cleanup,
   same as the drop-in `clear` and the hub `stop`.
 
+## M2 — the local PipeWire audio bridge (issue 1344, DONE)
+
+The last VB-Matrix function the strih-lx notebook lacked: local audio I/O. Two directions behind one
+`pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
+hub stays Tier-0 / CI-buildable; a native `pipewire-rs` impl is a later 2nd impl of the SAME
+`LocalAudioSink`/`LocalAudioSource` trait). Design: issue 1344 comment 5750031080, Prístup 1.
+
+### Root cause (corrected 20.9. — the OBS program is a NETWORK stream, not the MiniFuse)
+
+On Windows the OBS program source `ASIO zvuk` = VB-Matrix slot **VASIO8**, fed by `VBAN8`
+(`fohabl-strih`) + `VBAN64` (= `VBANStreamIn index=9` = **`lv1-strih`**), both unity ch1/2 — the
+mastered program mix from FOH. The **MiniFuse is NOT the program source**: its ASIO inputs feed only
+the operator TALKBACK mic. So on Linux the hub (which already receives `fohabl-strih` on :6980 and
+silently dropped it in M1) writes the summed program mix to a `strih-program` null sink OBS captures
+via `strih-program.monitor`; the MiniFuse capture feeds the operator talkback into the N-1 mix.
+(Prístup 3 "OBS captures the MiniFuse directly" was REJECTED — it would put the mic on the program
+bus.)
+
+### The two directions (`intercom/hub/src/local_audio.rs`)
+
+- **EGRESS — `program_out` (a `pipewire` participant, role `program_out`):** declares
+  `pipewire_target = "strih-program"` + `source_streams` (the VBAN streams routed into it —
+  `fohabl-strih` + `lv1-strih`). The engine SUMS those streams into the participant's output via the
+  matrix points (no new mixing code — the existing `program_ref` → `program_out` points do it); the
+  block loop feeds `output.interleaved(program_out)` to a supervised `pw-cat --playback --target
+  strih-program` child (`PwCatSink`).
+- **INGRESS — the talkback (`cutters` becomes a `pipewire` participant with `pipewire_source`):** a
+  supervised `pw-cat --record --target <MiniFuse pro-input node>` child (`PwCatSource`) frames its
+  stdout into blocks pushed into the `cutters` `JitterBuffer` the engine already pops — so the
+  operator talkback reaches the camboxes with NO engine change (mirrors how the Janus adapter pushes
+  the room mix into the phones buffer).
+- Both children are SUPERVISED (spawn/exit logged, respawn with an exponential `restart_backoff`
+  1→30 s, forever) on their OWN OS thread (blocking stdin/stdout), never blocking the tokio runtime;
+  rx/tx block counters ride each participant's `/api/state` `local_audio` facet.
+- `Matrix::from_toml` validates: AT MOST ONE `program_out` (must be `pipewire` + a `pipewire_target`
+  + non-empty `source_streams`, each a received VBAN `in_stream`, none colliding with a cambox
+  stream); any OTHER `pipewire` participant needs a `pipewire_source`.
+
+### The converter + the OBS input
+
+`scripts/vbmatrix_to_intercom_toml.py` maps VASIO8 → `program_out` (pipewire, target strih-program,
+`source_streams` DERIVED from the points feeding it) + the MiniFuse (AMDevice 256) → `cutters`
+(pipewire, `pipewire_source`). The byte-parity fixture test is regenerated in the SAME commit.
+`scripts/strih_scenes.py` gets the ONE allowed create in update-only mode: if the OBS `ASIO zvuk`
+input is missing or is the un-creatable `asio_input_capture`, it is created/replaced as
+`pulse_input_capture` on `strih-program.monitor` KEEPING the name (`audio_input_action` +
+`seed_program_audio_input`; `--audio-input-kind` reads it back for verify).
+
+### Provisioning + the DynamicUser decision (setup-strih step 12)
+
+Step 12 installs the operator-session `strih-program` null sink
+(`~/.config/pipewire/pipewire.conf.d/strih-program.conf`) + a WirePlumber rule pinning the MiniFuse
+to its pro-audio profile @48 kHz + the **intercom-hub audio drop-in**. The old fail-loud
+`STRIH_LX_AUDIO_WIRED` flag is REMOVED — `verify-strih.sh` derives the audio verdict
+(`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture + hub program-rx,
+FOH-live level is a supervisor NOTE).
+
+**DynamicUser decision:** the M1 hub ran `DynamicUser=yes` (no local resources). A `pw-cat` child
+must reach the OPERATOR's PipeWire session, but a dynamic uid cannot traverse the operator's `0700`
+`/run/user/<uid>` to reach `pipewire-0`. So step 12's drop-in
+(`/etc/systemd/system/intercom-hub.service.d/10-local-audio.conf`) OVERRIDES `DynamicUser=no` +
+`User=<operator>` + `XDG_RUNTIME_DIR=/run/user/<uid>` + `SupplementaryGroups=audio pipewire render`
++ `After=user@<uid>.service` + `ProtectHome=read-only`, so the hub (and its pw-cat children) run in
+the operator's audio session. Rejected alternatives: a `systemd --user` unit (changes the enable-only
+install + the #1345 provisioning contract) and a sidecar (a 2nd process + IPC socket). The base
+`systemd/intercom-hub.service` is unchanged except a comment; the VBAN-only M1 hub still runs under
+DynamicUser without the drop-in. **Supervisor live steps:** confirm the MiniFuse capture node name
+against `wpctl status`, restart the operator PipeWire/WirePlumber for the sink to appear, and do the
+FOH-live level acceptance.
+
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
 M3 replaces the phones' VDO.Ninja leg with a supervised **Janus audiobridge** room the hub joins as
@@ -233,9 +305,13 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
 - **M1 (this lane):** the vban crate extraction + hub engine + VBAN adapter + converter + TOML +
   `/api/state` + CI + unit + the enable-only systemd unit. Zero production impact.
 - **M1b (supervisor):** the cam1 env override on the appliance + the live cam1 ↔ strih-lx loopback.
-- **M2:** the MiniFuse/PipeWire adapter (`pipewire_io`) — cutters' cans, speakers, line-3/4, the
-  −8/−10 dB program refs into the cutters' cans only (= issue 1344, needs the MiniFuse plugged into
-  strih-lx).
+- **M2 (issue 1344, DONE — this lane):** the local PipeWire audio bridge — the `program_out` sink
+  (the OBS `ASIO zvuk` program capture) + the MiniFuse talkback capture into the N-1 mix. **The
+  root cause corrected the M1-era framing:** the OBS program (`ASIO zvuk` = VASIO8) is a NETWORK
+  stream (fohabl-strih + lv1-strih VBAN), NOT the MiniFuse — the MiniFuse carries only the operator
+  talkback mic (design 20.9., comment 5750031080). See the "M2 — the local PipeWire audio bridge"
+  section below. (The cutters' cans / speakers / −8/−10 dB monitor outputs remain a later
+  local-monitor lane — the same `LocalAudioSink` trait serves them.)
 - **M3:** Janus (apt) audiobridge/streaming + the phone PWA + the Interkom video (`STRIH-LX (interkom)`
   NDI republish, issue 1347). **M3a (the audio edge: `mulaw` + `janus_rtp` + `[janus]` config +
   converter + setup/verify) is DONE** — see the "M3a — the Janus audio edge" section above; M3b (PWA

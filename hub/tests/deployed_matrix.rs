@@ -4,7 +4,7 @@
 //! rules — so a future converter/XML change could produce a syntactically-valid TOML the daemon
 //! REJECTS at rig startup. This closes that Tier-0 gap: CI loads the real deployed matrix here.
 
-use intercom_hub::matrix::{Matrix, ADAPTER_VBAN};
+use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
 const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-lx.toml");
 
@@ -76,4 +76,38 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         j.room_secret_file.as_deref(),
         Some("/etc/intercom-hub/janus-room.secret")
     );
+
+    // issue 1344: the local PipeWire program-audio graph. VASIO8 is now the `program_out` sink OBS
+    // captures (not the old M1 `program_monitor`), fed by the fohabl-strih + lv1-strih program feeds;
+    // the MiniFuse (cutters) is the pipewire talkback capture input.
+    let (po_id, target, streams) = m
+        .program_out()
+        .expect("the deployed matrix declares a program_out sink");
+    assert_eq!(m.participants[po_id].name, "program_out");
+    assert_eq!(m.participants[po_id].role, PROGRAM_OUT_ROLE);
+    assert_eq!(m.participants[po_id].adapter, ADAPTER_PIPEWIRE);
+    assert_eq!(target, "strih-program");
+    assert_eq!(
+        streams,
+        vec!["fohabl-strih".to_string(), "lv1-strih".to_string()]
+    );
+    assert!(
+        m.id_of("program_monitor").is_none(),
+        "VASIO8 is the OBS program capture (program_out), not a monitor"
+    );
+
+    // The cutters carry the operator talkback mic as a pipewire capture input.
+    let inputs = m.local_inputs();
+    assert_eq!(
+        inputs.len(),
+        1,
+        "one pipewire capture input (cutters talkback)"
+    );
+    let (cid, node, chans) = &inputs[0];
+    assert_eq!(m.participants[*cid].name, "cutters");
+    assert!(
+        node.contains("MiniFuse"),
+        "the capture node is the MiniFuse: {node}"
+    );
+    assert_eq!(*chans, 2, "two cutter mics");
 }

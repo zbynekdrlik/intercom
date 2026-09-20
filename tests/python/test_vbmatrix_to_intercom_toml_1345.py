@@ -92,7 +92,7 @@ def test_model_shape_and_roles():
         "phones",
         "speakers",
         "line34",
-        "program_monitor",
+        "program_out",
     ):
         assert want in names, f"missing participant {want}"
     # The cutters carry 2 mics in + two stereo cans out (4 ch); phones are 2-in / 2-out.

@@ -121,7 +121,8 @@ out_channels = 0
 [[participant]]
 name = "cutters"
 role = "cutters"
-adapter = "none"
+adapter = "pipewire"
+pipewire_source = "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0"
 in_channels = 2
 out_channels = 4
 
@@ -147,9 +148,11 @@ in_channels = 1
 out_channels = 0
 
 [[participant]]
-name = "program_monitor"
-role = "program_monitor"
-adapter = "none"
+name = "program_out"
+role = "program_out"
+adapter = "pipewire"
+pipewire_target = "strih-program"
+source_streams = ["fohabl-strih", "lv1-strih"]
 in_channels = 0
 out_channels = 2
 
@@ -1352,7 +1355,7 @@ out_ch = 1
 [[point]]
 src = "fohabl"
 in_ch = 1
-dst = "program_monitor"
+dst = "program_out"
 out_ch = 1
 
 [[point]]
@@ -1378,7 +1381,7 @@ out_ch = 2
 [[point]]
 src = "fohabl"
 in_ch = 2
-dst = "program_monitor"
+dst = "program_out"
 out_ch = 2
 
 [[point]]
@@ -1439,7 +1442,7 @@ gain_db = -8.0
 [[point]]
 src = "lv1"
 in_ch = 1
-dst = "program_monitor"
+dst = "program_out"
 out_ch = 1
 
 [[point]]
@@ -1459,6 +1462,6 @@ gain_db = -8.0
 [[point]]
 src = "lv1"
 in_ch = 2
-dst = "program_monitor"
+dst = "program_out"
 out_ch = 2
 

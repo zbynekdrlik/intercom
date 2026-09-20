@@ -15,8 +15,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use std::sync::mpsc::SyncSender;
+
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
+use intercom_hub::local_audio::{
+    spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSourceConfig,
+};
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{resolve_vban_addr, route_packet, JitterBuffer, OutBlock, VbanSender};
@@ -187,6 +192,58 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // --- Local PipeWire audio (issue 1344): the last VB-Matrix function on the strih-lx notebook ---
+    // EGRESS: when the matrix declares a `program_out` (a pipewire sink), spawn its supervised
+    // `pw-cat --playback` bridge; the block loop feeds it the engine's summed program mix
+    // (`fohabl-strih` + `lv1-strih`) so OBS captures `strih-program.monitor` as `ASIO zvuk`. INGRESS:
+    // each pipewire capture input (the MiniFuse 4 talkback mic) gets a `pw-cat --record` bridge whose
+    // PCM is pushed into that participant's jitter buffer the engine already pops into the N-1 mix.
+    // Both never start from a dev lane (the live PipeWire is on the notebook); absent config = the
+    // hub without local audio. rx/tx block counters ride each participant's `/api/state` facet.
+    let mut program_sink_tx: Option<SyncSender<Vec<i16>>> = None;
+    let program_out_report: Option<(usize, Arc<LocalAudioStats>)> = match matrix.program_out() {
+        Some((pid, target, streams)) => {
+            let stats = Arc::new(LocalAudioStats::default());
+            let channels = matrix.participants[pid].out_channels.max(1) as u8;
+            program_sink_tx = Some(spawn_program_sink(
+                target.clone(),
+                sample_rate,
+                channels,
+                stats.clone(),
+            ));
+            tracing::info!(
+                %target,
+                participant = pid,
+                sources = ?streams,
+                "local-audio: program sink (PipeWire) enabled for the OBS program capture"
+            );
+            Some((pid, stats))
+        }
+        None => None,
+    };
+    let local_input_reports: Vec<(usize, Arc<LocalAudioStats>)> = matrix
+        .local_inputs()
+        .into_iter()
+        .map(|(pid, node, chans)| {
+            let stats = Arc::new(LocalAudioStats::default());
+            let cfg = LocalSourceConfig {
+                target: node.clone(),
+                rate: sample_rate,
+                channels: chans.max(1),
+                block_frames,
+                participant_id: pid,
+                stream_name: matrix.participants[pid].name.clone(),
+            };
+            spawn_local_source(cfg, jitter.clone(), stats.clone());
+            tracing::info!(
+                target = %node,
+                participant = pid,
+                "local-audio: talkback capture (PipeWire) enabled into the N-1 mix"
+            );
+            (pid, stats)
+        })
+        .collect();
+
     // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
     // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
     // OS thread — the NDI recv is a blocking FFI call). The shared slot feeds `/interkom.mjpeg`,
@@ -289,6 +346,16 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // Feed the program_out participant's mixed output into the PipeWire sink (issue 1344).
+                // Best-effort try_send: a full queue drops the block (talkback/program jitter is
+                // tolerable), never blocking the mix loop.
+                if let (Some(tx), Some((pid, _))) = (&program_sink_tx, &program_out_report) {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
+
                 // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
                 let addrs: Vec<Option<SocketAddr>> =
                     out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
@@ -326,6 +393,17 @@ async fn main() -> Result<()> {
                     if let Some((pid, jstats)) = &janus_report {
                         if let Some(s) = rx_stats.get_mut(*pid) {
                             s.janus = Some(jstats.snapshot());
+                        }
+                    }
+                    // Attach the local-audio facet to the program_out + talkback capture stats (1344).
+                    if let Some((pid, lstats)) = &program_out_report {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.local_audio = Some(lstats.snapshot());
+                        }
+                    }
+                    for (pid, lstats) in &local_input_reports {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.local_audio = Some(lstats.snapshot());
                         }
                     }
                     let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);

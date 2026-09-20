@@ -16,10 +16,13 @@ Slot → hub participant mapping (derived from the XML's own attributes, not a h
   VBAN in only — the stream name minus the `-strih` suffix).
 - `AMDevice` type 256 (the MiniFuse ASIO master) → `cutters`; type 4 (WDM out) → `speakers`; type 1
   (WDM in) → `line34`.
-- an online `VAIOSlot` (VAIO1) → `phones`; an online `VASIOSlot` (VASIO8) → `program_monitor`.
+- an online `VAIOSlot` (VAIO1) → `phones`; an online `VASIOSlot` (VASIO8) → `program_out`.
 
-Only the VBAN adapter is live in M1; every non-VBAN participant is declared with `adapter = "none"`
-(its PipeWire/Janus I/O is M2/M3), so the engine computes its mix but nothing delivers it yet.
+Adapters (issue 1344 wired the local PipeWire graph): VBAN legs are live; the `phones` participant is
+`janus` (M3a); VASIO8 → `program_out` is a `pipewire` sink (the OBS `ASIO zvuk` program capture, fed
+by the VBAN streams routed into it) and the `cutters` (MiniFuse) is a `pipewire` capture input (the
+operator talkback mic). The remaining interface participants (speakers/line34) stay `adapter = "none"`
+until a later local-monitor lane wires them.
 
 Usage:
     python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-lx.toml
@@ -67,10 +70,18 @@ _ROLE_ORDER = {
     "phones": 3,
     "speakers": 4,
     "line34": 5,
-    "program_monitor": 6,
+    "program_out": 6,
 }
 
 _STRIH_SUFFIX = "-strih"
+
+# issue 1344: the local PipeWire nodes the strih-lx audio graph binds.
+# - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures its `.monitor`.
+# - MINIFUSE_CAPTURE_NODE: the MiniFuse 4 pro-audio capture node the hub reads the operator talkback
+#   from. The exact node name is pinned by the WirePlumber rule setup-strih installs (pro-audio
+#   profile); a supervisor confirms/overrides it against `wpctl status` at the live audio bring-up.
+_PROGRAM_SINK_NODE = "strih-program"
+_MINIFUSE_CAPTURE_NODE = "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0"
 
 
 def _strip_suffix(name):
@@ -148,7 +159,10 @@ def build_model(xml_text):
         uniq = e.get("uniq")
         dtype = e.get("type")
         if dtype == "256":
-            add("cutters", "cutters", "none", 0)
+            # The MiniFuse ASIO master carries the operator TALKBACK mic — a pipewire capture input
+            # feeding the cutters participant into the N-1 mix (issue 1344).
+            add("cutters", "cutters", "pipewire", 0)
+            participants["cutters"]["pipewire_source"] = _MINIFUSE_CAPTURE_NODE
             slot_to_part[uniq] = "cutters"
         elif dtype == "4":
             add("speakers", "speakers", "none", 0)
@@ -166,11 +180,13 @@ def build_model(xml_text):
             slot_to_part[e.get("uniq")] = "phones"
             break
 
-    # Program monitor (OBS program-audio sink, VASIO8) — the first online VASIOSlot.
+    # Program out (OBS `ASIO zvuk` program-audio capture, VASIO8) — the first online VASIOSlot.
+    # A pipewire sink: the hub writes the VBAN streams routed into VASIO8 (the program mix) to the
+    # `strih-program` null sink, which OBS captures as `strih-program.monitor` (issue 1344).
     for e in root.iter("VASIOSlot"):
         if e.get("online") == "1":
-            add("program_monitor", "program_monitor", "none", 0)
-            slot_to_part[e.get("uniq")] = "program_monitor"
+            add("program_out", "program_out", "pipewire", 0)
+            slot_to_part[e.get("uniq")] = "program_out"
             break
 
     # Points (routing grid), in document order.
@@ -204,6 +220,21 @@ def build_model(xml_text):
         d = participants[pt["dst"]]
         s["in_channels"] = max(s["in_channels"], pt["in_ch"])
         d["out_channels"] = max(d["out_channels"], pt["out_ch"])
+
+    # issue 1344: the program_out pipewire sink target + its source streams. The source streams are
+    # DERIVED from the routing — the in_stream of every VBAN participant that routes INTO program_out
+    # (preserving exactly what VB-Matrix fed VASIO8), never a hard-coded guess: on this fixture that
+    # is fohabl-strih (VBAN8) + lv1-strih (the VBAN64 slot = VBANStreamIn index 9), both unity ch1/2.
+    po = participants.get("program_out")
+    if po is not None:
+        po["pipewire_target"] = _PROGRAM_SINK_NODE
+        srcs = []
+        for pt in points:
+            if pt["dst"] == "program_out":
+                src_in = participants.get(pt["src"], {}).get("in_stream")
+                if src_in and src_in not in srcs:
+                    srcs.append(src_in)
+        po["source_streams"] = srcs
 
     ordered = sorted(participants.values(), key=lambda p: p["order"])
     for p in ordered:
@@ -266,6 +297,13 @@ def render(model):
             out.append(f'in_stream = "{p["in_stream"]}"')
         if "out_stream" in p:
             out.append(f'out_stream = "{p["out_stream"]}"')
+        if "pipewire_target" in p:
+            out.append(f'pipewire_target = "{p["pipewire_target"]}"')
+        if "pipewire_source" in p:
+            out.append(f'pipewire_source = "{p["pipewire_source"]}"')
+        if "source_streams" in p:
+            joined = ", ".join(f'"{s}"' for s in p["source_streams"])
+            out.append(f"source_streams = [{joined}]")
         out.append(f'in_channels = {p["in_channels"]}')
         out.append(f'out_channels = {p["out_channels"]}')
         out.append("")
