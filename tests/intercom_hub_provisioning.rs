@@ -43,8 +43,8 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
         "setup-strih must NOT restart intercom-hub (enable-only until the M4 cut-over)"
     );
     assert!(
-        s.contains("TOTAL_STEPS=15"),
-        "setup-strih TOTAL_STEPS must be bumped for the intercom + janus steps"
+        s.contains("TOTAL_STEPS=17"),
+        "setup-strih TOTAL_STEPS must be bumped for the intercom + janus + issue-1317 perf/companion steps"
     );
 }
 
