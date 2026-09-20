@@ -170,6 +170,26 @@ via `strih-program.monitor`; the MiniFuse capture feeds the operator talkback in
 (Prístup 3 "OBS captures the MiniFuse directly" was REJECTED — it would put the mic on the program
 bus.)
 
+**Follow-up (20.9.2026 live diagnosis, issuecomment-5751113173): `strih-program.monitor` itself is
+NOT pulse-visible on Ubuntu 26.04 pipewire.** Live-verified: `support.null-audio-sink` created via
+`context.objects` never gets a `pulse.monitor` mapping on this box (`pw-dump` shows `pulse.monitor =
+None`), so OBS's `pulse_input_capture` enumeration never lists `strih-program.monitor` and binding it
+reads digital silence — even though `pw-cat --target strih-program.monitor` captures the real audio
+fine (only OBS/libpulse can't see it). The fix: a SECOND pipewire.conf.d drop-in
+(`strih_pipewire_program_loopback_conf`, installed alongside `strih_pipewire_program_sink_conf` in
+setup-strih step 12) loads a `libpipewire-module-loopback` that captures the `strih-program` sink's
+OUTPUT (`node.target = "strih-program"`, `stream.capture.sink = true`, `node.passive = true`) and
+republishes it as its own node, `strih-program-source`. That node's `media.class` MUST be plain
+`"Audio/Source"` — NOT `"Audio/Source/Virtual"` (proven live: with `Virtual` OBS enumerates the
+source in its device list but its capture stream never links, silence; plain `Audio/Source` links
+correctly). `scripts/strih_scenes.py`'s `AUDIO_MONITOR_DEVICE` binds `strih-program-source`, not
+`strih-program.monitor`, and OBS must be RESTARTED after `strih-program-source` first exists —
+OBS enumerates PipeWire audio devices only at its own startup. The `ASIO zvuk` input must also be a
+scene item in EVERY declared operator scene (`ensure_program_audio_in_every_scene`, wired into
+`bootstrap()`), not just the one it was created in — OBS only plays a scene item's audio while its
+owning scene is active, so a single-scene seed silences program audio on every camera cut (the
+original migrated collection had it in all 7 program scenes).
+
 ### The two directions (`intercom/hub/src/local_audio.rs`)
 
 - **EGRESS — `program_out` (a `pipewire` participant, role `program_out`):** declares
@@ -197,14 +217,20 @@ bus.)
 (pipewire, `pipewire_source`). The byte-parity fixture test is regenerated in the SAME commit.
 `scripts/strih_scenes.py` gets the ONE allowed create in update-only mode: if the OBS `ASIO zvuk`
 input is missing or is the un-creatable `asio_input_capture`, it is created/replaced as
-`pulse_input_capture` on `strih-program.monitor` KEEPING the name (`audio_input_action` +
-`seed_program_audio_input`; `--audio-input-kind` reads it back for verify).
+`pulse_input_capture` on `strih-program-source` (the loopback republish node, see the follow-up
+above — NOT `strih-program.monitor` directly) KEEPING the name (`audio_input_action` +
+`seed_program_audio_input`; `--audio-input-kind` reads it back for verify). The MiniFuse capture
+node name in the converter (`_MINIFUSE_CAPTURE_NODE`) is case-sensitive: the real ALSA node is
+UPPERCASE `ARTURIA` (confirmed live against `wpctl status`) — a lowercase/title-case mismatch reads
+as a missing device to the hub.
 
 ### Provisioning + the DynamicUser decision (setup-strih step 12)
 
 Step 12 installs the operator-session `strih-program` null sink
-(`~/.config/pipewire/pipewire.conf.d/strih-program.conf`) + a WirePlumber rule pinning the MiniFuse
-to its pro-audio profile @48 kHz + the **intercom-hub audio drop-in**. The old fail-loud
+(`~/.config/pipewire/pipewire.conf.d/strih-program.conf`) + the loopback republish source
+(`~/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf`, `strih_pipewire_program_loopback_conf`
+— see the follow-up above) + a WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz
++ the **intercom-hub audio drop-in**. The old fail-loud
 `STRIH_LX_AUDIO_WIRED` flag is REMOVED — `verify-strih.sh` derives the audio verdict
 (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture + hub program-rx,
 FOH-live level is a supervisor NOTE).
