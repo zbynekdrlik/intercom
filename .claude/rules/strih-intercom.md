@@ -354,6 +354,11 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   incl. `self` (`too_many_arguments`, cap 7 → group them in a borrowed `OutBlock<'_>` struct, not an
   `#[allow]`). A lib lint stops clippy before the bin/tests are linted, so each round can reveal a
   NEW layer — audit main.rs + tests with the same list rather than waiting for the next round.
+  (4) issue 1344: `io::Error::new(io::ErrorKind::Other, msg)` → the warn-by-default `style` lint
+  `clippy::io_other_error` (Rust ≥ 1.87), which is a HARD error under the hub's `-D warnings` gate;
+  use `io::Error::other(msg)`. This is invisible to the Tier-0 local net (`cargo fmt` doesn't lint),
+  so grep every new `io::Error::new(...Other...)` site before a push. Add `io_other_error` to the
+  hand-audit list above alongside `dead_code` / `too_many_arguments`.
 
 ## M3b — the phone PWA (served by the hub) + the LAN-HTTPS interkom front (issue 1345)
 
