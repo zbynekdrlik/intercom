@@ -177,6 +177,16 @@ def test_cutters_becomes_a_pipewire_talkback_capture():
     assert "MiniFuse" in cutters["pipewire_source"]
 
 
+def test_minifuse_capture_node_is_the_real_uppercase_arturia_alsa_name():
+    # issue 1344 follow-up (20.9.2026 live diagnosis, issuecomment-5751113173): the real ALSA node
+    # name on the box is uppercase "ARTURIA" (`wpctl status` / `pactl list sources`), NOT the
+    # title-case "Arturia" the converter used to emit — a case-sensitive PipeWire node-name mismatch
+    # the hub reads as a missing device.
+    _hub, parts, _points = _model()
+    cutters = next(p for p in parts if p["name"] == "cutters")
+    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0",         cutters["pipewire_source"]
+
+
 def test_generated_toml_emits_the_pipewire_fields():
     text = conv.convert(_xml())
     assert 'adapter = "pipewire"' in text
