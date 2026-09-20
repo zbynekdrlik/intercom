@@ -56,7 +56,7 @@ out_channels = 2
 name = "cutters"
 role = "cutters"
 adapter = "pipewire"
-pipewire_source = "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0"
+pipewire_source = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 in_channels = 2
 out_channels = 0
 
@@ -112,7 +112,7 @@ fn valid_program_out_and_talkback_load_and_are_discoverable() {
     assert_eq!(inputs.len(), 1, "one talkback capture input");
     let (cid, node, chans) = &inputs[0];
     assert_eq!(m.participants[*cid].name, "cutters");
-    assert_eq!(node, "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0");
+    assert_eq!(node, "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0");
     assert_eq!(*chans, 2);
 }
 
@@ -201,7 +201,7 @@ fn program_out_with_empty_source_streams_is_refused() {
 
 #[test]
 fn a_pipewire_capture_input_without_a_source_node_is_refused() {
-    let bad = without("pipewire_source = \"alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0\"\n");
+    let bad = without("pipewire_source = \"alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0\"\n");
     let err = Matrix::from_toml(&bad).unwrap_err().to_string();
     assert!(err.contains("needs a pipewire_source"), "got: {err}");
 }

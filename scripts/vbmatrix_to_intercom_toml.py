@@ -76,12 +76,16 @@ _ROLE_ORDER = {
 _STRIH_SUFFIX = "-strih"
 
 # issue 1344: the local PipeWire nodes the strih-lx audio graph binds.
-# - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures its `.monitor`.
+# - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures the loopback
+#   republish node strih-program-source (issue 1344 follow-up, 20.9.2026 live diagnosis --
+#   strih-program.monitor itself is NOT pulse-visible to OBS on this box).
 # - MINIFUSE_CAPTURE_NODE: the MiniFuse 4 pro-audio capture node the hub reads the operator talkback
-#   from. The exact node name is pinned by the WirePlumber rule setup-strih installs (pro-audio
-#   profile); a supervisor confirms/overrides it against `wpctl status` at the live audio bring-up.
+#   from. UPPERCASE "ARTURIA" -- confirmed live against `wpctl status` (issue 1344 follow-up,
+#   20.9.2026): a lowercase/title-case node name is a case-sensitive PipeWire mismatch the hub reads
+#   as a missing device. The exact node name is pinned by the WirePlumber rule setup-strih installs
+#   (pro-audio profile); re-confirm against `wpctl status` at any future live audio bring-up.
 _PROGRAM_SINK_NODE = "strih-program"
-_MINIFUSE_CAPTURE_NODE = "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0"
+_MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 
 
 def _strip_suffix(name):

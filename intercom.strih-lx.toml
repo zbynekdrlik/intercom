@@ -122,7 +122,7 @@ out_channels = 0
 name = "cutters"
 role = "cutters"
 adapter = "pipewire"
-pipewire_source = "alsa_input.usb-Arturia_MiniFuse_4-00.pro-input-0"
+pipewire_source = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 in_channels = 2
 out_channels = 4
 
