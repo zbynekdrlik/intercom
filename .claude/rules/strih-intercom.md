@@ -415,19 +415,37 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 ### The LAN-HTTPS interkom front — the SECOND site rendered by `scripts/lib/shading-https.sh`
 
 - The shading-https lib is GENERALISED: `shading_https_site_content <host> <upstream> [extra]
-  [fronted] [served]` — an empty `$extra`/`$fronted`/`$served` reproduces the shading site
-  BYTE-IDENTICALLY (a drift-guard test pins it), so `scripts/nginx/shading.newlevel.media.conf` is
-  untouched. `interkom_https_site_content` = the same renderer with the interkom host
-  (`interkom.newlevel.media`), upstream (`http://10.77.9.203:8790` = the hub) + the extra
-  `location /janus { proxy_pass http://10.77.9.203:8188; … }` block from
+  [fronted] [served] [aliases]` — an empty `$extra`/`$fronted`/`$served`/`$aliases` reproduces the
+  shading site BYTE-IDENTICALLY (a drift-guard test pins it), so
+  `scripts/nginx/shading.newlevel.media.conf` is untouched. `interkom_https_site_content` = the same
+  renderer with the interkom PRIMARY host (`interkom_https_hostname` = `interkom-lx.newlevel.media`,
+  the cert-keyed name), the strih.lan upstream (`http://strih.lan:8790` = the hub) + the extra
+  `location = /janus { proxy_pass http://strih.lan:8188; … }` block from
   `interkom_https_janus_location` (HTTP/1.1 Upgrade passthrough + `proxy_read_timeout 3600s` for the
   persistent WS). The `/ws` upgrade for the hub is already carried by `location /`. The rendered
   site is committed at `scripts/nginx/interkom.newlevel.media.conf` and the python test
   (`tests/python/test_shading_https_install_808.py`) pins BOTH rendered files against the lib.
+- **Production hostnames as GENERATED config (issue 1345 M4).** The `[aliases]` arg (6th) appends
+  extra `server_name` SANs to BOTH the :80 and :443 blocks (empty ⇒ byte-identical single-name
+  render). The interkom default alias set = `interkom_https_aliases()` =
+  `interkom.newlevel.media interkom-snv.newlevel.media` (the crew's production phone names) — the
+  SAME 3-SAN cert the M4 cut-over made by hand. **`interkom-pp.newlevel.media` is DELIBERATELY
+  EXCLUDED** — Poprad stays on VDO.Ninja until its rework (~4.10.2026, owner ruling); append it to
+  `interkom_https_aliases()` only when that lands. The upstreams use the router-resolvable
+  `strih.lan` identity (the notebook took the strih identity, `strih.lan -> 10.77.9.202` today) so
+  they follow future box swaps without a code change — **never the retired `10.77.9.203`, never a
+  literal `.202`** (the python test asserts neither appears in the render or the committed conf).
+  The certbot argv (`shading_https_certbot_argv … <aliases>`) emits `-d` per SAN + `--expand` +
+  `--cert-name <primary>` so the cert path stays keyed on `interkom-lx.newlevel.media` (exactly the
+  live `--expand`); with no aliases the argv is byte-identical to the single-name shading issuance.
 - `scripts/dev1-shading-https-install.sh` gains `--site interkom|shading` (default `shading`,
-  existing behaviour unchanged). `--site interkom` adopts the interkom host/upstream/site-name +
-  the `/janus` extra block (explicit `--hostname`/`--upstream` still override); the A record still
-  points at dev1's LAN IP (dev1 is the nginx front for both sites).
+  existing behaviour unchanged) + a repeatable `--alias NAME` (and `SHADING_HTTPS_ALIASES` env). An
+  explicit alias set (flag or env) REPLACES the per-site default. `--site interkom` adopts the
+  interkom host/upstream/site-name + the default crew aliases + the `/janus` extra block (explicit
+  `--hostname`/`--upstream`/`--alias` still override); the A record still points at dev1's LAN IP
+  (dev1 is the nginx front for both sites). `--check` REPORTS each alias's A-record resolution but
+  never FAILS on a lagging alias (a fresh cut-over's alias records may lag the primary's — the
+  verdict is gated on the primary probes only).
 - **Supervisor-only live steps** (NOT a lane): the DNS `interkom.newlevel.media` A record (→ dev1
   LAN IP), `certbot` DNS-01 issuance, and the install on dev1 are run by the supervisor with
   `scripts/dev1-shading-https-install.sh --site interkom --install` / `--check`, exactly like the
