@@ -3,8 +3,11 @@
 //!
 //! Two directions, one shape (`pw-cat` supervised children — the SAME shell-out-over-FFI rationale
 //! the bkshading relay uses for gphoto2: no libpipewire build dependency, so the whole hub stays
-//! Tier-0 / CI-buildable and cross-compilable; a native `pipewire-rs` impl is a later second impl of
-//! the SAME [`LocalAudioSink`] / [`LocalAudioSource`] trait):
+//! Tier-0 / CI-buildable and cross-compilable). The [`LocalAudioSink`] / [`LocalAudioSource`] traits
+//! are the abstraction boundary the supervised loops write/read a block through; the only impls today
+//! are the `pw-cat`-child [`PwCatSink`] / [`PwCatSource`]. A future native `pipewire-rs` backend
+//! would add a second impl of the same trait and generalise the two loops over it — the trait exists
+//! to make that swap local, not because a second impl ships yet:
 //!
 //! EGRESS ([`PwCatSink`]): the block loop's `program_out` mix (the decoded `fohabl-strih` +
 //! `lv1-strih` VBAN blocks the engine already sums via the matrix points) is written to a PipeWire
@@ -36,9 +39,9 @@ use crate::vban_io::{DecodedAudio, JitterBuffer};
 /// engine mixes). Kept one place so the argv builders + the framing helpers never drift apart.
 pub const PW_CAT_FORMAT: &str = "s16";
 
-/// The queue depth for the egress channel: ~64 blocks (~0.3 s at 256-frame blocks). A full queue
-/// drops the OLDEST-arriving block rather than blocking the mix loop (talkback/program jitter is
-/// tolerable; a stalled mix loop is not).
+/// The queue depth for the egress channel: ~64 blocks (~0.3 s at 256-frame blocks). When it is full
+/// the feeder's best-effort `try_send` DROPS THE NEW block (it never evicts a queued one and never
+/// blocks the mix loop) — a dropped ~5 ms block is tolerable program jitter; a stalled mix loop is not.
 const EGRESS_QUEUE_BLOCKS: usize = 64;
 
 /// Build the `pw-cat` PLAYBACK argv for the program sink (egress). Raw interleaved s16 PCM is fed on
@@ -197,7 +200,7 @@ impl PwCatSink {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pw-cat stdin not piped"))?;
+            .ok_or_else(|| io::Error::other("pw-cat stdin not piped"))?;
         Ok(PwCatSink { child, stdin })
     }
 }
@@ -234,7 +237,7 @@ impl PwCatSource {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pw-cat stdout not piped"))?;
+            .ok_or_else(|| io::Error::other("pw-cat stdout not piped"))?;
         Ok(PwCatSource { child, stdout })
     }
 }

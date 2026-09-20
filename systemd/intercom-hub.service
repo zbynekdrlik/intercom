@@ -24,11 +24,12 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# issue 1344: once the local PipeWire audio graph is wired, setup-strih step 12 installs a drop-in
+# issue 1344: setup-strih step 12 ALWAYS installs a drop-in
 # (/etc/systemd/system/intercom-hub.service.d/10-local-audio.conf) that OVERRIDES DynamicUser=no +
 # User=<operator> + the operator's XDG_RUNTIME_DIR, so the hub's pw-cat program-sink + talkback
 # children reach the operator's PipeWire session (DynamicUser cannot traverse the operator's 0700
-# /run/user/<uid>). The VBAN-only M1 hub runs fine under DynamicUser without the drop-in.
+# /run/user/<uid>). So on a provisioned strih-lx the hub runs as the operator, NOT DynamicUser; this
+# base unit's DynamicUser=yes is only the standalone default for a hub run without that drop-in.
 
 [Install]
 WantedBy=default.target

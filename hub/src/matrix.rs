@@ -339,6 +339,14 @@ impl Matrix {
                         p.name
                     );
                 }
+                // A program_out is a pure SINK — it must NOT also carry a capture node, or the
+                // block loop would spawn a capture into its (in_channels=0) buffer.
+                if p.pipewire_source.is_some() {
+                    bail!(
+                        "participant '{}': program_out is a sink and must not carry a pipewire_source",
+                        p.name
+                    );
+                }
                 if p.source_streams.is_empty() {
                     bail!(
                         "participant '{}': program_out needs at least one source_stream",
@@ -468,7 +476,9 @@ impl Matrix {
             .iter()
             .enumerate()
             .filter_map(|(id, p)| {
-                if p.adapter == ADAPTER_PIPEWIRE {
+                // A capture input is a pipewire participant that is NOT the program_out sink (the
+                // sink can't carry a pipewire_source — validated at load — but exclude it explicitly).
+                if p.adapter == ADAPTER_PIPEWIRE && p.role != PROGRAM_OUT_ROLE {
                     p.pipewire_source
                         .clone()
                         .map(|node| (id, node, p.in_channels))

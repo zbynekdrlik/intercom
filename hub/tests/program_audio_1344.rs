@@ -207,6 +207,20 @@ fn a_pipewire_capture_input_without_a_source_node_is_refused() {
 }
 
 #[test]
+fn program_out_carrying_a_capture_source_is_refused() {
+    // A program_out is a pure SINK — it must not also declare a pipewire_source.
+    let bad = VALID.replace(
+        r#"pipewire_target = "strih-program""#,
+        "pipewire_target = \"strih-program\"\npipewire_source = \"alsa_input.something\"",
+    );
+    let err = Matrix::from_toml(&bad).unwrap_err().to_string();
+    assert!(
+        err.contains("must not carry a pipewire_source"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn program_out_role_on_a_non_pipewire_adapter_is_refused() {
     let bad = VALID.replace(
         r#"name = "program_out"
