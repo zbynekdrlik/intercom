@@ -75,14 +75,38 @@ fn setup_strih_installs_janus_enable_only() {
         s.contains("systemctl enable janus"),
         "setup-strih must ENABLE janus"
     );
-    // ENABLE-ONLY: the M4 cut-over starts it, never this provisioning step.
+    // ENABLE-ONLY: never an UNCONDITIONAL start (the M4 cut-over starts it with the hub).
     assert!(
         !s.contains("systemctl start janus"),
         "setup-strih must NOT start janus (enable-only until the M4 cut-over)"
     );
+    // A restart is allowed ONLY guarded by `is-active` — Ubuntu's janus package auto-STARTS the
+    // service on install (before the jcfg exists), so if it is already running we restart it to load
+    // the freshly written room/ws/http jcfg; a not-running janus stays enable-only (issue 1345 M3
+    // follow-up c).
+    if s.contains("systemctl restart janus") {
+        let restart = s.find("systemctl restart janus").unwrap();
+        let guard = s.find("systemctl is-active --quiet janus");
+        assert!(
+            guard.is_some_and(|g| g < restart && restart - g < 300),
+            "any `systemctl restart janus` must be guarded by a nearby `systemctl is-active --quiet janus`"
+        );
+    }
+}
+
+#[test]
+fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
+    let unit = read("systemd/intercom-hub.service");
+    // The production unit runs DynamicUser=yes (unchanged) and reads the root-owned 0600 room secret
+    // through systemd's credential store — LoadCredential drops it 0400 owned by the dynamic user, so
+    // the hub can read it without dropping the sandbox (issue 1345 M3 follow-up b).
     assert!(
-        !s.contains("systemctl restart janus"),
-        "setup-strih must NOT restart janus (enable-only until the M4 cut-over)"
+        unit.contains("LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret"),
+        "the unit must LoadCredential the room secret from its 0600 file"
+    );
+    assert!(
+        unit.contains("DynamicUser=yes"),
+        "the unit keeps DynamicUser=yes (the credential store makes the 0600 secret readable)"
     );
 }
 
