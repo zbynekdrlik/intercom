@@ -141,3 +141,48 @@ def test_generated_toml_parses_into_the_matrix_shape():
         if pt["src"] == "fohabl" and pt.get("in_ch") == 1 and pt["dst"] == "cutters"
     ]
     assert fohabl_cutters and all(pt["gain_db"] == -8.0 for pt in fohabl_cutters)
+
+
+# --- issue 1344: the local PipeWire program-audio graph (VB-Matrix replacement) -----------------
+
+
+def test_vasio8_becomes_a_pipewire_program_out_sink():
+    """VASIO8 is the OBS `ASIO zvuk` program capture — the converter maps it to a `program_out`
+    pipewire sink (not the old M1 `program_monitor`), targeting the `strih-program` null sink."""
+    _hub, parts, _points = _model()
+    names = {p["name"] for p in parts}
+    assert "program_out" in names, "VASIO8 must map to a program_out participant"
+    assert "program_monitor" not in names, "VASIO8 is the OBS program capture, not a monitor"
+    po = next(p for p in parts if p["name"] == "program_out")
+    assert po["role"] == "program_out"
+    assert po["adapter"] == "pipewire"
+    assert po["pipewire_target"] == "strih-program"
+
+
+def test_program_out_source_streams_are_the_vasio8_feeds():
+    """The program mix OBS captures = the VBAN streams routed into VASIO8 = fohabl-strih + lv1-strih
+    (the VBAN64 slot = VBANStreamIn index 9 = lv1-strih), both live named sources."""
+    _hub, parts, _points = _model()
+    po = next(p for p in parts if p["name"] == "program_out")
+    assert po["source_streams"] == ["fohabl-strih", "lv1-strih"], po["source_streams"]
+
+
+def test_cutters_becomes_a_pipewire_talkback_capture():
+    """The MiniFuse (AMDevice type 256) carries the operator TALKBACK mic — the converter maps the
+    cutters participant to a pipewire capture input, not the old adapter=none."""
+    _hub, parts, _points = _model()
+    cutters = next(p for p in parts if p["name"] == "cutters")
+    assert cutters["adapter"] == "pipewire"
+    assert cutters.get("pipewire_source"), "cutters needs a pipewire_source (the MiniFuse capture node)"
+    assert "MiniFuse" in cutters["pipewire_source"]
+
+
+def test_generated_toml_emits_the_pipewire_fields():
+    text = conv.convert(_xml())
+    assert 'adapter = "pipewire"' in text
+    assert 'pipewire_target = "strih-program"' in text
+    assert 'source_streams = ["fohabl-strih", "lv1-strih"]' in text
+    assert "pipewire_source = " in text
+    # No stale program_monitor participant survives.
+    data = tomllib.loads(text)
+    assert not any(p["name"] == "program_monitor" for p in data["participant"])
