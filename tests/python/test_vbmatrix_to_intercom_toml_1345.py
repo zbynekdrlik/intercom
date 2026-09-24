@@ -196,3 +196,42 @@ def test_generated_toml_emits_the_pipewire_fields():
     # No stale program_monitor participant survives.
     data = tomllib.loads(text)
     assert not any(p["name"] == "program_monitor" for p in data["participant"])
+
+
+# --- 24.9.2026 production fix: the operator's headphones + the talkback level -------------------
+
+_MINIFUSE_PLAYBACK = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
+
+
+def test_cutters_play_their_n1_mix_to_the_minifuse_outputs():
+    """On Linux the cutters participant was capture-only, so the operator heard NOTHING. The converter
+    now gives it the MiniFuse playback node + an explicit AUX channel map for its 4 output channels
+    (the pro-audio node's ports are AUX0..AUX5; an unmapped 4-ch stream defaults to FL/FR/RL/RR)."""
+    _hub, parts, _points = _model()
+    cutters = next(p for p in parts if p["name"] == "cutters")
+    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
+    assert cutters["pipewire_target"] == _MINIFUSE_PLAYBACK
+    assert cutters["out_channels"] == 4
+    assert cutters["pipewire_channel_map"] == "AUX0,AUX1,AUX2,AUX3"
+    text = conv.convert(_xml())
+    assert f'pipewire_target = "{_MINIFUSE_PLAYBACK}"' in text
+    assert 'pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"' in text
+
+
+def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cams():
+    """The MiniFuse talkback reached the hub at about -68 dBFS with no makeup gain. Every cutters ->
+    phones / cutters -> camN point carries the ONE converter constant (never a hand-edited TOML);
+    every other point keeps its VB-Matrix gain."""
+    assert conv.TALKBACK_MAKEUP_DB == 12.0
+    _hub, _parts, points = _model()
+    talkback = [
+        pt for pt in points if pt["src"] == "cutters" and (pt["dst"] == "phones" or pt["dst"] in _CAMS)
+    ]
+    assert talkback, "the cutters route to the phones and the cams"
+    assert {pt["dst"] for pt in talkback} == _CAMS | {"phones"}
+    assert all(pt["gain_db"] == conv.TALKBACK_MAKEUP_DB for pt in talkback), talkback
+    # Nothing else moved: the program refs keep -8/-10 dB, the cam -> cutters points stay unity.
+    others = [pt for pt in points if pt not in talkback]
+    assert all(pt["gain_db"] in (0.0, -8.0, -10.0) for pt in others)
+    text = conv.convert(_xml())
+    assert "gain_db = 12.0" in text

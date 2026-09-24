@@ -111,3 +111,22 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     );
     assert_eq!(*chans, 2, "two cutter mics");
 }
+
+#[test]
+fn deployed_matrix_plays_the_cutters_mix_to_the_minifuse_with_talkback_gain() {
+    // issue 1345 (24.9.2026): the operator heard nothing because the cutters were capture-only.
+    let m = Matrix::from_toml(DEPLOYED_TOML).expect("the deployed matrix loads");
+    let cutters = m.id_of("cutters").expect("cutters");
+    let outs = m.local_outputs();
+    assert_eq!(outs.len(), 1, "one local playback egress (the cutters)");
+    let (pid, target, chans, map) = &outs[0];
+    assert_eq!(*pid, cutters);
+    assert_eq!(target, "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0");
+    assert_eq!(*chans, 4, "the 4 MiniFuse outputs the VB-Matrix fed");
+    assert_eq!(map.as_deref(), Some("AUX0,AUX1,AUX2,AUX3"));
+
+    // Every cutters -> phones / camN point carries the +12 dB talkback makeup gain.
+    let talkback: Vec<_> = m.points.iter().filter(|p| p.src == cutters).collect();
+    assert!(!talkback.is_empty());
+    assert!(talkback.iter().all(|p| (p.gain_db - 12.0).abs() < 1e-6));
+}
