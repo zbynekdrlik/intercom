@@ -48,9 +48,12 @@ pub fn decimation_factor(in_rate: u32, out_rate: u32) -> Option<usize> {
         .find(|&f| u64::from(out_rate) * f as u64 == u64::from(in_rate))
 }
 
-/// A fresh (silent-history) anti-alias decimator for a `factor`:1 ratio (`factor` >= 2).
+/// A fresh (silent-history) anti-alias decimator for a `factor`:1 ratio. `factor <= 1` is the
+/// identity (a single unity tap) — never a hidden low-pass.
 pub fn decimator(factor: usize) -> FirDecimator {
-    let factor = factor.max(1);
+    if factor <= 1 {
+        return FirDecimator::new(vec![1.0], 1);
+    }
     let taps = kaiser_lowpass_taps(
         TAPS_PER_DECIMATION * factor - 1,
         CUTOFF_OF_OUTPUT_RATE / factor as f64,
@@ -88,6 +91,11 @@ impl VbanRateConverter {
             decimators: Vec::new(),
             rate_rejects: 0,
         }
+    }
+
+    /// The hub rate this converter produces.
+    pub fn out_rate(&self) -> u32 {
+        self.out_rate
     }
 
     /// The rate of the most recent packet (even a rejected one), `None` before the first packet.
@@ -149,7 +157,9 @@ pub struct VbanRateStats {
 }
 
 impl VbanRateStats {
-    /// Copy `conv`'s current rate + reject count into the slot.
+    /// Copy `conv`'s current rate + reject count into the slot. The two are separate relaxed
+    /// stores, so a reader may briefly see a new rate with the previous count — fine for a
+    /// monitoring snapshot, never used for a decision.
     pub fn publish(&self, conv: &VbanRateConverter) {
         self.sample_rate
             .store(conv.sample_rate().unwrap_or(0), Ordering::Relaxed);

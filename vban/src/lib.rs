@@ -124,6 +124,15 @@ impl VbanHeader {
         }
     }
 
+    /// The sample rate in Hz, or `None` for a reserved rate index (20..=31). Unlike
+    /// [`VbanHeader::sample_rate`] there is no 48 kHz fallback, so a receiver that must honour the
+    /// rate (the strih intercom hub, issue 1345) can reject an unknown one instead of mis-playing it.
+    pub fn sample_rate_checked(&self) -> Option<u32> {
+        SAMPLE_RATES
+            .get((self.sample_rate_index & 0x1F) as usize)
+            .copied()
+    }
+
     /// Get the actual number of channels
     #[allow(dead_code)]
     pub fn num_channels(&self) -> u8 {

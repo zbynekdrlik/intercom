@@ -82,10 +82,11 @@ pub fn encode_packet(block: &OutBlock<'_>) -> Result<Vec<u8>> {
 }
 
 /// Decode a VBAN packet into planar PCM16 (`Pcm16` + `Float32` payloads supported; both are what
-/// the cambox may put on the wire) plus the header's sample rate in Hz. The number of frames is
-/// derived from the actual payload length, so a short/long packet never panics. The samples are at
-/// the HEADER rate — the receive path runs them through [`crate::vban_rate::VbanRateConverter`]
-/// before they reach a 48 kHz jitter ring (issue 1345: a 96 kHz FOH stream overran the ring).
+/// the cambox may put on the wire) plus the header's sample rate in Hz (`0` for a reserved rate
+/// index — no rate, so the converter rejects it). The number of frames is derived from the actual
+/// payload length, so a short/long packet never panics. The samples are at the HEADER rate — the
+/// receive path runs them through [`crate::vban_rate::VbanRateConverter`] before they reach a
+/// 48 kHz jitter ring (issue 1345: a 96 kHz FOH stream overran the ring).
 pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
     let header = VbanHeader::decode(data)?;
     let n_ch = header.num_channels() as usize;
@@ -129,7 +130,7 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
             channels,
             frames,
         },
-        header.sample_rate(),
+        header.sample_rate_checked().unwrap_or(0),
     ))
 }
 
@@ -153,8 +154,8 @@ pub fn to_hub_rate(
     conv: &mut VbanRateConverter,
     audio: DecodedAudio,
     rate: u32,
-    hub_rate: u32,
 ) -> Option<DecodedAudio> {
+    let hub_rate = conv.out_rate();
     let DecodedAudio {
         stream_name,
         channels,

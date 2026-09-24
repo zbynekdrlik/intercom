@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
                             let Some(conv) = converters.get_mut(id) else {
                                 continue;
                             };
-                            let converted = to_hub_rate(conv, audio, rate, sample_rate);
+                            let converted = to_hub_rate(conv, audio, rate);
                             if let Some(slot) = rate_stats.get(id) {
                                 slot.publish(conv);
                             }
