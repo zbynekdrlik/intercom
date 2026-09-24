@@ -154,8 +154,13 @@ fn the_playback_argv_carries_the_aux_channel_map_only_when_given() {
 
 #[test]
 fn the_record_child_asks_for_a_256_frame_latency() {
+    // pw-cat takes the latency as direct SAMPLES at `--rate` (or a time unit): `--latency 256` with
+    // `--rate 48000` sets `node.latency = "256/48000"`. The literal `256/48000` is REJECTED by pw-cat
+    // 1.6.2 ("bad latency value ... (bad unit)", live-verified on strih-lx).
     let a = pw_cat_record_argv("alsa_input.minifuse", 48000, 2);
     let pos = a.iter().position(|x| x == "--latency").expect("--latency");
-    assert_eq!(a[pos + 1], "256/48000");
+    assert_eq!(a[pos + 1], "256");
+    let rate = a.iter().position(|x| x == "--rate").unwrap();
+    assert_eq!(a[rate + 1], "48000");
     assert_eq!(a.last().unwrap(), "-");
 }
