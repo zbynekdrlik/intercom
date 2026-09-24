@@ -16,6 +16,7 @@
 //! with `adapter = "none"` and are computed by the engine but not yet delivered.
 
 pub mod engine;
+pub mod fir;
 pub mod http;
 pub mod janus_rtp;
 pub mod local_audio;
@@ -24,3 +25,4 @@ pub mod mulaw;
 pub mod ndi_video;
 pub mod state;
 pub mod vban_io;
+pub mod vban_rate;

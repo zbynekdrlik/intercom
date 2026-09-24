@@ -14,6 +14,8 @@ use std::time::Instant;
 use anyhow::Result;
 use intercom_vban::{VbanCodec, VbanHeader, VBAN_HEADER_SIZE};
 
+use crate::vban_rate::VbanRateConverter;
+
 /// One decoded VBAN packet's audio, deinterleaved into planar channels.
 #[derive(Debug, Clone)]
 pub struct DecodedAudio {
@@ -26,6 +28,17 @@ pub struct DecodedAudio {
 }
 
 impl DecodedAudio {
+    /// Rebuild a packet from planar channels (e.g. after rate conversion). `frames` is the shortest
+    /// channel's length, `0` for no channels.
+    pub fn from_planar(stream_name: String, channels: Vec<Vec<i16>>) -> Self {
+        let frames = channels.iter().map(Vec::len).min().unwrap_or(0);
+        DecodedAudio {
+            stream_name,
+            channels,
+            frames,
+        }
+    }
+
     /// Peak absolute sample across all channels (for a level meter). `0` for an empty packet.
     pub fn peak(&self) -> i16 {
         self.channels
@@ -69,9 +82,11 @@ pub fn encode_packet(block: &OutBlock<'_>) -> Result<Vec<u8>> {
 }
 
 /// Decode a VBAN packet into planar PCM16 (`Pcm16` + `Float32` payloads supported; both are what
-/// the cambox may put on the wire). The number of frames is derived from the actual payload length,
-/// so a short/long packet never panics.
-pub fn decode_packet(data: &[u8]) -> Result<DecodedAudio> {
+/// the cambox may put on the wire) plus the header's sample rate in Hz. The number of frames is
+/// derived from the actual payload length, so a short/long packet never panics. The samples are at
+/// the HEADER rate — the receive path runs them through [`crate::vban_rate::VbanRateConverter`]
+/// before they reach a 48 kHz jitter ring (issue 1345: a 96 kHz FOH stream overran the ring).
+pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
     let header = VbanHeader::decode(data)?;
     let n_ch = header.num_channels() as usize;
     let payload = &data[VBAN_HEADER_SIZE.min(data.len())..];
@@ -108,23 +123,58 @@ pub fn decode_packet(data: &[u8]) -> Result<DecodedAudio> {
         ch.truncate(frames);
     }
 
-    Ok(DecodedAudio {
-        stream_name: header.stream_name_str().to_string(),
-        channels,
-        frames,
-    })
+    Ok((
+        DecodedAudio {
+            stream_name: header.stream_name_str().to_string(),
+            channels,
+            frames,
+        },
+        header.sample_rate(),
+    ))
 }
 
-/// Decode + demux one packet: `Some((participant_id, audio))` if the stream name maps to a known
-/// participant, `None` if it decodes to an unknown name OR fails to decode (a foreign/garbage
-/// packet is silently ignored, exactly like the cambox receiver).
+/// Decode + demux one packet: `Some((participant_id, audio, sample_rate))` if the stream name maps
+/// to a known participant, `None` if it decodes to an unknown name OR fails to decode (a
+/// foreign/garbage packet is silently ignored, exactly like the cambox receiver).
 pub fn route_packet(
     known_streams: &HashMap<String, usize>,
     data: &[u8],
-) -> Option<(usize, DecodedAudio)> {
-    let audio = decode_packet(data).ok()?;
+) -> Option<(usize, DecodedAudio, u32)> {
+    let (audio, sample_rate) = decode_packet(data).ok()?;
     let id = *known_streams.get(&audio.stream_name)?;
-    Some((id, audio))
+    Some((id, audio, sample_rate))
+}
+
+/// Bring one routed packet, sampled at `rate`, to the hub rate through its stream's `conv`
+/// (issue 1345: a 96 kHz FOH stream pushed raw into the 48 kHz ring overran it on ~60 % of packets).
+/// A rate transition is logged ONCE: an info naming the rate, or a warn when the rate is rejected.
+/// `None` = the packet was dropped (unsupported rate — counted in the converter's `rate_rejects`).
+pub fn to_hub_rate(
+    conv: &mut VbanRateConverter,
+    audio: DecodedAudio,
+    rate: u32,
+    hub_rate: u32,
+) -> Option<DecodedAudio> {
+    let DecodedAudio {
+        stream_name,
+        channels,
+        ..
+    } = audio;
+    let step = conv.process(rate, channels);
+    if step.rate_changed {
+        if step.channels.is_some() {
+            tracing::info!(stream = %stream_name, rate, hub_rate, "VBAN stream sample rate");
+        } else {
+            tracing::warn!(
+                stream = %stream_name,
+                rate,
+                hub_rate,
+                "VBAN stream at an unsupported sample rate: its packets are DROPPED (only 1x/2x/4x the hub rate is accepted)"
+            );
+        }
+    }
+    step.channels
+        .map(|channels| DecodedAudio::from_planar(stream_name, channels))
 }
 
 /// A stream whose last packet is older than this is STALE (issue 1345, 24.9.2026): a muted or

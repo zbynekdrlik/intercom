@@ -25,7 +25,10 @@ use intercom_hub::local_audio::{
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
-use intercom_hub::vban_io::{resolve_vban_addr, route_packet, JitterBuffer, OutBlock, VbanSender};
+use intercom_hub::vban_io::{
+    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
+};
+use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
@@ -232,18 +235,36 @@ async fn main() -> Result<()> {
     ));
     let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
 
-    // --- receive task: demux packets into per-participant jitter buffers ---------------------
+    // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
+    // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
+    // converters live in this task alone (no lock); their rate + reject count are published to the
+    // lock-free `rate_stats` slots the block loop reads for /api/state.
+    let rate_stats: Arc<Vec<VbanRateStats>> =
+        Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
     {
         let jitter = jitter.clone();
+        let rate_stats = rate_stats.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
+            let mut converters: Vec<VbanRateConverter> = (0..n)
+                .map(|_| VbanRateConverter::new(sample_rate))
+                .collect();
             loop {
                 match vban_socket.recv_from(&mut buf).await {
                     Ok((len, _from)) => {
-                        if let Some((id, audio)) = route_packet(&input_streams, &buf[..len]) {
-                            if let Ok(mut jb) = jitter.lock() {
-                                if let Some(b) = jb.get_mut(id) {
-                                    b.push(&audio);
+                        if let Some((id, audio, rate)) = route_packet(&input_streams, &buf[..len]) {
+                            let Some(conv) = converters.get_mut(id) else {
+                                continue;
+                            };
+                            let converted = to_hub_rate(conv, audio, rate, sample_rate);
+                            if let Some(slot) = rate_stats.get(id) {
+                                slot.publish(conv);
+                            }
+                            if let Some(audio) = converted {
+                                if let Ok(mut jb) = jitter.lock() {
+                                    if let Some(b) = jb.get_mut(id) {
+                                        b.push(&audio);
+                                    }
                                 }
                             }
                         }
@@ -292,6 +313,10 @@ async fn main() -> Result<()> {
                         rx_stats[id].overruns = b.overruns;
                         rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
                         rx_stats[id].level_dbfs = b.last_level_dbfs();
+                        if let Some(slot) = rate_stats.get(id) {
+                            rx_stats[id].sample_rate = slot.sample_rate();
+                            rx_stats[id].rate_rejects = slot.rate_rejects();
+                        }
                     }
                 }
 

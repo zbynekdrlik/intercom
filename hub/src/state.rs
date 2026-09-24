@@ -20,6 +20,11 @@ pub struct RuntimeStats {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The sample rate of the participant's last VBAN packet (issue 1345), `None` for a non-VBAN
+    /// participant or before its first packet.
+    pub sample_rate: Option<u32>,
+    /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate (issue 1345).
+    pub rate_rejects: u64,
     /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
     pub janus: Option<JanusStats>,
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
@@ -40,6 +45,12 @@ pub struct ParticipantState {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The input stream's VBAN sample rate in Hz (issue 1345: a 96 kHz source is decimated to the hub
+    /// rate) — omitted for a non-VBAN participant or before its first packet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate.
+    pub rate_rejects: u64,
     /// The Janus audiobridge facet (joined / session age / rejoins / rtp packet counts), present
     /// only for the janus participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +95,8 @@ impl HubState {
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
                     level_dbfs: s.level_dbfs,
+                    sample_rate: s.sample_rate,
+                    rate_rejects: s.rate_rejects,
                     janus: s.janus,
                     local_audio: s.local_audio,
                 }
