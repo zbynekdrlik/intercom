@@ -233,6 +233,21 @@ mod tests {
     }
 
     #[test]
+    fn sample_rate_checked_is_none_for_a_reserved_index() {
+        let header = VbanHeader::new("t", 96000, 2, VbanCodec::Pcm16).unwrap();
+        let mut enc = header.encode(64);
+        assert_eq!(
+            VbanHeader::decode(&enc).unwrap().sample_rate_checked(),
+            Some(96000)
+        );
+        enc[4] = 20; // rate indices 20..=31 are reserved
+        let decoded = VbanHeader::decode(&enc).unwrap();
+        assert_eq!(decoded.sample_rate_checked(), None);
+        // The lenient accessor the appliance uses keeps its 48 kHz fallback.
+        assert_eq!(decoded.sample_rate(), 48000);
+    }
+
+    #[test]
     fn test_sample_rate_index() {
         assert_eq!(sample_rate_to_index(48000), Some(3));
         assert_eq!(sample_rate_to_index(44100), Some(16));

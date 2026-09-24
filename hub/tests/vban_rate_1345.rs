@@ -300,12 +300,36 @@ fn the_shared_stats_slot_publishes_rate_and_rejects() {
     assert_eq!(stats.rate_rejects(), 2);
 }
 
+#[test]
+fn decimator_1_is_the_identity() {
+    // `decimator` is public: a 1:1 request must never quietly low-pass the stream.
+    let x = tone(1_000.0, 12_000.0, 48_000, 500);
+    assert_eq!(decimator(1).process(&x), x);
+}
+
+#[test]
+fn the_converter_reports_its_hub_rate() {
+    assert_eq!(VbanRateConverter::new(HUB_RATE).out_rate(), HUB_RATE);
+}
+
+#[test]
+fn a_zero_rate_is_rejected_and_counted() {
+    // A reserved VBAN rate index decodes to rate 0 (no rate): it must be dropped, never played.
+    let mut conv = VbanRateConverter::new(HUB_RATE);
+    let step = conv.process(0, vec![vec![1i16; 32]]);
+    assert!(step.channels.is_none());
+    assert_eq!(conv.rate_rejects(), 1);
+}
+
 // ---- wiring (needs the whole crate: the VBAN codec + the /api/state snapshot) ----
 
 mod wiring {
     use intercom_hub::matrix::Matrix;
     use intercom_hub::state::{HubState, RuntimeStats};
-    use intercom_hub::vban_io::{decode_packet, encode_packet, route_packet, OutBlock};
+    use intercom_hub::vban_io::{
+        decode_packet, encode_packet, route_packet, to_hub_rate, OutBlock,
+    };
+    use intercom_hub::vban_rate::VbanRateConverter;
     use std::collections::HashMap;
 
     fn packet(name: &str, rate: u32, frames: usize) -> Vec<u8> {
@@ -384,5 +408,123 @@ out_channels = 2
         // A stream that has sent nothing yet has no rate to show.
         assert!(v["participants"][1].get("sample_rate").is_none());
         assert_eq!(v["participants"][1]["rate_rejects"], 0);
+    }
+
+    #[test]
+    fn to_hub_rate_decimates_a_96k_packet_keeping_name_and_channels() {
+        let mut conv = VbanRateConverter::new(48_000);
+        let mut total = 0;
+        for _ in 0..2 {
+            let (audio, rate) = decode_packet(&packet("fohabl-strih", 96_000, 103)).unwrap();
+            let out = to_hub_rate(&mut conv, audio, rate).expect("96 kHz is supported");
+            assert_eq!(out.stream_name, "fohabl-strih");
+            assert_eq!(out.channels.len(), 2);
+            assert!(out.frames == 51 || out.frames == 52, "got {}", out.frames);
+            assert_eq!(out.frames, out.channels[0].len());
+            assert_eq!(out.frames, out.channels[1].len());
+            total += out.frames;
+        }
+        assert_eq!(
+            total, 103,
+            "two odd 103-frame packets give exactly 206 / 2 frames"
+        );
+        assert_eq!(conv.rate_rejects(), 0);
+    }
+
+    #[test]
+    fn to_hub_rate_drops_a_44k_packet_and_counts_it() {
+        let mut conv = VbanRateConverter::new(48_000);
+        let (audio, rate) = decode_packet(&packet("fohabl-strih", 44_100, 64)).unwrap();
+        assert!(to_hub_rate(&mut conv, audio, rate).is_none());
+        assert_eq!(conv.rate_rejects(), 1);
+        assert_eq!(conv.sample_rate(), Some(44_100));
+    }
+
+    #[test]
+    fn to_hub_rate_passes_a_48k_packet_through_unchanged() {
+        let mut conv = VbanRateConverter::new(48_000);
+        let (audio, rate) = decode_packet(&packet("cam1", 48_000, 256)).unwrap();
+        let expected = audio.channels.clone();
+        let out = to_hub_rate(&mut conv, audio, rate).expect("48 kHz passes");
+        assert_eq!(out.stream_name, "cam1");
+        assert_eq!(out.frames, 256);
+        assert_eq!(out.channels, expected);
+    }
+
+    #[test]
+    fn a_reserved_rate_index_is_rejected_not_played_as_48k() {
+        // Rate indices 20..=31 are reserved. The codec's lenient accessor falls back to 48 kHz; the
+        // hub must not trust that fallback — a reserved index carries no rate and is dropped.
+        let mut pkt = packet("fohabl-strih", 48_000, 64);
+        pkt[4] = 20;
+        let (audio, rate) = decode_packet(&pkt).unwrap();
+        assert_eq!(rate, 0, "a reserved index decodes to no rate");
+        let mut conv = VbanRateConverter::new(48_000);
+        assert!(to_hub_rate(&mut conv, audio, rate).is_none());
+        assert_eq!(conv.rate_rejects(), 1);
+    }
+
+    fn two_participant_matrix() -> Matrix {
+        Matrix::from_toml(
+            r#"
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "cam1"
+role = "cambox"
+adapter = "vban"
+host = "cam1.lan"
+in_stream = "cam1"
+out_stream = "cam1"
+in_channels = 2
+out_channels = 2
+
+[[participant]]
+name = "cutters"
+role = "cutters"
+adapter = "none"
+in_channels = 2
+out_channels = 4
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn api_state_carries_rate_fields_only_for_vban_participants() {
+        let m = two_participant_matrix();
+        let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
+        let v = serde_json::to_value(HubState::snapshot(&m, "v", &stats)).unwrap();
+        assert_eq!(
+            v["participants"][0]["rate_rejects"], 0,
+            "a vban input always shows it"
+        );
+        assert!(v["participants"][1].get("rate_rejects").is_none());
+        assert!(v["participants"][1].get("sample_rate").is_none());
+    }
+
+    #[test]
+    fn status_line_names_rate_rejects_only_when_nonzero() {
+        let m = two_participant_matrix();
+        let quiet =
+            HubState::snapshot(&m, "v", &[RuntimeStats::default(), RuntimeStats::default()]);
+        assert!(
+            !quiet.status_line().contains("rate_rejects"),
+            "{}",
+            quiet.status_line()
+        );
+        let stats = vec![
+            RuntimeStats {
+                rate_rejects: 7,
+                ..Default::default()
+            },
+            RuntimeStats::default(),
+        ];
+        let line = HubState::snapshot(&m, "v", &stats).status_line();
+        assert!(line.contains("rate_rejects=7"), "got: {line}");
     }
 }
