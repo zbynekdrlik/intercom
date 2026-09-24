@@ -78,6 +78,10 @@ cut-over. So:
 - The systemd unit (`systemd/intercom-hub.service`) is installed **ENABLE-ONLY** by
   `setup-strih.sh` (step 13) — enabled, NEVER started/restarted. `verify-strih.sh` reports it
   report-only (an installed+enabled but inactive unit is correct while parallel).
+- **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
+  `scripts/strih-boxes/<box>.env` (strih-lx: `intercom/intercom.strih-lx.toml`). A second strih
+  (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-lx
+  file. The fact is shape-checked at load; the file's existence is checked by step 13 itself.
 - Never run `intercom-hub` from a dev lane. M1b (the supervisor) does the first live test by
   repointing ONLY dev cambox cam1 at strih-lx via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
   per the design) — cam2-7 stay on the Windows strih until M4.
