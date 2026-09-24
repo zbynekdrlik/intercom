@@ -147,9 +147,26 @@ fn the_playback_argv_carries_the_aux_channel_map_only_when_given() {
     assert_eq!(a[pos("--target") + 1], MINIFUSE_OUT);
     assert_eq!(a.last().unwrap(), "-");
 
-    // The program sink keeps its argv exactly (no map).
+    // The program sink keeps its issue-1344 argv exactly (no map).
     let p = pw_cat_playback_argv_with_map("strih-program", 48000, 2, None);
-    assert!(!p.iter().any(|x| x == "--channel-map"));
+    let expected: Vec<String> = [
+        "pw-cat",
+        "--playback",
+        "--raw",
+        "--rate",
+        "48000",
+        "--channels",
+        "2",
+        "--format",
+        "s16",
+        "--target",
+        "strih-program",
+        "-",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(p, expected);
 }
 
 #[test]

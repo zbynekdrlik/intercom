@@ -132,33 +132,7 @@ async fn main() -> Result<()> {
         });
     }
     let engine = Arc::new(Engine::new(matrix.clone()));
-    // One input buffer per participant. The local PipeWire captures (the MiniFuse talkback) get the
-    // target-fill ring that absorbs pw-cat's 1024-frame bursts (issue 1345, 24.9.2026: the generic
-    // 2048-frame no-prefill buffer spliced ~8x/s); every buffer fans a mono packet into ch2 for a
-    // participant with >= 2 input channels (the camboxes send mono VBAN).
-    let local_capture_ids: std::collections::HashSet<usize> = matrix
-        .local_inputs()
-        .into_iter()
-        .map(|(pid, _, _)| pid)
-        .collect();
-    let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(
-        matrix
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(id, p)| {
-                let jb = if local_capture_ids.contains(&id) {
-                    JitterBuffer::local_capture(
-                        block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
-                        LOCAL_CAPTURE_TARGET_FRAMES,
-                    )
-                } else {
-                    JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)
-                };
-                jb.with_min_channels(p.in_channels)
-            })
-            .collect(),
-    ));
+    let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(input_buffers(&matrix)));
 
     // --- Janus audiobridge edge (issue 1345 M3a): the phones participant's plain-RTP leg ---------
     // When the matrix declares a `janus` participant AND a `[janus]` table, spawn the adapter task:
@@ -222,96 +196,14 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // --- Local PipeWire audio (issue 1344): the last VB-Matrix function on the strih-lx notebook ---
-    // EGRESS: when the matrix declares a `program_out` (a pipewire sink), spawn its supervised
-    // `pw-cat --playback` bridge; the block loop feeds it the engine's summed program mix
-    // (`fohabl-strih` + `lv1-strih`) so OBS captures `strih-program.monitor` as `ASIO zvuk`. INGRESS:
-    // each pipewire capture input (the MiniFuse 4 talkback mic) gets a `pw-cat --record` bridge whose
-    // PCM is pushed into that participant's jitter buffer the engine already pops into the N-1 mix.
-    // Both never start from a dev lane (the live PipeWire is on the notebook); absent config = the
-    // hub without local audio. rx/tx block counters ride each participant's `/api/state` facet.
-    let mut program_sink_tx: Option<SyncSender<Vec<i16>>> = None;
-    let program_out_report: Option<(usize, Arc<LocalAudioStats>)> = match matrix.program_out() {
-        Some((pid, target, streams)) => {
-            let stats = Arc::new(LocalAudioStats::default());
-            let channels = matrix.participants[pid].out_channels.max(1) as u8;
-            program_sink_tx = Some(spawn_program_sink(
-                target.clone(),
-                sample_rate,
-                channels,
-                stats.clone(),
-            ));
-            tracing::info!(
-                %target,
-                participant = pid,
-                sources = ?streams,
-                "local-audio: program sink (PipeWire) enabled for the OBS program capture"
-            );
-            Some((pid, stats))
-        }
-        None => None,
-    };
-    let local_input_reports: Vec<(usize, Arc<LocalAudioStats>)> = matrix
-        .local_inputs()
-        .into_iter()
-        .map(|(pid, node, chans)| {
-            let stats = Arc::new(LocalAudioStats::default());
-            let cfg = LocalSourceConfig {
-                target: node.clone(),
-                rate: sample_rate,
-                channels: chans.max(1),
-                block_frames,
-                participant_id: pid,
-                stream_name: matrix.participants[pid].name.clone(),
-            };
-            spawn_local_source(cfg, jitter.clone(), stats.clone());
-            tracing::info!(
-                target = %node,
-                participant = pid,
-                "local-audio: talkback capture (PipeWire) enabled into the N-1 mix"
-            );
-            (pid, stats)
-        })
-        .collect();
-
-    // --- Local PipeWire PLAYBACK (issue 1345, 24.9.2026): the operator heard NOTHING because the
-    // cutters were capture-only. Every pipewire participant other than the program_out that declares
-    // output channels + a `pipewire_target` gets its own supervised `pw-cat --playback` sink fed from
-    // its OWN N-1 output bus (the cutters' 4 channels -> the MiniFuse AUX0..3). A participant that is
-    // also a capture shares one stats facet (rx from the capture, tx from the sink).
-    let mut local_output_reports: Vec<(usize, Arc<LocalAudioStats>)> = Vec::new();
-    let local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
-        .local_outputs()
-        .into_iter()
-        .map(|(pid, target, chans, channel_map)| {
-            let stats = match local_input_reports.iter().find(|(id, _)| *id == pid) {
-                Some((_, shared)) => shared.clone(),
-                None => {
-                    let fresh = Arc::new(LocalAudioStats::default());
-                    local_output_reports.push((pid, fresh.clone()));
-                    fresh
-                }
-            };
-            tracing::info!(
-                %target,
-                participant = pid,
-                channels = chans,
-                channel_map = ?channel_map,
-                "local-audio: talkback playback (PipeWire) enabled from the participant's N-1 bus"
-            );
-            let tx = spawn_local_sink(
-                LocalSinkConfig {
-                    target,
-                    rate: sample_rate,
-                    channels: chans.clamp(1, u8::MAX as usize) as u8,
-                    channel_map,
-                    label: "talkback playback",
-                },
-                stats,
-            );
-            (pid, tx)
-        })
-        .collect();
+    // --- Local PipeWire audio (issues 1344 + 1345): the program sink, the talkback capture and the
+    // talkback playback — see `wire_local_audio`.
+    let LocalAudioWiring {
+        program_sink_tx,
+        program_out_report,
+        reports: local_audio_reports,
+        local_sinks,
+    } = wire_local_audio(&matrix, &jitter);
 
     // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
     // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
@@ -479,7 +371,7 @@ async fn main() -> Result<()> {
                             s.local_audio = Some(lstats.snapshot());
                         }
                     }
-                    for (pid, lstats) in local_input_reports.iter().chain(&local_output_reports) {
+                    for (pid, lstats) in &local_audio_reports {
                         if let Some(s) = rx_stats.get_mut(*pid) {
                             s.local_audio = Some(lstats.snapshot());
                         }
@@ -520,6 +412,155 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// One input buffer per participant (issue 1345, 24.9.2026). The local PipeWire captures (the
+/// MiniFuse talkback) get the target-fill ring that absorbs pw-cat's 1024-frame bursts; the generic
+/// 2048-frame no-prefill buffer spliced ~8x/s. Every buffer fans a mono packet into ch2 for a
+/// participant with >= 2 input channels (the camboxes send mono VBAN).
+fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
+    let block_frames = matrix.hub.block_frames;
+    let local_capture_ids: std::collections::HashSet<usize> = matrix
+        .local_inputs()
+        .into_iter()
+        .map(|(pid, _, _)| pid)
+        .collect();
+    matrix
+        .participants
+        .iter()
+        .enumerate()
+        .map(|(id, p)| {
+            let jb = if local_capture_ids.contains(&id) {
+                JitterBuffer::local_capture(
+                    block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
+                    LOCAL_CAPTURE_TARGET_FRAMES,
+                )
+            } else {
+                JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)
+            };
+            jb.with_min_channels(p.in_channels)
+        })
+        .collect()
+}
+
+/// The running local PipeWire bridges the block loop feeds and reports on.
+struct LocalAudioWiring {
+    /// The `program_out` sink's feed (the OBS program capture), if declared.
+    program_sink_tx: Option<SyncSender<Vec<i16>>>,
+    /// The `program_out` participant + its facet counters, if declared.
+    program_out_report: Option<(usize, Arc<LocalAudioStats>)>,
+    /// Every capture / talkback-playback participant + its facet counters (one entry per
+    /// participant; a participant that both captures and plays shares one).
+    reports: Vec<(usize, Arc<LocalAudioStats>)>,
+    /// Every talkback playback sink's feed, by participant (fed from its OWN N-1 output bus).
+    local_sinks: Vec<(usize, SyncSender<Vec<i16>>)>,
+}
+
+/// Spawn every local PipeWire bridge the matrix declares (issues 1344 + 1345). None of them ever
+/// starts from a dev lane (the live PipeWire is on the notebook); absent config = the hub without
+/// local audio.
+fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> LocalAudioWiring {
+    let sample_rate = matrix.hub.sample_rate;
+    let block_frames = matrix.hub.block_frames;
+    // --- Local PipeWire audio (issue 1344): the last VB-Matrix function on the strih-lx notebook ---
+    // EGRESS: when the matrix declares a `program_out` (a pipewire sink), spawn its supervised
+    // `pw-cat --playback` bridge; the block loop feeds it the engine's summed program mix
+    // (`fohabl-strih` + `lv1-strih`) so OBS captures `strih-program.monitor` as `ASIO zvuk`. INGRESS:
+    // each pipewire capture input (the MiniFuse 4 talkback mic) gets a `pw-cat --record` bridge whose
+    // PCM is pushed into that participant's jitter buffer the engine already pops into the N-1 mix.
+    // Both never start from a dev lane (the live PipeWire is on the notebook); absent config = the
+    // hub without local audio. rx/tx block counters ride each participant's `/api/state` facet.
+    let mut program_sink_tx: Option<SyncSender<Vec<i16>>> = None;
+    let program_out_report: Option<(usize, Arc<LocalAudioStats>)> = match matrix.program_out() {
+        Some((pid, target, streams)) => {
+            let stats = Arc::new(LocalAudioStats::default());
+            let channels = matrix.participants[pid].out_channels.max(1) as u8;
+            program_sink_tx = Some(spawn_program_sink(
+                target.clone(),
+                sample_rate,
+                channels,
+                stats.clone(),
+            ));
+            tracing::info!(
+                %target,
+                participant = pid,
+                sources = ?streams,
+                "local-audio: program sink (PipeWire) enabled for the OBS program capture"
+            );
+            Some((pid, stats))
+        }
+        None => None,
+    };
+    let local_input_reports: Vec<(usize, Arc<LocalAudioStats>)> = matrix
+        .local_inputs()
+        .into_iter()
+        .map(|(pid, node, chans)| {
+            let stats = Arc::new(LocalAudioStats::default());
+            let cfg = LocalSourceConfig {
+                target: node.clone(),
+                rate: sample_rate,
+                channels: chans.max(1),
+                block_frames,
+                participant_id: pid,
+                stream_name: matrix.participants[pid].name.clone(),
+            };
+            spawn_local_source(cfg, jitter.clone(), stats.clone());
+            tracing::info!(
+                target = %node,
+                participant = pid,
+                "local-audio: talkback capture (PipeWire) enabled into the N-1 mix"
+            );
+            (pid, stats)
+        })
+        .collect();
+
+    // --- Local PipeWire PLAYBACK (issue 1345, 24.9.2026): the operator heard NOTHING because the
+    // cutters were capture-only. Every pipewire participant other than the program_out that declares
+    // output channels + a `pipewire_target` gets its own supervised `pw-cat --playback` sink fed from
+    // its OWN N-1 output bus (the cutters' 4 channels -> the MiniFuse AUX0..3). A participant that is
+    // also a capture shares one stats facet (rx from the capture, tx from the sink).
+    let mut local_output_reports: Vec<(usize, Arc<LocalAudioStats>)> = Vec::new();
+    let local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
+        .local_outputs()
+        .into_iter()
+        .map(|(pid, target, chans, channel_map)| {
+            let stats = match local_input_reports.iter().find(|(id, _)| *id == pid) {
+                Some((_, shared)) => shared.clone(),
+                None => {
+                    let fresh = Arc::new(LocalAudioStats::default());
+                    local_output_reports.push((pid, fresh.clone()));
+                    fresh
+                }
+            };
+            tracing::info!(
+                %target,
+                participant = pid,
+                channels = chans,
+                channel_map = ?channel_map,
+                "local-audio: talkback playback (PipeWire) enabled from the participant's N-1 bus"
+            );
+            let tx = spawn_local_sink(
+                LocalSinkConfig {
+                    target,
+                    rate: sample_rate,
+                    channels: chans.clamp(1, u8::MAX as usize) as u8,
+                    channel_map,
+                    label: "talkback playback",
+                },
+                stats,
+            );
+            (pid, tx)
+        })
+        .collect();
+
+    let mut reports = local_input_reports;
+    reports.extend(local_output_reports);
+    LocalAudioWiring {
+        program_sink_tx,
+        program_out_report,
+        reports,
+        local_sinks,
+    }
 }
 
 async fn shutdown_signal() {
