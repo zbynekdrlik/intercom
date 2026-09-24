@@ -252,6 +252,61 @@ DynamicUser without the drop-in. **Supervisor live steps:** confirm the MiniFuse
 against `wpctl status`, restart the operator PipeWire/WirePlumber for the sink to appear, and do the
 FOH-live level acceptance.
 
+## 24.9.2026 production audio fix (issue 1345, design comment 5813703805)
+
+What was wrong live, and how the code now handles it. Read this before touching `vban_io`,
+`local_audio`, `mulaw` or the converter.
+
+- **The operator heard nothing.** On Linux the `cutters` were capture-only. Now any pipewire
+  participant that is not the `program_out`, has `out_channels > 0` and a `pipewire_target` gets its
+  own `pw-cat --playback` sink fed from its OWN N-1 output bus.
+  - Wiring: `Matrix::local_outputs()` → `local_audio::spawn_local_sink`, the same supervision as
+    the program sink. The cutters share one `local_audio` stats facet: rx comes from the capture,
+    tx from the sink.
+  - The converter emits `pipewire_target = alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0`
+    plus `pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"`.
+  - The MiniFuse is a pro-audio node with 6 ports `playback_AUX0..5`. A 4-channel pw-cat stream
+    without `--channel-map` defaults to `FL,FR,RL,RR` and never lands on the AUX ports.
+  - Capture is unaffected: WirePlumber links `capture_AUX0/1` → `pw-cat:input_FL/FR` by order
+    (live `pw-link -l`).
+- **The capture ring.** The MiniFuse drives the graph at quantum 1024 (`clock.quantum 1024`, ALSA
+  `period-size 1024`), so `pw-cat --record` delivers 1024-frame bursts. The generic 2048-frame,
+  no-prefill `JitterBuffer` spliced ~8×/s.
+  - `JitterBuffer::local_capture(32 blocks, 2048)` prefills to the target. An underrun outputs
+    WHOLE silent blocks until refilled (never a partial zero-splice). An overrun drops back to the
+    TARGET, not the cap.
+- **`pw-cat --latency` takes SAMPLES or a time unit, never `N/rate`.** `--latency 256/48000` is
+  rejected (`bad latency value … (bad unit)`) and ignored. `--latency 256` with `--rate 48000`
+  gives `node.latency = "256/48000"`.
+  - This was proven with an UNLINKED probe stream (`--target 0`, `timeout 2`), which is harmless on
+    the live graph.
+  - Argument checks that happen before the connect (such as `--channel-map` vs `--channels`) can be
+    probed with `PIPEWIRE_REMOTE=<bogus> XDG_RUNTIME_DIR=/tmp/x pw-cat …`: a bad map fails with
+    `channels and channel-map incompatible` before `pw_context_connect`.
+- **PCMU anti-alias.** `mulaw::Decimator48kTo8k` is a 241-tap Kaiser-windowed sinc (-6 dB at
+  3.7 kHz, ≥ 60 dB from ~4.1 kHz). Its state and 6:1 phase carry across calls.
+  - The Janus leg owns ONE instance and resets it per session.
+  - `downsample_48k_to_8k` is the one-shot form, primed with the first sample so DC stays exact.
+  - The old one-pole let a 6 kHz tone through at -6 dB, and it restarted every 20 ms chunk.
+- **Talkback gain.** `TALKBACK_MAKEUP_DB` (converter, +12 dB) is added to every cutters →
+  phones/camN point. Tune it ONLY there, and regenerate the TOML.
+  - Changing the TOML also changes the strih-lx golden sha (`tests/fixtures/strih_box_1361/strih-lx.golden`,
+    `section intercom-toml`). Update that sha in the same commit.
+  - Check it with `bash tests/fixtures/strih_box_1361/render.sh <root> strih-lx | cmp - <golden>`.
+- **Stale streams.** Once a stream has had no packet for > `STALE_STREAM_MS` (500 ms), it stops
+  counting underruns, and its `level_dbfs` reads -120. A muted cambox used to add 187 underruns/s
+  forever and show its last level.
+- **Mono camboxes.** The camboxes send MONO VBAN (`channels = 1`). A buffer built with
+  `.with_min_channels(in_channels ≥ 2)` copies ch1 into ch2 (ONLY ch2, never padding up to 8
+  channels, which would count as short). Without that, a cam came out left-only and 6 dB down in
+  the phones' stereo→mono average.
+- **Tier-0 verify of these pure parts:** a rustc replica.
+  - Extract `DecodedAudio` + `STALE_STREAM_MS..peak_dbfs` from `vban_io.rs`, or the whole
+    `mulaw.rs`.
+  - Wrap the integration test file as a `#[cfg(test)] mod` with its `use intercom_hub::…` line
+    stripped.
+  - Run it with `rustc --edition 2021 --test`.
+
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
 M3 replaces the phones' VDO.Ninja leg with a supervised **Janus audiobridge** room the hub joins as
@@ -289,8 +344,8 @@ only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss
   upgrade path:** the `janus_rtp` PCMU leg is the seam to swap for the vendored `opus` crate if
   quality is short — the adapter boundary and the engine stay unchanged.
 - The adapter up/down-mixes mono↔stereo, so the `phones` participant keeps its 2-in / 2-out matrix
-  shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (one-pole LP +
-  decimate/ZOH), verified against the ITU reference vectors.
+  shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (FIR anti-alias decimator down, one-pole-smoothed
+  ZOH up), verified against the ITU reference vectors.
 
 ### Config (`[janus]` table) + the room secret
 
