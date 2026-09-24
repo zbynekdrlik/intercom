@@ -428,7 +428,8 @@ mod tests {
             frames,
         })
         .unwrap();
-        let audio = decode_packet(&pkt).unwrap();
+        let (audio, rate) = decode_packet(&pkt).unwrap();
+        assert_eq!(rate, 48000, "the decoder carries the header rate");
         assert_eq!(audio.stream_name, "cam5");
         assert_eq!(audio.frames, 4);
         assert_eq!(audio.channels.len(), 2);
@@ -546,8 +547,9 @@ mod tests {
         for _ in 0..2 {
             let (n, _) = recv.recv_from(&mut buf).unwrap();
             match route_packet(&known, &buf[..n]) {
-                Some((id, audio)) => {
+                Some((id, audio, rate)) => {
                     assert_eq!(id, 0);
+                    assert_eq!(rate, 48000);
                     assert_eq!(audio.stream_name, "cam1");
                     assert_eq!(audio.frames, 256);
                     got_known = true;

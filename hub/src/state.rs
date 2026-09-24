@@ -163,6 +163,8 @@ out_channels = 4
                 overruns: 0,
                 last_rx_age_ms: Some(5),
                 level_dbfs: -12.0,
+                sample_rate: Some(48000),
+                rate_rejects: 0,
                 janus: None,
                 local_audio: None,
             },
@@ -176,6 +178,7 @@ out_channels = 4
         assert_eq!(v["participants"][0]["adapter"], "vban");
         assert_eq!(v["participants"][0]["rx_packets"], 10);
         assert_eq!(v["participants"][0]["last_rx_age_ms"], 5);
+        assert_eq!(v["participants"][0]["sample_rate"], 48000);
         assert_eq!(v["participants"][1]["name"], "cutters");
         assert_eq!(v["participants"][1]["adapter"], "none");
         // default stats render as zeros / null age.
