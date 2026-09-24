@@ -65,7 +65,11 @@ fn fit_tone(x: &[i16], freq_hz: f64, rate: u32) -> (f64, f64) {
 fn decimate_1s(freq_hz: f64, in_rate: u32, factor: usize) -> Vec<i16> {
     let x = tone(freq_hz, 16_000.0, in_rate, in_rate as usize);
     let y = decimator(factor).process(&x);
-    assert_eq!(y.len(), in_rate as usize / factor, "one output per {factor} inputs");
+    assert_eq!(
+        y.len(),
+        in_rate as usize / factor,
+        "one output per {factor} inputs"
+    );
     y[400..].to_vec()
 }
 
@@ -78,7 +82,11 @@ fn the_supported_ratios_are_exactly_1_2_4() {
     for other in [44_100, 88_200, 24_000, 32_000, 384_000, 0] {
         assert_eq!(decimation_factor(other, HUB_RATE), None, "{other} Hz");
     }
-    assert_eq!(decimation_factor(48_000, 0), None, "a zero hub rate never divides");
+    assert_eq!(
+        decimation_factor(48_000, 0),
+        None,
+        "a zero hub rate never divides"
+    );
 }
 
 #[test]
@@ -100,7 +108,10 @@ fn a_1_khz_tone_at_96_khz_comes_out_as_the_same_1_khz_tone_at_48_khz() {
 fn a_1_khz_tone_at_192_khz_comes_out_as_the_same_1_khz_tone_at_48_khz() {
     let y = decimate_1s(1_000.0, 192_000, 4);
     let (amp, resid) = fit_tone(&y, 1_000.0, HUB_RATE);
-    assert!((20.0 * (amp / 16_000.0).log10()).abs() <= 0.1, "amp {amp:.1}");
+    assert!(
+        (20.0 * (amp / 16_000.0).log10()).abs() <= 0.1,
+        "amp {amp:.1}"
+    );
     assert!(20.0 * (resid / amp).log10() <= -60.0, "residual {resid:.2}");
 }
 
@@ -111,7 +122,10 @@ fn the_audio_pass_band_is_flat_to_20_khz() {
             let y = decimate_1s(f, rate, factor);
             let (amp, _) = fit_tone(&y, f, HUB_RATE);
             let g = 20.0 * (amp / 16_000.0).log10();
-            assert!(g.abs() <= 0.5, "{f} Hz at {rate} must pass within 0.5 dB, got {g:.2}");
+            assert!(
+                g.abs() <= 0.5,
+                "{f} Hz at {rate} must pass within 0.5 dB, got {g:.2}"
+            );
         }
     }
 }
@@ -122,20 +136,30 @@ fn a_30_khz_tone_at_96_khz_is_rejected_at_least_60_db() {
     let x = tone(30_000.0, 16_000.0, 96_000, 96_000);
     let y = decimate_1s(30_000.0, 96_000, 2);
     let g = 20.0 * (rms(&y) / rms(&x)).log10();
-    assert!(g <= -60.0, "30 kHz must come out >= 60 dB down, got {g:.1} dB");
+    assert!(
+        g <= -60.0,
+        "30 kHz must come out >= 60 dB down, got {g:.1} dB"
+    );
 }
 
 #[test]
 fn every_tone_that_would_alias_is_rejected_at_least_60_db() {
     for (rate, factor, freqs) in [
         (96_000, 2, vec![25_000.0, 30_000.0, 40_000.0, 47_000.0]),
-        (192_000, 4, vec![25_000.0, 30_000.0, 50_000.0, 70_000.0, 95_000.0]),
+        (
+            192_000,
+            4,
+            vec![25_000.0, 30_000.0, 50_000.0, 70_000.0, 95_000.0],
+        ),
     ] {
         for f in freqs {
             let x = tone(f, 16_000.0, rate, rate as usize);
             let y = decimate_1s(f, rate, factor);
             let g = 20.0 * (rms(&y) / rms(&x)).log10();
-            assert!(g <= -60.0, "{f} Hz at {rate} must be >= 60 dB down, got {g:.1} dB");
+            assert!(
+                g <= -60.0,
+                "{f} Hz at {rate} must be >= 60 dB down, got {g:.1} dB"
+            );
         }
     }
 }
@@ -155,12 +179,22 @@ fn decimating_103_frame_packets_equals_one_pass_over_the_whole_stream() {
         let step = conv.process(96_000, vec![cl.to_vec(), cr.to_vec()]);
         let out = step.channels.expect("96 kHz is supported");
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].len(), out[1].len(), "both channels decimate in lock-step");
+        assert_eq!(
+            out[0].len(),
+            out[1].len(),
+            "both channels decimate in lock-step"
+        );
         got_l.extend_from_slice(&out[0]);
         got_r.extend_from_slice(&out[1]);
     }
-    assert_eq!(got_l, whole_l, "packetised left must equal the one-shot pass bit for bit");
-    assert_eq!(got_r, whole_r, "packetised right must equal the one-shot pass bit for bit");
+    assert_eq!(
+        got_l, whole_l,
+        "packetised left must equal the one-shot pass bit for bit"
+    );
+    assert_eq!(
+        got_r, whole_r,
+        "packetised right must equal the one-shot pass bit for bit"
+    );
     assert_eq!(got_l.len(), 103 * 200 / 2);
     assert_eq!(conv.sample_rate(), Some(96_000));
     assert_eq!(conv.rate_rejects(), 0);
@@ -172,7 +206,10 @@ fn a_48_khz_stream_passes_through_byte_identical() {
     let a: Vec<i16> = (0..256).map(|i| (i * 97 - 12_000) as i16).collect();
     let b: Vec<i16> = (0..256).map(|i| (i * -53 + 7_000) as i16).collect();
     let first = conv.process(48_000, vec![a.clone(), b.clone()]);
-    assert!(first.rate_changed, "the first packet reports the stream's rate once");
+    assert!(
+        first.rate_changed,
+        "the first packet reports the stream's rate once"
+    );
     assert_eq!(first.channels, Some(vec![a.clone(), b.clone()]));
     let second = conv.process(48_000, vec![b.clone(), a.clone()]);
     assert!(!second.rate_changed, "a steady rate is not a transition");
@@ -186,15 +223,28 @@ fn an_unsupported_rate_is_rejected_counted_and_reported_once() {
     let mut conv = VbanRateConverter::new(HUB_RATE);
     let pkt = vec![vec![1000i16; 256]; 2];
     let first = conv.process(44_100, pkt.clone());
-    assert!(first.channels.is_none(), "44.1 kHz must never be played at 48 kHz");
-    assert!(first.rate_changed, "the first reject is the one transition the caller warns on");
+    assert!(
+        first.channels.is_none(),
+        "44.1 kHz must never be played at 48 kHz"
+    );
+    assert!(
+        first.rate_changed,
+        "the first reject is the one transition the caller warns on"
+    );
     for _ in 0..9 {
         let step = conv.process(44_100, pkt.clone());
         assert!(step.channels.is_none());
-        assert!(!step.rate_changed, "no warn per packet — only per transition");
+        assert!(
+            !step.rate_changed,
+            "no warn per packet — only per transition"
+        );
     }
     assert_eq!(conv.rate_rejects(), 10, "every rejected packet is counted");
-    assert_eq!(conv.sample_rate(), Some(44_100), "the offending rate stays visible");
+    assert_eq!(
+        conv.sample_rate(),
+        Some(44_100),
+        "the offending rate stays visible"
+    );
 
     // The source switches to a supported rate: audio flows again, one transition, count kept.
     let back = conv.process(48_000, pkt.clone());
