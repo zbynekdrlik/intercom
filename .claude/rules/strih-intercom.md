@@ -307,6 +307,35 @@ What was wrong live, and how the code now handles it. Read this before touching 
     stripped.
   - Run it with `rustc --edition 2021 --test`.
 
+## VBAN rate — the hub honours the header sample rate (issue 1345, 24.9.2026)
+
+- **The live cause.** `fohabl-strih` from the FOH desk (10.77.7.30) arrives at VBAN rate index 4 =
+  **96 kHz**, 103 frames × 2 ch per packet, ~934 pkt/s. The hub used to ignore the header rate and
+  push the samples raw into its 48 kHz ring: ~60 % of packets overran (`fohabl` `overruns`
+  6.76 M of 11.3 M rx) and the program audio (OBS `ASIO zvuk`) plus the cans played corrupted.
+- **The seam.** `vban_io::decode_packet` / `route_packet` carry the header rate. Each VBAN input
+  stream owns a `vban_rate::VbanRateConverter` (in the receive task, no lock); `vban_io::to_hub_rate`
+  runs a packet through it before the ring push:
+  - 1× the hub rate (48 k): passthrough, byte-identical, no copy;
+  - 2× / 4× (96 k / 192 k): a Kaiser windowed-sinc FIR decimator, 127 / 255 taps, -6 dB at 22 kHz,
+    flat to 20 kHz, ≥ 70 dB down from 24.5 kHz; history + phase carry across packets, so odd
+    103-frame packets decimate bit-identically to one pass;
+  - anything else (44.1 / 88.2 k, …): DROPPED, counted in `rate_rejects`, one warn per transition;
+  - a rate change or a channel-count change restarts the filter from silence.
+- **Observability.** `/api/state` per participant: `sample_rate` (omitted before the first packet /
+  for a non-VBAN participant) + `rate_rejects`. The receive task publishes into lock-free
+  `VbanRateStats` slots that the block loop reads. After a deploy, fohabl must read
+  `sample_rate: 96000` with `overruns` ≈ 0.
+- **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
+  the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
+  bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
+  new crate.
+- **Tier-0 verify.** A rustc replica of `fir.rs` + `vban_rate.rs` + `mulaw.rs` with the pure half of
+  `tests/vban_rate_1345.rs` (cut at its `// ---- wiring` marker) + the two mulaw test files, run
+  with `rustc --edition 2021 --test`. `clippy-driver --edition 2021 --test -D warnings <replica.rs>`
+  applies the real clippy lints to the pure modules without cargo. The wiring (vban_io / state /
+  main) first compiles at CI.
+
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
 M3 replaces the phones' VDO.Ninja leg with a supervised **Janus audiobridge** room the hub joins as
