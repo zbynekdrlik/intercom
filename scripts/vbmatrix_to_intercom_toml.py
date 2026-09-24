@@ -87,6 +87,21 @@ _STRIH_SUFFIX = "-strih"
 _PROGRAM_SINK_NODE = "strih-program"
 _MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 
+# issue 1345 (24.9.2026): the MiniFuse 4 PLAYBACK node the cutters' N-1 mix is played to, so the
+# operator hears the cams + phones in the headphones (on Linux the cutters were capture-only).
+# Live-read on strih-lx: a pro-audio node with 6 ports `playback_AUX0..5`. The cutters' 4 output
+# channels map onto AUX0..AUX3 via an explicit pw-cat channel map (an unmapped 4-ch stream defaults
+# to FL/FR/RL/RR and never lands on the AUX ports).
+_MINIFUSE_PLAYBACK_NODE = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
+
+# issue 1345 (24.9.2026): the talkback makeup gain, in dB, on every cutters -> phones and
+# cutters -> camN point. The operator's MiniFuse talkback reached the hub at about -68 dBFS with no
+# makeup gain. Target: speech at -20 to -12 dBFS (the owner also raises the MiniFuse preamp). ONE
+# constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
+TALKBACK_MAKEUP_DB = 12.0
+
+_TALKBACK_DST_ROLES = ("cambox", "phones")
+
 
 def _strip_suffix(name):
     """`fohabl-strih` → `fohabl`; `cam1` → `cam1`."""
@@ -215,6 +230,12 @@ def build_model(xml_text):
             }
         )
 
+    # issue 1345: the talkback makeup gain on every cutters -> phones / camN point (added to the
+    # VB-Matrix gain, which is unity for those points on the fixture).
+    for pt in points:
+        if pt["src"] == "cutters" and participants[pt["dst"]]["role"] in _TALKBACK_DST_ROLES:
+            pt["gain_db"] = pt["gain_db"] + TALKBACK_MAKEUP_DB
+
     # Channel counts = the max channel index each participant is routed on.
     for p in participants.values():
         p["in_channels"] = 0
@@ -239,6 +260,15 @@ def build_model(xml_text):
                 if src_in and src_in not in srcs:
                     srcs.append(src_in)
         po["source_streams"] = srcs
+
+    # issue 1345: the cutters also PLAY their own N-1 output bus to the MiniFuse (the operator's
+    # headphones), one AUX port per output channel.
+    cutters = participants.get("cutters")
+    if cutters is not None and cutters["adapter"] == "pipewire" and cutters["out_channels"] > 0:
+        cutters["pipewire_target"] = _MINIFUSE_PLAYBACK_NODE
+        cutters["pipewire_channel_map"] = ",".join(
+            f"AUX{i}" for i in range(cutters["out_channels"])
+        )
 
     ordered = sorted(participants.values(), key=lambda p: p["order"])
     for p in ordered:
@@ -305,6 +335,8 @@ def render(model):
             out.append(f'pipewire_target = "{p["pipewire_target"]}"')
         if "pipewire_source" in p:
             out.append(f'pipewire_source = "{p["pipewire_source"]}"')
+        if "pipewire_channel_map" in p:
+            out.append(f'pipewire_channel_map = "{p["pipewire_channel_map"]}"')
         if "source_streams" in p:
             joined = ", ".join(f'"{s}"' for s in p["source_streams"])
             out.append(f"source_streams = [{joined}]")

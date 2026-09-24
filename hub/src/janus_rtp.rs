@@ -498,6 +498,9 @@ pub async fn run_janus_participant(
     let mut backoff = BACKOFF_MIN;
     let mut packetizer = RtpPacketizer::new(ssrc);
     let mut pending_48k: Vec<i16> = Vec::with_capacity(MIX_SAMPLES_PER_PACKET_48K * 2);
+    // The anti-alias FIR's state carries across the 20 ms chunks (issue 1345, 24.9.2026): one
+    // long-lived decimator per run, reset only when a session is re-established.
+    let mut decimator = mulaw::Decimator48kTo8k::new();
     let mut recv_buf = vec![0u8; 4096];
 
     loop {
@@ -564,6 +567,7 @@ pub async fn run_janus_participant(
 
         packetizer.mark_silence();
         pending_48k.clear();
+        decimator.reset();
         let mut keepalive = tokio::time::interval(KEEPALIVE_EVERY);
         keepalive.tick().await; // consume the immediate first tick
 
@@ -577,7 +581,7 @@ pub async fn run_janus_participant(
                     pending_48k.extend(mulaw::stereo_to_mono(&block));
                     while pending_48k.len() >= MIX_SAMPLES_PER_PACKET_48K {
                         let chunk: Vec<i16> = pending_48k.drain(0..MIX_SAMPLES_PER_PACKET_48K).collect();
-                        let pcm8k = mulaw::downsample_48k_to_8k(&chunk);
+                        let pcm8k = decimator.process(&chunk);
                         let ulaw = mulaw::ulaw_encode_block(&pcm8k);
                         let pkt = packetizer.packetize(&ulaw);
                         match socket.send_to(&pkt, session.janus_rtp_addr).await {

@@ -20,7 +20,8 @@ use std::sync::mpsc::SyncSender;
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::local_audio::{
-    spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSourceConfig,
+    spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
+    LocalSourceConfig, LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES,
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
@@ -131,9 +132,31 @@ async fn main() -> Result<()> {
         });
     }
     let engine = Arc::new(Engine::new(matrix.clone()));
+    // One input buffer per participant. The local PipeWire captures (the MiniFuse talkback) get the
+    // target-fill ring that absorbs pw-cat's 1024-frame bursts (issue 1345, 24.9.2026: the generic
+    // 2048-frame no-prefill buffer spliced ~8x/s); every buffer fans a mono packet into ch2 for a
+    // participant with >= 2 input channels (the camboxes send mono VBAN).
+    let local_capture_ids: std::collections::HashSet<usize> = matrix
+        .local_inputs()
+        .into_iter()
+        .map(|(pid, _, _)| pid)
+        .collect();
     let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(
-        (0..n)
-            .map(|_| JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS))
+        matrix
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(id, p)| {
+                let jb = if local_capture_ids.contains(&id) {
+                    JitterBuffer::local_capture(
+                        block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
+                        LOCAL_CAPTURE_TARGET_FRAMES,
+                    )
+                } else {
+                    JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)
+                };
+                jb.with_min_channels(p.in_channels)
+            })
             .collect(),
     ));
 
@@ -251,6 +274,45 @@ async fn main() -> Result<()> {
         })
         .collect();
 
+    // --- Local PipeWire PLAYBACK (issue 1345, 24.9.2026): the operator heard NOTHING because the
+    // cutters were capture-only. Every pipewire participant other than the program_out that declares
+    // output channels + a `pipewire_target` gets its own supervised `pw-cat --playback` sink fed from
+    // its OWN N-1 output bus (the cutters' 4 channels -> the MiniFuse AUX0..3). A participant that is
+    // also a capture shares one stats facet (rx from the capture, tx from the sink).
+    let mut local_output_reports: Vec<(usize, Arc<LocalAudioStats>)> = Vec::new();
+    let local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
+        .local_outputs()
+        .into_iter()
+        .map(|(pid, target, chans, channel_map)| {
+            let stats = match local_input_reports.iter().find(|(id, _)| *id == pid) {
+                Some((_, shared)) => shared.clone(),
+                None => {
+                    let fresh = Arc::new(LocalAudioStats::default());
+                    local_output_reports.push((pid, fresh.clone()));
+                    fresh
+                }
+            };
+            tracing::info!(
+                %target,
+                participant = pid,
+                channels = chans,
+                channel_map = ?channel_map,
+                "local-audio: talkback playback (PipeWire) enabled from the participant's N-1 bus"
+            );
+            let tx = spawn_local_sink(
+                LocalSinkConfig {
+                    target,
+                    rate: sample_rate,
+                    channels: chans.clamp(1, u8::MAX as usize) as u8,
+                    channel_map,
+                    label: "talkback playback",
+                },
+                stats,
+            );
+            (pid, tx)
+        })
+        .collect();
+
     // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
     // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
     // OS thread — the NDI recv is a blocking FFI call). The shared slot feeds `/interkom.mjpeg`,
@@ -363,6 +425,15 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // Feed every local playback sink its participant's OWN N-1 output bus (issue 1345: the
+                // cutters -> the operator's MiniFuse headphones). Best-effort try_send, like above.
+                for (pid, tx) in &local_sinks {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
+
                 // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
                 let addrs: Vec<Option<SocketAddr>> =
                     out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
@@ -408,7 +479,7 @@ async fn main() -> Result<()> {
                             s.local_audio = Some(lstats.snapshot());
                         }
                     }
-                    for (pid, lstats) in &local_input_reports {
+                    for (pid, lstats) in local_input_reports.iter().chain(&local_output_reports) {
                         if let Some(s) = rx_stats.get_mut(*pid) {
                             s.local_audio = Some(lstats.snapshot());
                         }

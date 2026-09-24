@@ -161,10 +161,16 @@ pub struct Participant {
     /// The VBAN stream name we SEND this participant's output as (e.g. `cam1`).
     #[serde(default)]
     pub out_stream: Option<String>,
-    /// The PipeWire SINK node the `program_out` participant's mixed output is written to (pipewire
-    /// adapter only), e.g. `strih-program` — issue 1344.
+    /// The PipeWire SINK node this participant's mixed output is written to (pipewire adapter only):
+    /// `strih-program` for the `program_out` (issue 1344), the MiniFuse playback node for the
+    /// `cutters` so the operator hears the N-1 mix in the headphones (issue 1345).
     #[serde(default)]
     pub pipewire_target: Option<String>,
+    /// The `pw-cat --channel-map` for this participant's playback sink (pipewire adapter only), e.g.
+    /// `AUX0,AUX1,AUX2,AUX3` for the MiniFuse pro-audio playback node. Must name exactly
+    /// `out_channels` positions. Absent = pw-cat's default map (the `strih-program` null sink).
+    #[serde(default)]
+    pub pipewire_channel_map: Option<String>,
     /// The PipeWire CAPTURE node this participant's input is read from (pipewire adapter only), e.g.
     /// the MiniFuse 4 pro-input node feeding the operator's talkback into the N-1 mix — issue 1344.
     #[serde(default)]
@@ -401,6 +407,33 @@ impl Matrix {
                     "participant '{}': pipewire adapter needs a pipewire_source (capture node) unless it is the program_out",
                     p.name
                 );
+            } else if let Some(target) = p.pipewire_target.as_deref() {
+                // A capture participant MAY also carry a playback sink (issue 1345: the cutters play
+                // their own N-1 output bus to the MiniFuse headphones). It needs a real node name and
+                // output channels to play.
+                if target.trim().is_empty() {
+                    bail!(
+                        "participant '{}': pipewire_target must name a sink node (got an empty string)",
+                        p.name
+                    );
+                }
+                if p.out_channels == 0 {
+                    bail!(
+                        "participant '{}': pipewire_target needs out_channels > 0 (nothing to play)",
+                        p.name
+                    );
+                }
+            }
+            if let Some(map) = p.pipewire_channel_map.as_deref() {
+                let positions: Vec<&str> = map.split(',').map(str::trim).collect();
+                if positions.iter().any(|x| x.is_empty()) || positions.len() != p.out_channels {
+                    bail!(
+                        "participant '{}': pipewire_channel_map '{}' must name exactly {} comma-separated positions (out_channels)",
+                        p.name,
+                        map,
+                        p.out_channels
+                    );
+                }
             }
         }
 
@@ -508,6 +541,34 @@ impl Matrix {
                     p.pipewire_source
                         .clone()
                         .map(|node| (id, node, p.in_channels))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The local PipeWire PLAYBACK sinks other than the `program_out` (issue 1345: the cutters' N-1 mix
+    /// to the MiniFuse headphones), as `(participant id, sink node, out_channels, channel map)` —
+    /// every pipewire participant that is not the `program_out`, has output channels and a non-empty
+    /// `pipewire_target`. Each is fed from that participant's OWN output bus.
+    pub fn local_outputs(&self) -> Vec<(usize, String, usize, Option<String>)> {
+        self.participants
+            .iter()
+            .enumerate()
+            .filter_map(|(id, p)| {
+                let target = p.pipewire_target.as_deref().unwrap_or("");
+                if p.adapter == ADAPTER_PIPEWIRE
+                    && p.role != PROGRAM_OUT_ROLE
+                    && p.out_channels > 0
+                    && !target.trim().is_empty()
+                {
+                    Some((
+                        id,
+                        target.to_string(),
+                        p.out_channels,
+                        p.pipewire_channel_map.clone(),
+                    ))
                 } else {
                     None
                 }

@@ -44,10 +44,42 @@ pub const PW_CAT_FORMAT: &str = "s16";
 /// blocks the mix loop) — a dropped ~5 ms block is tolerable program jitter; a stalled mix loop is not.
 const EGRESS_QUEUE_BLOCKS: usize = 64;
 
-/// Build the `pw-cat` PLAYBACK argv for the program sink (egress). Raw interleaved s16 PCM is fed on
-/// stdin (`-`); `--target` names the operator's `strih-program` sink node.
+/// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
+/// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
+/// bursts of this many frames, whatever block size the hub pops.
+pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
+
+/// The node latency (in frames at `--rate`) the capture child asks PipeWire for: one hub block.
+/// pw-cat takes it as direct SAMPLES (`--latency 256` + `--rate 48000` = `node.latency 256/48000`);
+/// the literal `256/48000` is rejected by pw-cat 1.6.2 as a "bad unit" (issue 1345, live-verified).
+pub const PW_CAT_RECORD_LATENCY_FRAMES: usize = 256;
+
+/// The local-capture ring's cap, in hub blocks (issue 1345: at least 32 blocks).
+pub const LOCAL_CAPTURE_CAP_BLOCKS: usize = 32;
+
+/// The local-capture ring's TARGET fill: about 2x the pw-cat burst, so a whole burst can arrive late
+/// without the ring running dry (issue 1345).
+pub const LOCAL_CAPTURE_TARGET_FRAMES: usize = 2 * PW_GRAPH_BURST_FRAMES;
+
+/// Build the `pw-cat` PLAYBACK argv for the program sink (egress), with no channel map. See
+/// [`pw_cat_playback_argv_with_map`].
 pub fn pw_cat_playback_argv(target: &str, rate: u32, channels: u8) -> Vec<String> {
-    vec![
+    pw_cat_playback_argv_with_map(target, rate, channels, None)
+}
+
+/// Build the `pw-cat` PLAYBACK argv for a local sink (egress). Raw interleaved s16 PCM is fed on
+/// stdin (`-`); `--target` names the sink node. `channel_map` (e.g. `AUX0,AUX1,AUX2,AUX3`) is passed
+/// as `--channel-map` when given: a pro-audio node (the MiniFuse playback, ports `AUX0..AUX5`) needs
+/// it, because a 4-channel stream otherwise defaults to `FL,FR,RL,RR` and never lands on the AUX
+/// ports. The `strih-program` null sink takes the default stereo map (`None`), so its argv is
+/// unchanged.
+pub fn pw_cat_playback_argv_with_map(
+    target: &str,
+    rate: u32,
+    channels: u8,
+    channel_map: Option<&str>,
+) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
         "pw-cat".into(),
         "--playback".into(),
         "--raw".into(),
@@ -55,16 +87,24 @@ pub fn pw_cat_playback_argv(target: &str, rate: u32, channels: u8) -> Vec<String
         rate.to_string(),
         "--channels".into(),
         channels.to_string(),
+    ];
+    if let Some(map) = channel_map {
+        argv.push("--channel-map".into());
+        argv.push(map.to_string());
+    }
+    argv.extend([
         "--format".into(),
         PW_CAT_FORMAT.into(),
         "--target".into(),
         target.to_string(),
         "-".into(),
-    ]
+    ]);
+    argv
 }
 
 /// Build the `pw-cat` RECORD argv for a capture source (ingress). Raw interleaved s16 PCM comes out
-/// on stdout (`-`); `--target` names the MiniFuse 4 capture node.
+/// on stdout (`-`); `--target` names the MiniFuse 4 capture node; `--latency` asks for one hub block
+/// ([`PW_CAT_RECORD_LATENCY_FRAMES`]) instead of pw-cat's 100 ms default.
 pub fn pw_cat_record_argv(target: &str, rate: u32, channels: u8) -> Vec<String> {
     vec![
         "pw-cat".into(),
@@ -76,6 +116,8 @@ pub fn pw_cat_record_argv(target: &str, rate: u32, channels: u8) -> Vec<String> 
         channels.to_string(),
         "--format".into(),
         PW_CAT_FORMAT.into(),
+        "--latency".into(),
+        PW_CAT_RECORD_LATENCY_FRAMES.to_string(),
         "--target".into(),
         target.to_string(),
         "-".into(),
@@ -188,9 +230,15 @@ pub struct PwCatSink {
 }
 
 impl PwCatSink {
-    /// Spawn `pw-cat --playback` targeting `target` at `rate`/`channels`.
-    pub fn spawn(target: &str, rate: u32, channels: u8) -> io::Result<Self> {
-        let argv = pw_cat_playback_argv(target, rate, channels);
+    /// Spawn `pw-cat --playback` targeting `target` at `rate`/`channels`, with an optional
+    /// `--channel-map` (see [`pw_cat_playback_argv_with_map`]).
+    pub fn spawn(
+        target: &str,
+        rate: u32,
+        channels: u8,
+        channel_map: Option<&str>,
+    ) -> io::Result<Self> {
+        let argv = pw_cat_playback_argv_with_map(target, rate, channels, channel_map);
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
@@ -218,7 +266,9 @@ impl Drop for PwCatSink {
     }
 }
 
-/// A supervised `pw-cat --record` child producing interleaved PCM16 on stdout.
+/// A supervised `pw-cat --record` child producing interleaved PCM16 on stdout. The stdout pipe is
+/// read directly (a raw [`ChildStdout`], NO `BufReader`), so a block reaches the ring the moment
+/// pw-cat writes it.
 pub struct PwCatSource {
     child: Child,
     stdout: ChildStdout,
@@ -255,39 +305,68 @@ impl Drop for PwCatSource {
     }
 }
 
-/// Spawn the supervised EGRESS thread that owns the [`PwCatSink`] and returns the [`SyncSender`] the
-/// block loop feeds one interleaved PCM16 block per tick. A full queue drops the block (best-effort
-/// `try_send`, like the Janus feed). The thread respawns a died `pw-cat` with [`restart_backoff`],
-/// forever, until the sender is dropped (hub shutdown).
+/// The parameters for one supervised local EGRESS sink ([`spawn_local_sink`]).
+pub struct LocalSinkConfig {
+    /// The PipeWire sink node name (`pw-cat --target`).
+    pub target: String,
+    pub rate: u32,
+    pub channels: u8,
+    /// The `--channel-map` (e.g. `AUX0,AUX1,AUX2,AUX3`), or `None` for pw-cat's default map.
+    pub channel_map: Option<String>,
+    /// What the sink is, for the log lines (`program sink`, `talkback playback`).
+    pub label: &'static str,
+}
+
+/// Spawn the supervised EGRESS thread for the `program_out` sink (the OBS program capture). It uses
+/// the default channel map, so its argv is exactly the issue-1344 one. See [`spawn_local_sink`].
 pub fn spawn_program_sink(
     target: String,
     rate: u32,
     channels: u8,
     stats: Arc<LocalAudioStats>,
 ) -> SyncSender<Vec<i16>> {
+    spawn_local_sink(
+        LocalSinkConfig {
+            target,
+            rate,
+            channels,
+            channel_map: None,
+            label: "program sink",
+        },
+        stats,
+    )
+}
+
+/// Spawn a supervised EGRESS thread that owns a [`PwCatSink`] and returns the [`SyncSender`] the
+/// block loop feeds one interleaved PCM16 block per tick. A full queue drops the block (best-effort
+/// `try_send`, like the Janus feed). The thread respawns a died `pw-cat` with [`restart_backoff`],
+/// forever, until the sender is dropped (hub shutdown). Serves the `program_out` sink and every
+/// local playback participant (the operator's MiniFuse headphones, issue 1345).
+pub fn spawn_local_sink(cfg: LocalSinkConfig, stats: Arc<LocalAudioStats>) -> SyncSender<Vec<i16>> {
     let (tx, rx) = sync_channel::<Vec<i16>>(EGRESS_QUEUE_BLOCKS);
-    thread::spawn(move || program_sink_loop(target, rate, channels, rx, stats));
+    thread::spawn(move || local_sink_loop(cfg, rx, stats));
     tx
 }
 
-fn program_sink_loop(
-    target: String,
-    rate: u32,
-    channels: u8,
-    rx: Receiver<Vec<i16>>,
-    stats: Arc<LocalAudioStats>,
-) {
+fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<LocalAudioStats>) {
+    let LocalSinkConfig {
+        target,
+        rate,
+        channels,
+        channel_map,
+        label,
+    } = cfg;
     let mut failures: u32 = 0;
     loop {
         let backoff = restart_backoff(failures);
         if !backoff.is_zero() {
             thread::sleep(backoff);
         }
-        match PwCatSink::spawn(&target, rate, channels) {
+        match PwCatSink::spawn(&target, rate, channels, channel_map.as_deref()) {
             Ok(mut sink) => {
                 stats.spawns.fetch_add(1, Ordering::Relaxed);
                 failures = 0;
-                tracing::info!(%target, rate, channels, "local-audio: program sink pw-cat spawned");
+                tracing::info!(%target, rate, channels, channel_map = ?channel_map, "local-audio: {label} pw-cat spawned");
                 loop {
                     match rx.recv() {
                         Ok(block) => {
@@ -303,11 +382,11 @@ fn program_sink_loop(
                 }
                 stats.exits.fetch_add(1, Ordering::Relaxed);
                 failures = failures.saturating_add(1);
-                tracing::warn!(%target, "local-audio: program sink pw-cat exited — respawning");
+                tracing::warn!(%target, "local-audio: {label} pw-cat exited — respawning");
             }
             Err(e) => {
                 failures = failures.saturating_add(1);
-                tracing::warn!(%target, error=%e, "local-audio: program sink pw-cat spawn failed — backing off");
+                tracing::warn!(%target, error=%e, "local-audio: {label} pw-cat spawn failed — backing off");
             }
         }
     }

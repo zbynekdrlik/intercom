@@ -127,12 +127,35 @@ pub fn route_packet(
     Some((id, audio))
 }
 
+/// A stream whose last packet is older than this is STALE (issue 1345, 24.9.2026): a muted or
+/// stopped cambox keeps its buffer "previously live" forever. A stale stream no longer counts an
+/// underrun per block (the old code counted 187 underruns/s for a muted cam, which made the counter
+/// useless) and its level reads as silence (-120 dBFS) instead of the last packet's level forever.
+pub const STALE_STREAM_MS: u64 = 500;
+
 /// A per-participant jitter buffer: planar sample queues with underrun/overrun accounting and the
 /// age of the last received packet.
+///
+/// Two fill policies share the one type:
+///
+/// * [`JitterBuffer::new`] — the VBAN/Janus network legs: pop whatever is queued, zero-pad a short
+///   block, drop the OLDEST samples beyond the cap.
+/// * [`JitterBuffer::local_capture`] — the local PipeWire capture (the MiniFuse talkback, issue 1345).
+///   `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum 1024) that the block loop
+///   pops as 256-frame blocks, so the buffer holds a TARGET fill (about 2x the burst): it prefills
+///   to the target before the first pop, after an underrun it outputs WHOLE silent blocks until it
+///   has refilled to the target (never a zero-spliced partial block mid-voice), and on overrun it
+///   drops back down to the target (not just to the cap, which would overrun again at once).
 #[derive(Debug)]
 pub struct JitterBuffer {
     channels: Vec<VecDeque<i16>>,
     cap_frames: usize,
+    /// `Some(target)` = the local-capture fill policy; `None` = the network-leg policy.
+    target_frames: Option<usize>,
+    /// Local-capture policy only: waiting to (re)fill to the target before audio flows.
+    priming: bool,
+    /// A mono packet is fanned ch1 -> ch2 when the participant declares >= 2 input channels.
+    min_channels: usize,
     pub rx_packets: u64,
     pub underruns: u64,
     pub overruns: u64,
@@ -141,12 +164,15 @@ pub struct JitterBuffer {
 }
 
 impl JitterBuffer {
-    /// A buffer sized for `cap_frames` per channel (older samples beyond that are dropped as an
-    /// overrun). Channels grow on demand as packets arrive.
+    /// A network-leg buffer sized for `cap_frames` per channel (older samples beyond that are dropped
+    /// as an overrun). Channels grow on demand as packets arrive.
     pub fn new(cap_frames: usize) -> Self {
         JitterBuffer {
             channels: Vec::new(),
             cap_frames: cap_frames.max(1),
+            target_frames: None,
+            priming: false,
+            min_channels: 1,
             rx_packets: 0,
             underruns: 0,
             overruns: 0,
@@ -155,22 +181,60 @@ impl JitterBuffer {
         }
     }
 
+    /// A LOCAL-CAPTURE buffer (see the type doc): holds `target_frames` of audio, prefills to it
+    /// before the first pop and after every underrun, and drops back to it when it would exceed
+    /// `cap_frames`. The target is clamped into `1..=cap_frames`.
+    pub fn local_capture(cap_frames: usize, target_frames: usize) -> Self {
+        let cap = cap_frames.max(1);
+        JitterBuffer {
+            target_frames: Some(target_frames.clamp(1, cap)),
+            priming: true,
+            ..JitterBuffer::new(cap)
+        }
+    }
+
+    /// Declare the participant's input channel count. A MONO packet for a participant with >= 2 input
+    /// channels is copied into ch2 as well: a cambox sends mono VBAN, and the matrix routes ch1 -> out1
+    /// and ch2 -> out2, so without the fan-out a cam came out left-only (and 6 dB quieter after the
+    /// phones' stereo -> mono average). Only ch2 is filled — never beyond, so an 8-channel participant
+    /// is not padded with silent queues that would count as short.
+    pub fn with_min_channels(mut self, in_channels: usize) -> Self {
+        self.min_channels = in_channels.max(1);
+        self
+    }
+
     fn ensure_channels(&mut self, n: usize) {
         while self.channels.len() < n {
             self.channels.push(VecDeque::new());
         }
     }
 
-    /// Push a decoded packet's planar audio, counting one packet and one overrun per channel that
-    /// exceeded the cap (oldest samples dropped to fit).
+    /// Frames queued (the shortest channel; `0` before any packet).
+    pub fn buffered_frames(&self) -> usize {
+        self.channels.iter().map(|q| q.len()).min().unwrap_or(0)
+    }
+
+    /// Push a decoded packet's planar audio now. See [`JitterBuffer::push_at`].
     pub fn push(&mut self, audio: &DecodedAudio) {
-        self.ensure_channels(audio.channels.len());
+        self.push_at(audio, Instant::now());
+    }
+
+    /// Push a decoded packet's planar audio received at `now`, counting one packet and at most one
+    /// overrun. On overrun the network policy drops the oldest samples down to the cap; the
+    /// local-capture policy drops them down to the target.
+    pub fn push_at(&mut self, audio: &DecodedAudio, now: Instant) {
+        let fan_mono = audio.channels.len() == 1 && self.min_channels >= 2;
+        let n_ch = if fan_mono { 2 } else { audio.channels.len() };
+        self.ensure_channels(n_ch);
+        for (c, q) in self.channels.iter_mut().enumerate().take(n_ch) {
+            let src = if fan_mono { 0 } else { c };
+            q.extend(audio.channels[src].iter().copied());
+        }
         let mut overran = false;
-        for (c, samples) in audio.channels.iter().enumerate() {
-            let q = &mut self.channels[c];
-            q.extend(samples.iter().copied());
+        let keep = self.target_frames.unwrap_or(self.cap_frames);
+        for q in &mut self.channels {
             if q.len() > self.cap_frames {
-                let drop = q.len() - self.cap_frames;
+                let drop = q.len() - keep;
                 q.drain(0..drop);
                 overran = true;
             }
@@ -179,15 +243,60 @@ impl JitterBuffer {
             self.overruns += 1;
         }
         self.rx_packets += 1;
-        self.last_rx = Some(Instant::now());
+        self.last_rx = Some(now);
         self.last_peak = audio.peak();
     }
 
-    /// Pop one block of `frames` frames as planar channels, padding any short channel with silence
-    /// and counting ONE underrun if a PREVIOUSLY-LIVE stream ran short. A buffer that has never
-    /// received a packet returns silence WITHOUT counting an underrun (see the guard below).
+    /// Whether the stream went quiet for longer than [`STALE_STREAM_MS`] as of `now`. A buffer that
+    /// never received a packet is not stale (it is "never live" — see [`JitterBuffer::pop_block_at`]).
+    fn is_stale_at(&self, now: Instant) -> bool {
+        self.last_rx.is_some_and(|t| {
+            now.saturating_duration_since(t) > std::time::Duration::from_millis(STALE_STREAM_MS)
+        })
+    }
+
+    /// Pop one block now. See [`JitterBuffer::pop_block_at`].
     pub fn pop_block(&mut self, frames: usize) -> Vec<Vec<i16>> {
+        self.pop_block_at(frames, Instant::now())
+    }
+
+    /// Pop one block of `frames` frames as planar channels at `now`.
+    ///
+    /// Network policy: pad any short channel with silence. Local-capture policy: while priming, or
+    /// when fewer than `frames` are queued, output a WHOLE silent block and consume nothing (the
+    /// queued voice is kept for when the buffer has refilled to the target).
+    ///
+    /// ONE underrun is counted when a stream runs short — only a PREVIOUSLY-LIVE (at least one packet)
+    /// and NOT STALE ([`STALE_STREAM_MS`]) stream; a local-capture buffer counts it once on entering
+    /// the refill wait, not once per silent block.
+    pub fn pop_block_at(&mut self, frames: usize, now: Instant) -> Vec<Vec<i16>> {
         let n_ch = self.channels.len().max(1);
+        let countable = self.last_rx.is_some() && !self.is_stale_at(now);
+
+        if let Some(target) = self.target_frames {
+            let buffered = self.buffered_frames();
+            // Refill to the target — and to at least one whole block, so a target below the block
+            // size can never flap between "refilled" and "ran dry" on the same pop.
+            if self.priming && buffered >= target.max(frames) {
+                self.priming = false;
+            }
+            if !self.priming && buffered < frames {
+                // Ran dry: one underrun, then wait to refill to the target.
+                self.priming = true;
+                if countable {
+                    self.underruns += 1;
+                }
+            }
+            if self.priming {
+                return vec![vec![0i16; frames]; n_ch];
+            }
+            return self
+                .channels
+                .iter_mut()
+                .map(|q| q.drain(0..frames).collect())
+                .collect();
+        }
+
         let mut out = Vec::with_capacity(n_ch);
         let mut short = self.channels.is_empty();
         if self.channels.is_empty() {
@@ -208,9 +317,10 @@ impl JitterBuffer {
         }
         // Count an underrun ONLY for a stream that was previously LIVE and ran dry — never for a
         // buffer that has NEVER received a packet (a not-yet-connected vban leg, or an M1
-        // `adapter="none"` participant that never receives VBAN at all). Otherwise every such
-        // participant would emit an underrun every block and swamp the watchdog status line.
-        if short && self.last_rx.is_some() {
+        // `adapter="none"` participant that never receives VBAN at all), and never for a STALE stream
+        // (a muted/stopped cambox). Otherwise such a participant would emit an underrun every block
+        // and swamp the watchdog status line.
+        if short && countable {
             self.underruns += 1;
         }
         out
@@ -221,8 +331,17 @@ impl JitterBuffer {
         self.last_rx.map(|t| t.elapsed().as_millis() as u64)
     }
 
-    /// Peak dBFS of the last received packet (`-120.0` for silence / no packet).
+    /// Peak dBFS of the last received packet now. See [`JitterBuffer::last_level_dbfs_at`].
     pub fn last_level_dbfs(&self) -> f32 {
+        self.last_level_dbfs_at(Instant::now())
+    }
+
+    /// Peak dBFS of the last received packet as of `now`: `-120.0` for silence, no packet, or a STALE
+    /// stream ([`STALE_STREAM_MS`]).
+    pub fn last_level_dbfs_at(&self, now: Instant) -> f32 {
+        if self.last_rx.is_none() || self.is_stale_at(now) {
+            return -120.0;
+        }
         peak_dbfs(self.last_peak)
     }
 }
