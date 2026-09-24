@@ -321,11 +321,15 @@ What was wrong live, and how the code now handles it. Read this before touching 
     flat to 20 kHz, ≥ 70 dB down from 24.5 kHz; history + phase carry across packets, so odd
     103-frame packets decimate bit-identically to one pass;
   - anything else (44.1 / 88.2 k, …): DROPPED, counted in `rate_rejects`, one warn per transition;
+  - a RESERVED rate index (20..=31) decodes to rate 0 via `VbanHeader::sample_rate_checked` and is
+    dropped the same way — never trust the codec's lenient `sample_rate()`, which falls back to
+    48 kHz (kept only for the appliance);
   - a rate change or a channel-count change restarts the filter from silence.
-- **Observability.** `/api/state` per participant: `sample_rate` (omitted before the first packet /
-  for a non-VBAN participant) + `rate_rejects`. The receive task publishes into lock-free
-  `VbanRateStats` slots that the block loop reads. After a deploy, fohabl must read
-  `sample_rate: 96000` with `overruns` ≈ 0.
+- **Observability.** `/api/state`, VBAN participants only: `sample_rate` (omitted before the first
+  packet) + `rate_rejects`. The receive task publishes into lock-free `VbanRateStats` slots that the
+  block loop reads. The periodic status line appends `rate_rejects=N` when any packet was dropped (a
+  rejected stream reads as silent -120 dBFS, so the line is what explains it). After a deploy,
+  fohabl must read `sample_rate: 96000` with `overruns` ≈ 0.
 - **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
   the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
   bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
@@ -333,8 +337,15 @@ What was wrong live, and how the code now handles it. Read this before touching 
 - **Tier-0 verify.** A rustc replica of `fir.rs` + `vban_rate.rs` + `mulaw.rs` with the pure half of
   `tests/vban_rate_1345.rs` (cut at its `// ---- wiring` marker) + the two mulaw test files, run
   with `rustc --edition 2021 --test`. `clippy-driver --edition 2021 --test -D warnings <replica.rs>`
-  applies the real clippy lints to the pure modules without cargo. The wiring (vban_io / state /
-  main) first compiles at CI.
+  applies the real clippy lints to the pure modules without cargo.
+- **Type-checking `vban_io.rs` without cargo.** Its only external crates are `anyhow`, `tracing` and
+  `intercom-vban`, so build those as rlibs straight from `~/.cargo/registry/src/*/` with `rustc`
+  (`once_cell` → `tracing-core` with `--cfg 'feature="std"' --cfg 'feature="once_cell"'` →
+  `pin-project-lite` → `tracing` with `--cfg 'feature="std"'`; `anyhow` alone), then
+  `clippy-driver --test -D warnings --extern …` a replica root that `#[path]`-includes fir / mulaw /
+  vban_rate / vban_io. That runs vban_io's own in-file tests too. Put the rustc lines in a script
+  file: an inline `--cfg 'feature="std"'` inside a compound Bash call is refused by the worktree
+  guard. `state.rs` / `main.rs` (serde derive, tokio) still first compile at CI.
 
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
