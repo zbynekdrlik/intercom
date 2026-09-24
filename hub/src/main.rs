@@ -430,7 +430,11 @@ fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
         .iter()
         .enumerate()
         .map(|(id, p)| {
-            let jb = if local_capture_ids.contains(&id) {
+            // The Janus (phones) ingress is bursty 960-frame RTP chunks, so it gets the same
+            // target-fill ring as a local capture input (issue 1345: ~60 overruns/s otherwise).
+            let jb = if local_capture_ids.contains(&id)
+                || p.adapter == intercom_hub::matrix::ADAPTER_JANUS
+            {
                 JitterBuffer::local_capture(
                     block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
                     LOCAL_CAPTURE_TARGET_FRAMES,
