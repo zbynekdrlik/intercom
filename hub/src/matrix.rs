@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
+use crate::janus_rtp::JanusCodec;
+
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
 /// `phones` participant over the Janus audiobridge plain-RTP leg; `None` marks a participant
 /// declared for routing fidelity whose real I/O (PipeWire) arrives in M2.
@@ -57,9 +59,13 @@ pub struct JanusConfig {
     /// Path to the 0600 file holding the room secret (value NEVER logged / never in the TOML).
     #[serde(default)]
     pub room_secret_file: Option<String>,
-    /// The local UDP `host:port` the plain-RTP leg binds (our PCMU send + the room-mix receive).
+    /// The local UDP `host:port` the plain-RTP leg binds (our send + the room-mix receive).
     #[serde(default = "default_janus_rtp_bind")]
     pub rtp_bind: String,
+    /// The phones leg's codec: `"opus"` (default, 48 kHz mono with in-band FEC) or `"pcmu"`
+    /// (G.711 µ-law). An unknown value fails the load (issue 1345, 25.9.2026).
+    #[serde(default)]
+    pub codec: JanusCodec,
 }
 
 fn default_janus_api_url() -> String {

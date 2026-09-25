@@ -41,13 +41,16 @@ HUB = {
 }
 
 # The Janus audiobridge edge config emitted into the `[janus]` table (issue 1345 M3a). The `phones`
-# participant is carried over the Janus audiobridge room as a plain-RTP PCMU participant. The room
+# participant is carried over the Janus audiobridge room as a plain-RTP participant. The room
 # SECRET is never inlined here — the hub reads it from the 0600 `room_secret_file` at start.
+# `codec` = "opus" (issue 1345, 25.9.2026): Opus 48 kHz mono, 20 ms, in-band FEC, sent on the hub's
+# own 20 ms clock; "pcmu" (G.711 µ-law) stays selectable.
 JANUS = {
     "api_url": "http://127.0.0.1:8088/janus",
     "room": 1000,
     "room_secret_file": "/etc/intercom-hub/janus-room.secret",
     "rtp_bind": "0.0.0.0:6990",
+    "codec": "opus",
 }
 
 # The Interkom picture (MJPEG) config emitted into the `[video]` table (issue 1345 M3c). The hub
@@ -303,13 +306,14 @@ def render(model):
     out.append(f'block_frames = {hub["block_frames"]}')
     out.append("")
 
-    # The Janus audiobridge edge (issue 1345 M3a) — the phones participant's plain-RTP PCMU leg. The
+    # The Janus audiobridge edge (issue 1345 M3a) — the phones participant's plain-RTP leg. The
     # room secret is NEVER inlined; the hub reads it from `room_secret_file` (0600) at start.
     out.append("[janus]")
     out.append(f'api_url = "{JANUS["api_url"]}"')
     out.append(f'room = {JANUS["room"]}')
     out.append(f'room_secret_file = "{JANUS["room_secret_file"]}"')
     out.append(f'rtp_bind = "{JANUS["rtp_bind"]}"')
+    out.append(f'codec = "{JANUS["codec"]}"')
     out.append("")
 
     # The Interkom picture (issue 1345 M3c) — the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe.

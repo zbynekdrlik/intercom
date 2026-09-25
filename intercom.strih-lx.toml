@@ -14,6 +14,7 @@ api_url = "http://127.0.0.1:8088/janus"
 room = 1000
 room_secret_file = "/etc/intercom-hub/janus-room.secret"
 rtp_bind = "0.0.0.0:6990"
+codec = "opus"
 
 [video]
 ndi_source_name = "STRIH-LX (interkom)"

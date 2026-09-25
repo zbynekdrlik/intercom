@@ -4,19 +4,22 @@
 //! first compile, but the RTP header bytes + the Janus JSON shapes are pinned by a rustc `--test`
 //! replica locally):
 //!
-//! (1) RTP PCMU — a 12-byte-header packetizer/depacketizer (PT 0, 160 samples / 20 ms, a fixed
-//! SSRC per run, seq + timestamp continuity, the marker bit only on the first packet after silence).
+//! (1) RTP — a 12-byte-header packetizer/depacketizer (a fixed SSRC + payload type per run, seq +
+//! timestamp continuity, the marker bit only on the first packet after silence) and the
+//! [`JanusCodec`] choice (Opus with in-band FEC by default, PCMU selectable; issue 1345, 25.9.2026).
 //! (2) Janus HTTP API messages — pure `serde_json` builders (`create` session, `attach`
 //! `janus.plugin.audiobridge`, `join` as a plain-RTP participant, `configure`, `keepalive`, `leave`)
-//! plus parsers for the `success` id, the audiobridge `joined` reply (Janus's own RTP ip/port — where
-//! we send + receive) and the transport/plugin `error` shapes. Field names are pinned to the Janus
-//! AudioBridge docs' plain-RTP participant section.
+//! plus parsers for the `success` id, the audiobridge `joined` reply (Janus's own RTP ip/port and
+//! payload type — where we send + receive) and the transport/plugin `error` shapes. Field names are
+//! pinned to the Janus AudioBridge docs' plain-RTP participant section.
 //! (3) The adapter runtime — [`run_janus_participant`] drives the HTTP long-poll session (`reqwest`,
-//! rustls, NO native openssl), re-creating the session on ANY error with a bounded backoff, binds a
-//! UDP socket, sends the phones' N-1 mix as PCMU (via [`crate::mulaw`]) every 20 ms and pushes the
-//! received room mix into the phones participant's [`JitterBuffer`] the engine pops like any input.
+//! rustls, NO native openssl), re-creating the session on ANY error with a bounded backoff. It binds
+//! the RTP socket and starts the paced sender thread ([`crate::janus_sender`]), which sends the
+//! phones' N-1 mix on its own steady 20 ms clock. It decodes the received room mix
+//! ([`crate::janus_codec`]) into the phones participant's [`JitterBuffer`] the engine pops like any
+//! input.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,11 +27,13 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
-use crate::mulaw;
+use crate::janus_codec::RxDecoder;
+use crate::janus_pacing::{IntervalStats, PacedRing};
+use crate::janus_sender::{spawn_paced_sender, PacedSenderConfig, PacedSenderShared, TxTarget};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
 // ---------------------------------------------------------------------------------------------
-// 1. RTP PCMU
+// 1. RTP (PCMU + Opus)
 // ---------------------------------------------------------------------------------------------
 
 /// The fixed RTP header length (no CSRC, no extension).
@@ -37,24 +42,73 @@ pub const RTP_HEADER_LEN: usize = 12;
 pub const PCMU_PAYLOAD_TYPE: u8 = 0;
 /// Samples (= µ-law bytes) in one 20 ms PCMU packet at 8 kHz.
 pub const PCMU_SAMPLES_PER_PACKET: usize = 160;
+/// The dynamic RTP payload type the hub asks Janus to use for Opus (issue 1345, 25.9.2026). Janus
+/// echoes the payload type it will send the room mix with in its `joined` reply.
+pub const OPUS_PAYLOAD_TYPE: u8 = 111;
 
-/// An RTP PCMU packetizer: a fixed SSRC per run, a 16-bit sequence number and a 32-bit timestamp
-/// that advance by the sample count of each packet, and the marker bit set only on the first packet
-/// emitted after (re)start or a silence gap.
+/// The phones leg's codec (`[janus].codec`). Opus is the default (issue 1345, 25.9.2026: the
+/// narrowband PCMU leg sounded like a telephone on top of the pacing beat). PCMU stays selectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JanusCodec {
+    /// Opus 48 kHz mono, 20 ms, in-band FEC.
+    #[default]
+    Opus,
+    /// G.711 µ-law, 8 kHz.
+    Pcmu,
+}
+
+impl JanusCodec {
+    /// The name Janus takes in the join's top-level `codec` field (and `/api/state` shows).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JanusCodec::Opus => "opus",
+            JanusCodec::Pcmu => "pcmu",
+        }
+    }
+
+    /// The RTP payload type the hub sends (and asks Janus to send) for this codec.
+    pub fn payload_type(self) -> u8 {
+        match self {
+            JanusCodec::Opus => OPUS_PAYLOAD_TYPE,
+            JanusCodec::Pcmu => PCMU_PAYLOAD_TYPE,
+        }
+    }
+
+    /// One 20 ms frame in RTP clock units: Opus always uses a 48 kHz RTP clock (RFC 7587), PCMU
+    /// 8 kHz.
+    pub fn rtp_samples_per_frame(self) -> u32 {
+        match self {
+            JanusCodec::Opus => 960,
+            JanusCodec::Pcmu => PCMU_SAMPLES_PER_PACKET as u32,
+        }
+    }
+}
+
+/// An RTP packetizer: a fixed SSRC and payload type per run, a 16-bit sequence number and a 32-bit
+/// timestamp that advance by the sample count of each packet, and the marker bit set only on the
+/// first packet emitted after (re)start or a silence gap.
 #[derive(Debug, Clone)]
 pub struct RtpPacketizer {
     ssrc: u32,
+    payload_type: u8,
     seq: u16,
     timestamp: u32,
     marker_next: bool,
 }
 
 impl RtpPacketizer {
-    /// A packetizer with a fixed SSRC; the first packet it emits carries the marker bit (the first
-    /// packet after start-up silence).
+    /// A PCMU packetizer with a fixed SSRC; the first packet it emits carries the marker bit (the
+    /// first packet after start-up silence).
     pub fn new(ssrc: u32) -> Self {
+        Self::with_payload_type(ssrc, PCMU_PAYLOAD_TYPE)
+    }
+
+    /// A packetizer for any payload type (Opus: [`OPUS_PAYLOAD_TYPE`]).
+    pub fn with_payload_type(ssrc: u32, payload_type: u8) -> Self {
         RtpPacketizer {
             ssrc,
+            payload_type: payload_type & 0x7F,
             seq: 0,
             timestamp: 0,
             marker_next: true,
@@ -66,14 +120,20 @@ impl RtpPacketizer {
         self.marker_next = true;
     }
 
-    /// Build one RTP packet (12-byte header + `payload`), advancing the sequence number by one and
-    /// the timestamp by the payload's sample count (1 byte = 1 sample for PCMU). The marker bit is
-    /// set only on the first packet after start-up / [`mark_silence`](Self::mark_silence).
+    /// Build one PCMU packet: the timestamp advances by the payload length (1 byte = 1 sample).
     pub fn packetize(&mut self, payload: &[u8]) -> Vec<u8> {
+        self.packetize_samples(payload, payload.len() as u32)
+    }
+
+    /// Build one RTP packet (12-byte header + `payload`), advancing the sequence number by one and
+    /// the timestamp by `samples` RTP clock units (an Opus packet always advances by the frame
+    /// duration, whatever its byte size). The marker bit is set only on the first packet after
+    /// start-up / [`mark_silence`](Self::mark_silence).
+    pub fn packetize_samples(&mut self, payload: &[u8], samples: u32) -> Vec<u8> {
         let mut pkt = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
         pkt.push(0x80); // V=2, P=0, X=0, CC=0
         let marker = if self.marker_next { 0x80 } else { 0x00 };
-        pkt.push(marker | (PCMU_PAYLOAD_TYPE & 0x7F));
+        pkt.push(marker | self.payload_type);
         pkt.extend_from_slice(&self.seq.to_be_bytes());
         pkt.extend_from_slice(&self.timestamp.to_be_bytes());
         pkt.extend_from_slice(&self.ssrc.to_be_bytes());
@@ -81,7 +141,7 @@ impl RtpPacketizer {
 
         self.marker_next = false;
         self.seq = self.seq.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(payload.len() as u32);
+        self.timestamp = self.timestamp.wrapping_add(samples);
         pkt
     }
 }
@@ -138,36 +198,48 @@ pub fn build_attach(transaction: &str) -> Value {
     json!({ "janus": "attach", "plugin": AUDIOBRIDGE_PLUGIN, "transaction": transaction })
 }
 
+/// What the hub asks for when it joins the audiobridge room as a plain-RTP participant.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinSpec<'a> {
+    pub room: u64,
+    /// The `display` name shown in the room.
+    pub display: &'a str,
+    /// Our RTP address, advertised to Janus.
+    pub local_ip: &'a str,
+    pub local_port: u16,
+    pub codec: JanusCodec,
+    /// The room secret; NEVER logged.
+    pub secret: Option<&'a str>,
+    pub pin: Option<&'a str>,
+}
+
 /// `join` an audiobridge room as a plain-RTP participant. Janus answers with its OWN rtp ip/port
-/// (where we then send our µ-law + receive the room mix minus ourselves). `secret`/`pin` are added
+/// (where we then send our audio + receive the room mix minus ourselves). `secret`/`pin` are added
 /// to the body only when present.
-pub fn build_join(
-    transaction: &str,
-    room: u64,
-    display: &str,
-    local_ip: &str,
-    local_port: u16,
-    secret: Option<&str>,
-    pin: Option<&str>,
-) -> Value {
+pub fn build_join(transaction: &str, spec: &JoinSpec<'_>) -> Value {
+    let mut rtp = json!({
+        "ip": spec.local_ip,
+        "port": spec.local_port,
+        "payload_type": spec.codec.payload_type(),
+    });
+    if spec.codec == JanusCodec::Opus {
+        // Ask Janus to put in-band FEC into the room mix it sends us too.
+        rtp["fec"] = json!(true);
+    }
     let mut body = json!({
         "request": "join",
-        "room": room,
-        "display": display,
+        "room": spec.room,
+        "display": spec.display,
         // The plain-RTP leg's codec is selected HERE (top-level `codec`), not by `rtp.payload_type`:
-        // without it Janus 1.1.2 defaults the participant to Opus (payload_type 100) and discards
-        // the PCMU we send (live strih-lx finding, 19.9.2026). G.711 mu-law = "pcmu".
-        "codec": "pcmu",
-        "rtp": {
-            "ip": local_ip,
-            "port": local_port,
-            "payload_type": PCMU_PAYLOAD_TYPE,
-        },
+        // without it Janus 1.1.2 defaults the participant to Opus and discards PCMU (live strih-lx
+        // finding, 19.9.2026).
+        "codec": spec.codec.as_str(),
+        "rtp": rtp,
     });
-    if let Some(s) = secret {
+    if let Some(s) = spec.secret {
         body["secret"] = json!(s);
     }
-    if let Some(p) = pin {
+    if let Some(p) = spec.pin {
         body["pin"] = json!(p);
     }
     json!({ "janus": "message", "transaction": transaction, "body": body })
@@ -211,11 +283,13 @@ pub struct JoinedInfo {
     pub id: u64,
     pub rtp_ip: String,
     pub rtp_port: u16,
+    /// The payload type Janus will send the room mix with, when the reply names one.
+    pub payload_type: Option<u8>,
 }
 
 /// Parse the audiobridge `joined` event: `plugindata.data.audiobridge == "joined"` carrying the
-/// plugin's own `rtp` ip/port (the address to send our PCMU to + receive the room mix from), the
-/// participant `id` and the `room`. `None` for any other event shape.
+/// plugin's own `rtp` ip/port (the address to send our audio to + receive the room mix from), its
+/// payload type, the participant `id` and the `room`. `None` for any other event shape.
 pub fn parse_joined(v: &Value) -> Option<JoinedInfo> {
     let data = v.get("plugindata")?.get("data")?;
     if data.get("audiobridge")?.as_str()? != "joined" {
@@ -227,6 +301,10 @@ pub fn parse_joined(v: &Value) -> Option<JoinedInfo> {
         id: data.get("id")?.as_u64()?,
         rtp_ip: rtp.get("ip")?.as_str()?.to_string(),
         rtp_port: u16::try_from(rtp.get("port")?.as_u64()?).ok()?,
+        payload_type: rtp
+            .get("payload_type")
+            .and_then(Value::as_u64)
+            .and_then(|pt| u8::try_from(pt).ok()),
     })
 }
 
@@ -280,28 +358,39 @@ pub struct JanusRuntimeConfig {
     pub room: u64,
     /// The room secret (read from `room_secret_file`); NEVER logged.
     pub secret: Option<String>,
-    /// The local UDP address our PCMU is sent from + the room mix is received on.
+    /// The local UDP address our audio is sent from + the room mix is received on.
     pub rtp_bind: SocketAddr,
     /// The `display` name shown in the room.
     pub display: String,
+    /// The phones leg's codec (`[janus].codec`).
+    pub codec: JanusCodec,
 }
 
-/// A live-established Janus session: the ids + the plugin's RTP endpoint (where we send / receive).
+/// A live-established Janus session: the ids, the plugin's RTP endpoint (where we send / receive)
+/// and the payload type the room mix arrives with.
 #[derive(Debug, Clone)]
 pub struct JanusSession {
     pub session_id: u64,
     pub handle_id: u64,
     pub janus_rtp_addr: SocketAddr,
+    pub payload_type: u8,
 }
 
-/// Per-participant Janus counters, shared with the `/api/state` snapshot (atomics so the block loop,
-/// the recv task and the HTTP layer read them without a lock).
+/// Per-participant Janus counters, shared with the `/api/state` snapshot (atomics so the paced
+/// sender thread, the recv task and the HTTP layer read them without a lock).
 #[derive(Debug, Default)]
 pub struct JanusSharedStats {
+    codec: JanusCodec,
     joined: AtomicBool,
     rejoin_count: AtomicU64,
     rx_packets: AtomicU64,
     tx_packets: AtomicU64,
+    /// The spacing of the last sends, in µs (the pacing proof).
+    tx_interval_sd_us: AtomicU64,
+    tx_interval_max_us: AtomicU64,
+    tx_underflows: AtomicU64,
+    tx_overflow_trims: AtomicU64,
+    rx_lost_frames: AtomicU64,
     /// Wall-clock start of the current session, for `session_age_s` (None = not joined).
     session_started: Mutex<Option<Instant>>,
 }
@@ -314,9 +403,33 @@ pub struct JanusStats {
     pub rejoin_count: u64,
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// The phones leg's codec: `opus` or `pcmu`.
+    pub codec: &'static str,
+    /// The standard deviation of the last 5 s of send intervals (paced: well under 0.5 ms).
+    pub tx_interval_ms_sd: f64,
+    /// The longest send interval in the last 5 s (paced: just over 20 ms).
+    pub tx_interval_ms_max: f64,
+    /// Ticks bridged with a silent frame because the ring ran dry mid-stream.
+    pub tx_underflows: u64,
+    /// Times the ring overflowed and was trimmed back to its target.
+    pub tx_overflow_trims: u64,
+    /// Received frames that were lost on the wire and concealed (FEC/PLC).
+    pub rx_lost_frames: u64,
+}
+
+fn ms_to_us(ms: f64) -> u64 {
+    (ms * 1000.0).round().max(0.0) as u64
 }
 
 impl JanusSharedStats {
+    /// Counters for a leg running `codec`.
+    pub fn new(codec: JanusCodec) -> Self {
+        JanusSharedStats {
+            codec,
+            ..Default::default()
+        }
+    }
+
     /// A point-in-time snapshot for `/api/state`.
     pub fn snapshot(&self) -> JanusStats {
         let session_age_s = self
@@ -332,7 +445,29 @@ impl JanusSharedStats {
             rejoin_count: self.rejoin_count.load(Ordering::Relaxed),
             rx_packets: self.rx_packets.load(Ordering::Relaxed),
             tx_packets: self.tx_packets.load(Ordering::Relaxed),
+            codec: self.codec.as_str(),
+            tx_interval_ms_sd: self.tx_interval_sd_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            tx_interval_ms_max: self.tx_interval_max_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            tx_underflows: self.tx_underflows.load(Ordering::Relaxed),
+            tx_overflow_trims: self.tx_overflow_trims.load(Ordering::Relaxed),
+            rx_lost_frames: self.rx_lost_frames.load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn count_tx(&self) {
+        self.tx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn publish_ring(&self, underflows: u64, trims: u64) {
+        self.tx_underflows.store(underflows, Ordering::Relaxed);
+        self.tx_overflow_trims.store(trims, Ordering::Relaxed);
+    }
+
+    pub(crate) fn publish_intervals(&self, intervals: &IntervalStats) {
+        self.tx_interval_sd_us
+            .store(ms_to_us(intervals.sd_ms()), Ordering::Relaxed);
+        self.tx_interval_max_us
+            .store(ms_to_us(intervals.max_ms()), Ordering::Relaxed);
     }
 
     fn mark_joined(&self) {
@@ -355,20 +490,16 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Send one keepalive well under Janus's 60 s session timeout.
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
-/// 20 ms of 48 kHz mono samples = one PCMU packet's worth before down-sampling.
-const MIX_SAMPLES_PER_PACKET_48K: usize = 960;
+/// How often the session task looks at the paced sender's send-failed flag.
+const SEND_FAILED_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// Establish a Janus audiobridge session as a plain-RTP participant: `create` → `attach` → `join`
-/// (advertising our `local_ip:local_port`) → parse the plugin's own rtp ip/port. Returns the session
-/// ids + Janus's RTP address. Errors bubble up so the caller backs off and re-establishes.
+/// (advertising our address + codec) → parse the plugin's own rtp ip/port + payload type. Errors
+/// bubble up so the caller backs off and re-establishes.
 pub async fn establish_session(
     client: &reqwest::Client,
     api_url: &str,
-    room: u64,
-    display: &str,
-    local_ip: &str,
-    local_port: u16,
-    secret: Option<&str>,
+    spec: &JoinSpec<'_>,
 ) -> Result<JanusSession> {
     // create
     let created: Value = client
@@ -407,9 +538,7 @@ pub async fn establish_session(
     let handle_url = format!("{session_url}/{handle_id}");
     let join_resp: Value = client
         .post(&handle_url)
-        .json(&build_join(
-            "join", room, display, local_ip, local_port, secret, None,
-        ))
+        .json(&build_join("join", spec))
         .send()
         .await
         .context("janus join POST")?
@@ -433,6 +562,9 @@ pub async fn establish_session(
         session_id,
         handle_id,
         janus_rtp_addr,
+        payload_type: joined
+            .payload_type
+            .unwrap_or_else(|| spec.codec.payload_type()),
     })
 }
 
@@ -458,21 +590,73 @@ async fn poll_for_joined(client: &reqwest::Client, session_url: &str) -> Result<
     Err(anyhow!("janus: no joined event after long-poll"))
 }
 
-/// The re-establishing adapter task: bind the UDP socket, establish the session, then send the
-/// phones' N-1 mix as PCMU every 20 ms and push the received room mix into the phones jitter buffer,
-/// keeping the session alive and re-joining (with a bounded backoff) on any error.
-///
-/// `mix_rx` carries the phones participant's mixed INTERLEAVED STEREO 48 kHz output, one block per
-/// hub tick; the task down-mixes + accumulates to 20 ms PCMU packets.
-pub async fn run_janus_participant(
-    cfg: JanusRuntimeConfig,
-    ssrc: u32,
-    mut mix_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
-    jitter: Arc<Mutex<Vec<JitterBuffer>>>,
-    phones_id: usize,
-    stats: Arc<JanusSharedStats>,
-) {
-    let socket = match tokio::net::UdpSocket::bind(cfg.rtp_bind).await {
+/// Keep the session alive until Janus reports it gone. A keepalive that returns a Janus error body
+/// (e.g. "No such session", HTTP 200) is how a Janus-side teardown is detected within one period.
+/// Runs as its own task, so a slow POST never holds up the receive side.
+async fn keepalive_until_error(client: reqwest::Client, session_url: String) -> anyhow::Error {
+    let mut every = tokio::time::interval(KEEPALIVE_EVERY);
+    every.tick().await; // the first tick fires immediately
+    loop {
+        every.tick().await;
+        let resp = match client
+            .post(&session_url)
+            .json(&build_keepalive("keepalive"))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return anyhow!("keepalive POST: {e}"),
+        };
+        match resp.json::<Value>().await {
+            Ok(v) => {
+                if let Some(e) = parse_error(&v) {
+                    return anyhow!("keepalive error {}: {}", e.code, e.reason);
+                }
+            }
+            Err(e) => return anyhow!("keepalive decode: {e}"),
+        }
+    }
+}
+
+/// POST `configure` (unmuted). A transport error OR a Janus error in the response body (Janus can
+/// answer HTTP 200 with `{"janus":"error",…}`) is an error, so the caller re-establishes WITH the
+/// bounded backoff.
+async fn configure_unmuted(client: &reqwest::Client, handle_url: &str) -> Result<()> {
+    let resp = client
+        .post(handle_url)
+        .json(&build_configure("configure", false))
+        .send()
+        .await
+        .context("configure POST")?;
+    let v: Value = resp.json().await.context("configure decode")?;
+    match parse_error(&v) {
+        Some(e) => Err(anyhow!("configure error {}: {}", e.code, e.reason)),
+        None => Ok(()),
+    }
+}
+
+/// Everything the adapter task needs besides its config (grouped to keep the spawn short).
+pub struct JanusAdapterIo {
+    /// The ring the block loop feeds with the phones' N-1 mix (48 kHz mono).
+    pub ring: Arc<Mutex<PacedRing>>,
+    /// The jitter buffers; the room mix is pushed into `phones_id`'s.
+    pub jitter: Arc<Mutex<Vec<JitterBuffer>>>,
+    pub phones_id: usize,
+    pub stats: Arc<JanusSharedStats>,
+}
+
+/// The re-establishing adapter task. It binds the RTP socket, starts the paced sender thread
+/// ([`crate::janus_sender`]) on a clone of it, then keeps a Janus session alive: it points the
+/// sender at each new session, decodes the received room mix into the phones jitter buffer, and
+/// re-joins (with a bounded backoff) on any error.
+pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: JanusAdapterIo) {
+    let JanusAdapterIo {
+        ring,
+        jitter,
+        phones_id,
+        stats,
+    } = io;
+    let (socket, send_socket) = match bind_rtp_sockets(cfg.rtp_bind) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(bind = %cfg.rtp_bind, error = %e, "janus: cannot bind the RTP socket — adapter disabled");
@@ -494,33 +678,44 @@ pub async fn run_janus_participant(
             return;
         }
     };
+    let mut decoder = match RxDecoder::new(cfg.codec) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(codec = cfg.codec.as_str(), error = %e, "janus: cannot create the decoder — adapter disabled");
+            return;
+        }
+    };
+    let shared = Arc::new(PacedSenderShared::default());
+    if let Err(e) = spawn_paced_sender(
+        PacedSenderConfig {
+            socket: send_socket,
+            codec: cfg.codec,
+            ssrc,
+        },
+        ring,
+        shared.clone(),
+        stats.clone(),
+    ) {
+        tracing::error!(error = %e, "janus: cannot start the paced sender thread — adapter disabled");
+        return;
+    }
 
+    let spec = JoinSpec {
+        room: cfg.room,
+        display: &cfg.display,
+        local_ip: &local_ip,
+        local_port,
+        codec: cfg.codec,
+        secret: cfg.secret.as_deref(),
+        pin: None,
+    };
     let mut backoff = BACKOFF_MIN;
-    let mut packetizer = RtpPacketizer::new(ssrc);
-    let mut pending_48k: Vec<i16> = Vec::with_capacity(MIX_SAMPLES_PER_PACKET_48K * 2);
-    // The anti-alias FIR's state carries across the 20 ms chunks (issue 1345, 24.9.2026): one
-    // long-lived decimator per run, reset only when a session is re-established.
-    let mut decimator = mulaw::Decimator48kTo8k::new();
+    let mut session_number: u64 = 0;
     let mut recv_buf = vec![0u8; 4096];
 
     loop {
-        let session = match establish_session(
-            &client,
-            &cfg.api_url,
-            cfg.room,
-            &cfg.display,
-            &local_ip,
-            local_port,
-            cfg.secret.as_deref(),
-        )
-        .await
-        {
-            Ok(s) => {
-                tracing::info!(room = cfg.room, session = s.session_id, janus_rtp = %s.janus_rtp_addr, "janus: joined the audiobridge room");
-                stats.mark_joined();
-                backoff = BACKOFF_MIN;
-                s
-            }
+        let session = match establish_session(&client, &cfg.api_url, &spec).await {
+            Ok(s) => s,
             Err(e) => {
                 stats.mark_left();
                 stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
@@ -530,34 +725,16 @@ pub async fn run_janus_participant(
                 continue;
             }
         };
-
-        // configure (unmuted). A transport error OR a Janus error in the response body (Janus can
-        // answer HTTP 200 with `{"janus":"error",…}`) re-establishes WITH the bounded backoff — a
-        // bare `continue` here would bypass the backoff (F2) and, if configure alone keeps failing
-        // while create/attach/join succeed, spin create→attach→join at RTT and orphan a session
-        // each pass.
         let session_url = format!(
             "{}/{}",
             cfg.api_url.trim_end_matches('/'),
             session.session_id
         );
         let handle_url = format!("{session_url}/{}", session.handle_id);
-        let configure_err: Option<String> = match client
-            .post(&handle_url)
-            .json(&build_configure("configure", false))
-            .send()
-            .await
-        {
-            Ok(resp) => match resp.json::<Value>().await {
-                Ok(v) => {
-                    parse_error(&v).map(|e| format!("configure error {}: {}", e.code, e.reason))
-                }
-                Err(e) => Some(format!("configure decode: {e}")),
-            },
-            Err(e) => Some(format!("configure POST: {e}")),
-        };
-        if let Some(msg) = configure_err {
-            tracing::warn!(error = %msg, backoff_s = backoff.as_secs(), "janus: configure failed — backing off");
+        // A bare `continue` on a failed configure would bypass the backoff and, if configure alone
+        // keeps failing while create/attach/join succeed, spin at RTT and orphan a session each pass.
+        if let Err(e) = configure_unmuted(&client, &handle_url).await {
+            tracing::warn!(error = %e, backoff_s = backoff.as_secs(), "janus: configure failed — backing off");
             stats.mark_left();
             stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(backoff).await;
@@ -565,90 +742,101 @@ pub async fn run_janus_participant(
             continue;
         }
 
-        packetizer.mark_silence();
-        pending_48k.clear();
-        decimator.reset();
-        let mut keepalive = tokio::time::interval(KEEPALIVE_EVERY);
-        keepalive.tick().await; // consume the immediate first tick
+        tracing::info!(room = cfg.room, session = session.session_id, janus_rtp = %session.janus_rtp_addr, codec = cfg.codec.as_str(), payload_type = session.payload_type, "janus: joined the audiobridge room");
+        stats.mark_joined();
+        backoff = BACKOFF_MIN;
+        session_number += 1;
+        if let Err(e) = decoder.reset() {
+            tracing::warn!(error = %e, "janus: decoder reset failed");
+        }
+        shared.set_target(Some(TxTarget {
+            addr: session.janus_rtp_addr,
+            session: session_number,
+        }));
+        let mut keepalive =
+            tokio::spawn(keepalive_until_error(client.clone(), session_url.clone()));
+        let mut send_check = tokio::time::interval(SEND_FAILED_CHECK_EVERY);
 
-        // Inner I/O loop until any error forces a re-establish. Labeled so a send failure inside the
-        // inner drain `while` can break the whole I/O loop (a `while` cannot break with a value).
-        let session_ok = 'io: loop {
+        // Inner I/O loop until any error forces a re-establish.
+        loop {
             tokio::select! {
-                // The phones' mixed output — accumulate + send as 20 ms PCMU.
-                mixed = mix_rx.recv() => {
-                    let Some(block) = mixed else { break 'io true; }; // channel closed = shutdown
-                    pending_48k.extend(mulaw::stereo_to_mono(&block));
-                    while pending_48k.len() >= MIX_SAMPLES_PER_PACKET_48K {
-                        let chunk: Vec<i16> = pending_48k.drain(0..MIX_SAMPLES_PER_PACKET_48K).collect();
-                        let pcm8k = decimator.process(&chunk);
-                        let ulaw = mulaw::ulaw_encode_block(&pcm8k);
-                        let pkt = packetizer.packetize(&ulaw);
-                        match socket.send_to(&pkt, session.janus_rtp_addr).await {
-                            Ok(_) => { stats.tx_packets.fetch_add(1, Ordering::Relaxed); }
-                            Err(e) => { tracing::warn!(error = %e, "janus: RTP send failed — re-establishing"); break 'io false; }
-                        }
-                    }
-                }
-                // The room mix minus ourselves — decode + push to the phones jitter buffer.
+                // The room mix minus ourselves: decode + push to the phones jitter buffer.
                 recvd = socket.recv_from(&mut recv_buf) => {
                     match recvd {
                         Ok((len, _from)) => {
                             if let Some(rtp) = rtp_depacketize(&recv_buf[..len]) {
-                                if rtp.payload_type == PCMU_PAYLOAD_TYPE && !rtp.payload.is_empty() {
-                                    let mono8k = mulaw::ulaw_decode_block(&rtp.payload);
-                                    let mono48k = mulaw::upsample_8k_to_48k(&mono8k);
-                                    let frames = mono48k.len();
-                                    let audio = DecodedAudio {
-                                        stream_name: "janus-phones".to_string(),
-                                        channels: vec![mono48k.clone(), mono48k],
-                                        frames,
-                                    };
-                                    if let Ok(mut jb) = jitter.lock() {
-                                        if let Some(b) = jb.get_mut(phones_id) {
-                                            b.push(&audio);
-                                        }
-                                    }
-                                    stats.rx_packets.fetch_add(1, Ordering::Relaxed);
+                                if rtp.payload_type == session.payload_type && !rtp.payload.is_empty() {
+                                    push_room_mix(&mut decoder, &rtp, &jitter, phones_id, &stats);
                                 }
                             }
                         }
-                        Err(e) => { tracing::warn!(error = %e, "janus: RTP recv failed — re-establishing"); break 'io false; }
+                        Err(e) => { tracing::warn!(error = %e, "janus: RTP recv failed — re-establishing"); break; }
                     }
                 }
-                _ = keepalive.tick() => {
-                    // A keepalive that returns a Janus error body (e.g. "No such session", HTTP 200)
-                    // is how a Janus-side session teardown is detected within one keepalive period —
-                    // otherwise the hub would keep sending PCMU into a dead session (F3).
-                    match client.post(&session_url).json(&build_keepalive("keepalive")).send().await {
-                        Ok(resp) => match resp.json::<Value>().await {
-                            Ok(v) => {
-                                if let Some(e) = parse_error(&v) {
-                                    tracing::warn!(code = e.code, reason = %e.reason, "janus: keepalive returned an error — re-establishing");
-                                    break 'io false;
-                                }
-                            }
-                            Err(e) => { tracing::warn!(error = %e, "janus: keepalive decode failed — re-establishing"); break 'io false; }
-                        },
-                        Err(e) => { tracing::warn!(error = %e, "janus: keepalive failed — re-establishing"); break 'io false; }
+                ended = &mut keepalive => {
+                    match ended {
+                        Ok(e) => tracing::warn!(error = %e, "janus: keepalive failed — re-establishing"),
+                        Err(e) => tracing::warn!(error = %e, "janus: keepalive task ended — re-establishing"),
+                    }
+                    break;
+                }
+                _ = send_check.tick() => {
+                    if shared.take_send_failed() {
+                        break;
                     }
                 }
             }
-        };
-
-        stats.mark_left();
-        if session_ok {
-            // Clean shutdown (the mix channel closed).
-            let _ = client
-                .post(&handle_url)
-                .json(&build_leave("leave"))
-                .send()
-                .await;
-            tracing::info!("janus: mix channel closed — leaving the room");
-            return;
         }
+
+        keepalive.abort();
+        shared.set_target(None);
+        stats.mark_left();
         stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
+}
+
+/// Bind the RTP socket and clone it: the async receiver gets a non-blocking tokio socket, the paced
+/// sender thread gets the clone, so Janus sees ONE address for both directions.
+fn bind_rtp_sockets(bind: SocketAddr) -> std::io::Result<(tokio::net::UdpSocket, UdpSocket)> {
+    let std_socket = UdpSocket::bind(bind)?;
+    let send_socket = std_socket.try_clone()?;
+    std_socket.set_nonblocking(true)?;
+    Ok((tokio::net::UdpSocket::from_std(std_socket)?, send_socket))
+}
+
+/// Decode one received packet and push the audio (mono → both phones input channels).
+fn push_room_mix(
+    decoder: &mut RxDecoder,
+    rtp: &RtpParsed,
+    jitter: &Mutex<Vec<JitterBuffer>>,
+    phones_id: usize,
+    stats: &JanusSharedStats,
+) {
+    let decoded = match decoder.decode(rtp.seq, &rtp.payload) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!(seq = rtp.seq, error = %e, "janus: undecodable packet dropped");
+            return;
+        }
+    };
+    if decoded.samples.is_empty() {
+        return; // a duplicate or late packet
+    }
+    let frames = decoded.samples.len();
+    let audio = DecodedAudio {
+        stream_name: "janus-phones".to_string(),
+        channels: vec![decoded.samples.clone(), decoded.samples],
+        frames,
+    };
+    if let Ok(mut jb) = jitter.lock() {
+        if let Some(b) = jb.get_mut(phones_id) {
+            b.push(&audio);
+        }
+    }
+    stats.rx_packets.fetch_add(1, Ordering::Relaxed);
+    stats
+        .rx_lost_frames
+        .fetch_add(u64::from(decoded.concealed_frames), Ordering::Relaxed);
 }

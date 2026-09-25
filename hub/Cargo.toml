@@ -51,5 +51,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # wrapper for the axum `Body::from_stream` multipart response; libloading = the RUNTIME dynamic load
 # of libndi (feature `ndi` only).
 jpeg-encoder = "0.7"
+# The phones leg's Opus codec (issue 1345, 25.9.2026: 48 kHz mono, 20 ms, in-band FEC). `opus` 0.4
+# links libopus through `opusic-sys`, whose DEFAULT `bundled` feature builds the vendored libopus
+# source with cmake and links it statically — no libopus-dev at build time, no libopus.so on
+# strih-lx at run time (the CI `intercom-hub` job checks cmake is present).
+opus = "0.4"
 tokio-stream = "0.1"
 libloading = { version = "0.8", optional = true }

@@ -19,11 +19,13 @@ use std::sync::mpsc::SyncSender;
 
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
+use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig, LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES,
 };
 use intercom_hub::matrix::Matrix;
+use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
     resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
@@ -139,11 +141,13 @@ async fn main() -> Result<()> {
 
     // --- Janus audiobridge edge (issue 1345 M3a): the phones participant's plain-RTP leg ---------
     // When the matrix declares a `janus` participant AND a `[janus]` table, spawn the adapter task:
-    // it establishes the HTTP session, sends the phones' N-1 mix as PCMU (fed by the block loop over
-    // an mpsc), and pushes the received room mix into the phones jitter buffer the engine already
-    // pops. A dropped mix block on backpressure is tolerable talkback jitter. Never started from a
-    // dev lane (the live Janus is the M4/supervisor step); absent config = the VBAN-only hub.
-    let mut janus_mix_tx: Option<tokio::sync::mpsc::Sender<Vec<i16>>> = None;
+    // it establishes the HTTP session and pushes the received room mix into the phones jitter
+    // buffer the engine already pops. The SEND side is paced (issue 1345, 25.9.2026: the phone voice
+    // sounded robotic): the block loop only pushes the phones' N-1 mix into a ring, and a sender
+    // thread on its own 20 ms clock pops exactly one frame per tick — never on the 5.33 ms block
+    // beat. Never started from a dev lane (the live Janus is the M4/supervisor step); absent config
+    // = the VBAN-only hub.
+    let mut janus_ring: Option<Arc<Mutex<PacedRing>>> = None;
     let janus_report: Option<(usize, Arc<intercom_hub::janus_rtp::JanusSharedStats>)> = match (
         matrix.janus_participant(),
         matrix.janus.clone(),
@@ -177,21 +181,28 @@ async fn main() -> Result<()> {
                 secret,
                 rtp_bind,
                 display: "strih-lx-hub".to_string(),
+                codec: jcfg.codec,
             };
-            let stats = Arc::new(intercom_hub::janus_rtp::JanusSharedStats::default());
-            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
-            janus_mix_tx = Some(tx);
+            let stats = Arc::new(intercom_hub::janus_rtp::JanusSharedStats::new(jcfg.codec));
+            let ring = Arc::new(Mutex::new(PacedRing::new(
+                RING_TARGET_FRAMES,
+                RING_CAP_FRAMES,
+            )));
+            janus_ring = Some(ring.clone());
             tokio::spawn(intercom_hub::janus_rtp::run_janus_participant(
                 rt,
                 JANUS_SSRC,
-                rx,
-                jitter.clone(),
-                pid,
-                stats.clone(),
+                intercom_hub::janus_rtp::JanusAdapterIo {
+                    ring,
+                    jitter: jitter.clone(),
+                    phones_id: pid,
+                    stats: stats.clone(),
+                },
             ));
             tracing::info!(
                 room = jcfg.room,
                 participant = pid,
+                codec = jcfg.codec.as_str(),
                 "janus: audiobridge adapter enabled for the phones participant"
             );
             Some((pid, stats))
@@ -284,7 +295,7 @@ async fn main() -> Result<()> {
         let matrix = matrix.clone();
         let out_addrs = out_addrs.clone();
         let video_for_loop = video_state.clone();
-        // `janus_mix_tx` + `janus_report` are captured by the `async move` below (the block loop is
+        // `janus_ring` + `janus_report` are captured by the `async move` below (the block loop is
         // their sole feeder + facet reader); nothing uses them after this spawn.
         let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
         // Status push cadence: ~1 s worth of blocks.
@@ -322,13 +333,16 @@ async fn main() -> Result<()> {
 
                 let output = engine.mix_block(&input, block_frames);
 
-                // Feed the phones participant's mixed output into the Janus adapter (M3a). Best-effort
-                // try_send: a dropped 20 ms block on backpressure is tolerable talkback jitter, never
-                // a reason to block the mix loop.
-                if let (Some(tx), Some((pid, _))) = (&janus_mix_tx, &janus_report) {
+                // Feed the phones participant's mixed output (down-mixed to mono) into the Janus
+                // ring. The paced sender thread pops it on its own 20 ms clock (issue 1345); the
+                // lock is held only for the append, never across a send.
+                if let (Some(ring), Some((pid, _))) = (&janus_ring, &janus_report) {
                     let interleaved = output.interleaved(*pid, block_frames);
                     if !interleaved.is_empty() {
-                        let _ = tx.try_send(interleaved);
+                        let mono = stereo_to_mono(&interleaved);
+                        if let Ok(mut r) = ring.lock() {
+                            r.push(&mono);
+                        }
                     }
                 }
 
