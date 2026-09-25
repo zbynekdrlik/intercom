@@ -521,7 +521,9 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
     place: `pushMicToSession()` puts the track on the audio transceiver's sender itself
     (`sender.replaceTrack` + direction `sendrecv`) and calls `createOffer({tracks: []})` +
     `configure` with the jsep. A device change is a plain sender swap (no renegotiation). A mic
-    change while an offer is out waits for that answer (`negotiating` / `micPushPending`). OFF =
+    change while an offer is out waits for that answer (`negotiating` / `micPushPending`); an offer
+    Janus rejects (an error event while negotiating) or leaves unanswered for 10 s
+    (`ANSWER_TIMEOUT_MS`) rebuilds the session, which then offers WITH the mic. OFF =
     `configure {muted:true}` + `track.enabled=false`; ON again only unmutes. The granted track is
     kept (`dontStop`) so a reconnect offers WITH it (janus.js's add path, no second prompt) and
     keeps the mic state. A denied mic shows `setMicUi("denied")` and the page keeps listening.
@@ -654,8 +656,9 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `HTMLMediaElement.prototype.play` rejects `NotAllowedError` until the first TRUSTED
   click/touchend/keydown (its own flag, not `userActivation`), and it counts any `AudioContext`
   created before that tap (must be 0).
-- **Live check against the real Janus (manual):** `stub_hub.py` (without the fake-server init
-  script) + the page at `/?janus=wss://interkom-lx.newlevel.media/janus` joined the live room,
+- **Live check against the real Janus (manual):** open `stub_hub.py` directly in a browser (the
+  fake-server init script is only added by the spec) at
+  `/?janus=wss://interkom-lx.newlevel.media/janus`; it joined the live room,
   reached `Pripojené` (transceiver `recvonly`) with the room audio playing and an empty console;
   then a SILENT in-place renegotiation from `page.evaluate` (`await acquireMic("");
   micTrack.enabled = false; pushMicToSession(false)` — the top-level functions/`let`s of the

@@ -24,6 +24,7 @@ const RECONNECT_BASE_MS = 1000; // first retry delay; doubles per failed attempt
 const RECONNECT_MAX_MS = 15000; // … up to this cap.
 const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebuilt.
 const ICE_GRACE_MS = 5000; // a "disconnected" ICE state gets this long to recover by itself.
+const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebuilds the session.
 const METER_FLOOR_DB = -60; // the meters' left edge.
 const VOICE_DB = -45; // above this the meter counts as "voice present".
 const VOICE_HOLD_MS = 600; // keep "hovorí" this long after the level drops.
@@ -171,6 +172,7 @@ let mediaUp = false; // the PeerConnection is up (webrtcState true)
 let sentTrack = null; // the mic track the current PeerConnection carries (null = receive-only)
 let negotiating = false; // an offer is out and its answer has not been applied yet
 let micPushPending = false; // a mic change waits for that answer
+let answerTimer = null;
 let reconnectAttempt = 0;
 let reconnectTimer = null;
 let reconnectAt = 0;
@@ -188,6 +190,7 @@ function startSession() {
   sentTrack = null;
   negotiating = false;
   micPushPending = false;
+  clearTimeout(answerTimer);
   if (reconnectAttempt > 0) setConn("reconnecting", "skúšam…");
   else setConn("connecting");
   clearTimeout(watchdogTimer);
@@ -238,6 +241,7 @@ function teardownSession() {
   sentTrack = null;
   negotiating = false;
   micPushPending = false;
+  clearTimeout(answerTimer);
   if (old) {
     try {
       old.destroy({ cleanupHandles: true, notifyDestroyed: false });
@@ -334,8 +338,11 @@ function onBridgeMessage(my, msg, jsep) {
     // Our own join reply (later "joined" events announce OTHER participants).
     joined = true;
     negotiate(my);
-  } else if (event === "event" && msg.error && !joined) {
-    scheduleReconnect(); // e.g. the room does not exist yet — keep retrying, visibly.
+  } else if (event === "event" && msg.error && (!joined || negotiating)) {
+    // A failed join (e.g. the room does not exist yet) or a rejected offer: rebuild, visibly. A
+    // rejected mic renegotiation must never leave "Počujú ťa" on screen with nobody hearing us —
+    // the rebuilt session offers WITH the mic from the start.
+    scheduleReconnect();
   }
   if (jsep && bridge) {
     bridge.handleRemoteJsep({
@@ -343,6 +350,7 @@ function onBridgeMessage(my, msg, jsep) {
       success: () => {
         if (my !== gen) return;
         negotiating = false;
+        clearTimeout(answerTimer);
         if (micPushPending) {
           micPushPending = false;
           pushMicToSession(micOn);
@@ -357,8 +365,17 @@ function onBridgeMessage(my, msg, jsep) {
 
 // The session's first offer: receive-only unless the mic was already granted (a reconnect with
 // the mic ON keeps sending it — no second permission prompt).
-function negotiate(my) {
+// An offer is out: mark it, and give Janus ANSWER_TIMEOUT_MS to answer before rebuilding.
+function beginNegotiation(my) {
   negotiating = true;
+  clearTimeout(answerTimer);
+  answerTimer = setTimeout(() => {
+    if (my === gen && negotiating) scheduleReconnect();
+  }, ANSWER_TIMEOUT_MS);
+}
+
+function negotiate(my) {
+  beginNegotiation(my);
   const mic = micTrack;
   const spec = mic
     ? { tracks: [{ type: "audio", capture: mic, recv: true, dontStop: true }] }
@@ -622,7 +639,7 @@ function pushMicToSession(unmute) {
   const my = gen;
   const track = micTrack;
   if (!sentTrack) {
-    negotiating = true;
+    beginNegotiation(my);
     tr.sender.replaceTrack(track).then(
       () => {
         if (my !== gen) return;
