@@ -108,6 +108,7 @@ function setConn(state, detail) {
   connEl.dataset.state = state;
   connText.textContent = CONN_TEXT[state];
   connDetail.textContent = detail || "";
+  renderMicHint();
 }
 
 // ---- Janus session (auto-join, reconnect with backoff) -----------------------------------
@@ -130,8 +131,35 @@ function detectBrowser() {
   }
   return { browser, version };
 }
+// Every Janus WebSocket goes through this wrapper so a torn-down session's socket can be closed
+// even when janus.js never got its session id (its destroy() then returns without touching the
+// socket, and a late connect would create a session nobody uses). Janus drops the sessions of a
+// closed transport.
+const NativeWebSocket = window.WebSocket;
+const liveSockets = new Set();
+function TrackedWebSocket(url, protocols) {
+  const ws = new NativeWebSocket(url, protocols);
+  liveSockets.add(ws);
+  ws.addEventListener("close", () => liveSockets.delete(ws));
+  ws.addEventListener("open", () => {
+    // Abandoned while still connecting: close it once open (after janus.js's own "create" went
+    // out — closing a CONNECTING socket makes the browser log an error).
+    if (ws.abandoned) setTimeout(() => ws.close(), 0);
+  });
+  return ws;
+}
+function abandonSockets() {
+  for (const ws of liveSockets) {
+    ws.abandoned = true;
+    if (ws.readyState === 1) ws.close();
+  }
+  liveSockets.clear();
+}
 function janusDeps() {
-  return Janus.useDefaultDependencies({ adapter: { browserDetails: detectBrowser() } });
+  return Janus.useDefaultDependencies({
+    adapter: { browserDetails: detectBrowser() },
+    WebSocket: TrackedWebSocket,
+  });
 }
 
 let janusReady = false; // Janus.init has run
@@ -141,6 +169,8 @@ let bridge = null; // the audiobridge plugin handle
 let joined = false;
 let mediaUp = false; // the PeerConnection is up (webrtcState true)
 let sentTrack = null; // the mic track the current PeerConnection carries (null = receive-only)
+let negotiating = false; // an offer is out and its answer has not been applied yet
+let micPushPending = false; // a mic change waits for that answer
 let reconnectAttempt = 0;
 let reconnectTimer = null;
 let reconnectAt = 0;
@@ -156,6 +186,8 @@ function startSession() {
   joined = false;
   mediaUp = false;
   sentTrack = null;
+  negotiating = false;
+  micPushPending = false;
   if (reconnectAttempt > 0) setConn("reconnecting", "skúšam…");
   else setConn("connecting");
   clearTimeout(watchdogTimer);
@@ -204,6 +236,8 @@ function teardownSession() {
   joined = false;
   mediaUp = false;
   sentTrack = null;
+  negotiating = false;
+  micPushPending = false;
   if (old) {
     try {
       old.destroy({ cleanupHandles: true, notifyDestroyed: false });
@@ -211,6 +245,8 @@ function teardownSession() {
       // a destroy on a dead socket may throw — the session is gone either way.
     }
   }
+  abandonSockets();
+  setMeterTrack(meterIn, null); // the old room track is dead: "čakám…", never a stale "ticho"
 }
 
 function scheduleReconnect() {
@@ -304,6 +340,14 @@ function onBridgeMessage(my, msg, jsep) {
   if (jsep && bridge) {
     bridge.handleRemoteJsep({
       jsep,
+      success: () => {
+        if (my !== gen) return;
+        negotiating = false;
+        if (micPushPending) {
+          micPushPending = false;
+          pushMicToSession(micOn);
+        }
+      },
       error: () => {
         if (my === gen) scheduleReconnect();
       },
@@ -314,6 +358,7 @@ function onBridgeMessage(my, msg, jsep) {
 // The session's first offer: receive-only unless the mic was already granted (a reconnect with
 // the mic ON keeps sending it — no second permission prompt).
 function negotiate(my) {
+  negotiating = true;
   const mic = micTrack;
   const spec = mic
     ? { tracks: [{ type: "audio", capture: mic, recv: true, dontStop: true }] }
@@ -469,8 +514,12 @@ function unlockAudio() {
   if (remoteAudio.srcObject && remoteAudio.paused) playRemote();
   else if (remoteAudio.srcObject) onAudioUnlocked();
 }
+function onUserGesture(e) {
+  if (e.type === "keydown" && e.key === "Escape") return; // Escape does not activate the page
+  unlockAudio();
+}
 for (const type of ["click", "touchend", "keydown"]) {
-  document.addEventListener(type, unlockAudio, { capture: true, passive: true });
+  document.addEventListener(type, onUserGesture, { capture: true, passive: true });
 }
 tapLayer.addEventListener("click", () => {
   tapLayer.hidden = true;
@@ -486,13 +535,20 @@ const MIC_UI = {
   on: ["MIKROFÓN ZAPNUTÝ", "Počujú ťa — ťukni pre vypnutie"],
   denied: ["Mikrofón nie je povolený", "Povoľ ho v nastaveniach prehliadača a ťukni znova"],
 };
+const MIC_ON_OFFLINE_HINT = "Zapnutý — čakám na spojenie";
 function setMicUi(state) {
   micToggle.dataset.state = state;
   micToggle.dataset.muted = state === "on" ? "false" : "true";
   micToggle.setAttribute("aria-pressed", state === "on" ? "true" : "false");
   micLabel.textContent = MIC_UI[state][0];
-  micHint.textContent = MIC_UI[state][1];
   meterMicEl.hidden = state !== "on";
+  renderMicHint();
+}
+// "Počujú ťa" only while the session is really up; ON but offline says so.
+function renderMicHint() {
+  const state = micToggle.dataset.state || "off";
+  if (state === "on" && connEl.dataset.state !== "connected") micHint.textContent = MIC_ON_OFFLINE_HINT;
+  else micHint.textContent = MIC_UI[state][1];
 }
 
 function micConstraints(deviceId) {
@@ -539,36 +595,66 @@ function sendMute(muted) {
   if (bridge && joined) bridge.send({ message: { request: "configure", muted } });
 }
 
-// Put the current mic into the live session: re-negotiate from receive-only on the first ON, swap
-// the track in place when the device changed, else nothing (the next configure just unmutes).
+// The audio transceiver of the live PeerConnection (the receive-only offer created it).
+function audioTransceiver() {
+  const pc = bridge && bridge.webrtcStuff && bridge.webrtcStuff.pc;
+  if (!pc) return null;
+  return pc.getTransceivers().find((t) => t.receiver && t.receiver.track && t.receiver.track.kind === "audio") || null;
+}
+
+// Put the current mic into the live session WITHOUT rebuilding it. The track goes straight onto
+// the audio transceiver's sender: janus.js 1.1.2's own replace path (createOffer replace:true /
+// replaceTracks) dereferences its null local stream after a receive-only offer and throws. On the
+// FIRST ON the transceiver turns recvonly -> sendrecv and janus.js only creates the renegotiation
+// offer (tracks: [] = "nothing to capture"); a later device change is a plain sender swap with no
+// renegotiation. While an offer is out, the change waits for its answer.
 function pushMicToSession(unmute) {
   if (!bridge || !joined || !micTrack) return;
-  const my = gen;
-  if (!sentTrack) {
-    bridge.createOffer({
-      tracks: [{ type: "audio", capture: micTrack, recv: true, replace: true, dontStop: true }],
-      success: (offer) => {
-        if (my !== gen) return;
-        sentTrack = micTrack;
-        bridge.send({ message: { request: "configure", muted: !micOn }, jsep: offer });
-      },
-      error: () => {
-        // The rebuilt session offers WITH the mic from the start.
-        if (my === gen) scheduleReconnect();
-      },
-    });
+  if (negotiating) {
+    micPushPending = true;
     return;
   }
-  if (sentTrack !== micTrack) {
-    bridge.replaceTracks({
-      tracks: [{ type: "audio", capture: micTrack, recv: true, dontStop: true }],
-      success: () => {
-        if (my === gen) sentTrack = micTrack;
+  const tr = audioTransceiver();
+  if (!tr) {
+    scheduleReconnect(); // no PeerConnection to put the mic on — the rebuilt session offers WITH it
+    return;
+  }
+  const my = gen;
+  const track = micTrack;
+  if (!sentTrack) {
+    negotiating = true;
+    tr.sender.replaceTrack(track).then(
+      () => {
+        if (my !== gen) return;
+        if (tr.setDirection) tr.setDirection("sendrecv");
+        else tr.direction = "sendrecv";
+        bridge.createOffer({
+          tracks: [],
+          success: (offer) => {
+            if (my !== gen) return;
+            sentTrack = track;
+            bridge.send({ message: { request: "configure", muted: !micOn }, jsep: offer });
+          },
+          error: () => {
+            if (my === gen) scheduleReconnect();
+          },
+        });
       },
-      error: () => {
+      () => {
         if (my === gen) scheduleReconnect();
+      }
+    );
+    return;
+  }
+  if (sentTrack !== track) {
+    tr.sender.replaceTrack(track).then(
+      () => {
+        if (my === gen) sentTrack = track;
       },
-    });
+      () => {
+        if (my === gen) scheduleReconnect();
+      }
+    );
   }
   if (unmute) sendMute(false);
 }
