@@ -218,6 +218,32 @@ test("the mic toggle asks for permission once, sends my mic with a live meter, a
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
+test("a rejected mic renegotiation never leaves a false 'Počujú ťa': the session is rebuilt with the mic", async ({ page }) => {
+  const seen = watchConsole(page);
+  await presetName(page, "Kamera 7");
+  await page.goto("/");
+  await expectConnected(page);
+
+  // Janus rejects the first-ON renegotiation (an error event, no answer).
+  await page.evaluate(() => {
+    window.__fakeJanus.rejectNextConfigures = 1;
+  });
+  const mic = page.locator('[data-role="mic-toggle"]');
+  await mic.click();
+  await expect(mic).toHaveAttribute("data-muted", "false");
+
+  // The page must not sit on "Pripojené" + "Počujú ťa" with nobody hearing it: it rebuilds the
+  // session, which offers WITH the mic, and only then claims the mic is heard.
+  await expect.poll(async () => (await fake(page)).sessions, { timeout: 15000 }).toBe(2);
+  await expectConnected(page);
+  const f = await fake(page);
+  expect(f.offers[f.offers.length - 1].direction).toBe("sendrecv");
+  expect(f.configures[f.configures.length - 1].message.muted).toBe(false);
+  await expect(page.locator('[data-role="mic-hint"]')).toContainText("Počujú ťa");
+  expect(f.gumCalls, "no second permission prompt").toBe(1);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("a tap on the picture makes it fullscreen and a second tap returns", async ({ page }) => {
   const seen = watchConsole(page);
   await presetName(page, "Kamera 3");

@@ -10,13 +10,15 @@
 // Test controls + records live on window.__fakeJanus:
 //   joins / configures / offers (with the offer's audio direction) / sessions,
 //   failConnects (the next N sockets fail to open), dropConnection() (the server drops the live
-//   socket), inboundAudioBytes() (what the "server" received from the phone's mic).
+//   socket), rejectNextConfigures (the next N configure-with-offer get an error event and no
+//   answer), inboundAudioBytes() (what the "server" received from the phone's mic).
 // It never writes to the console.
 (function () {
   const NativeWebSocket = window.WebSocket;
   const state = {
     sessions: 0,
     failConnects: 0,
+    rejectNextConfigures: 0,
     joins: [],
     configures: [],
     offers: [],
@@ -168,6 +170,11 @@
           return;
         }
         state.offers.push({ direction: audioDirection(jsep.sdp) });
+        if (state.rejectNextConfigures > 0) {
+          state.rejectNextConfigures -= 1;
+          this.event(h, tx, { audiobridge: "event", room: 1000, error_code: 499, error: "rejected by the test" });
+          return;
+        }
         h.chain = h.chain
           .then(() => this.answer(h, jsep))
           .then((answer) => this.event(h, tx, { audiobridge: "event", room: 1000, result: "ok" }, answer))
