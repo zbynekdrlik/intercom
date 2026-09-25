@@ -64,6 +64,9 @@ pub struct PacedSenderConfig {
     pub socket: UdpSocket,
     pub codec: JanusCodec,
     pub ssrc: u32,
+    /// The encoder for `codec`, created by the caller so a failure disables the adapter up front
+    /// instead of silently killing this thread.
+    pub encoder: TxEncoder,
 }
 
 /// Start the paced sender thread. It runs for the life of the process.
@@ -88,14 +91,8 @@ fn paced_sender_loop(
         socket,
         codec,
         ssrc,
+        mut encoder,
     } = cfg;
-    let mut encoder = match TxEncoder::new(codec) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!(codec = codec.as_str(), error = %e, "janus: cannot create the encoder — nothing will be sent to the room");
-            return;
-        }
-    };
     let mut packetizer = RtpPacketizer::with_payload_type(ssrc, codec.payload_type());
     let rtp_step = codec.rtp_samples_per_frame();
     let origin = Instant::now();
@@ -164,6 +161,9 @@ fn paced_sender_loop(
                         }
                     }
                     Err(e) => {
+                        // RTP time still moves on: Janus sees one lost packet, not a stream that
+                        // falls 20 ms behind the wall clock.
+                        packetizer.skip(rtp_step);
                         if !warned_this_session {
                             warned_this_session = true;
                             tracing::warn!(error = %e, "janus: encode failed — frame dropped");

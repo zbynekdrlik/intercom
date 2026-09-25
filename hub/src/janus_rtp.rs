@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
-use crate::janus_codec::RxDecoder;
+use crate::janus_codec::{RxDecoder, TxEncoder};
 use crate::janus_pacing::{IntervalStats, PacedRing};
 use crate::janus_sender::{spawn_paced_sender, PacedSenderConfig, PacedSenderShared, TxTarget};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
@@ -144,6 +144,21 @@ impl RtpPacketizer {
         self.timestamp = self.timestamp.wrapping_add(samples);
         pkt
     }
+
+    /// Account for a frame that is not sent (it could not be encoded): the sequence number and the
+    /// timestamp move on, so the receiver sees one lost packet and RTP time keeps pace with the
+    /// wall clock. The marker bit is not re-armed — this is not a new talkspurt.
+    pub fn skip(&mut self, samples: u32) {
+        self.seq = self.seq.wrapping_add(1);
+        self.timestamp = self.timestamp.wrapping_add(samples);
+    }
+}
+
+/// Whether a datagram from `from` belongs to the current session's Janus endpoint `peer`. An old
+/// session's leftovers (another port) and any other host are ignored, so they cannot feed or lock
+/// out the room mix. When Janus advertised an unspecified address only the port is compared.
+pub fn is_session_peer(from: SocketAddr, peer: SocketAddr) -> bool {
+    from.port() == peer.port() && (peer.ip().is_unspecified() || from.ip() == peer.ip())
 }
 
 /// A parsed RTP packet.
@@ -257,6 +272,12 @@ pub fn build_configure(transaction: &str, muted: bool) -> Value {
 /// A session-level `keepalive` (POSTed to the session URL, < 60 s apart or Janus drops the session).
 pub fn build_keepalive(transaction: &str) -> Value {
     json!({ "janus": "keepalive", "transaction": transaction })
+}
+
+/// `destroy` the session (POSTed to the session URL): Janus detaches its handles, so the old
+/// participant leaves the room and stops sending its mix to our port.
+pub fn build_destroy(transaction: &str) -> Value {
+    json!({ "janus": "destroy", "transaction": transaction })
 }
 
 /// `leave` the room (POSTed to the handle URL).
@@ -405,9 +426,10 @@ pub struct JanusStats {
     pub tx_packets: u64,
     /// The phones leg's codec: `opus` or `pcmu`.
     pub codec: &'static str,
-    /// The standard deviation of the last 5 s of send intervals (paced: well under 0.5 ms).
+    /// The standard deviation of the last 5 s of send intervals (paced: well under 0.5 ms). It
+    /// reads 0 while no session is joined (nothing is sent), so read it together with `joined`.
     pub tx_interval_ms_sd: f64,
-    /// The longest send interval in the last 5 s (paced: just over 20 ms).
+    /// The longest send interval in the last 5 s (paced: just over 20 ms; 0 while not joined).
     pub tx_interval_ms_max: f64,
     /// Ticks bridged with a silent frame because the ring ran dry mid-stream.
     pub tx_underflows: u64,
@@ -635,6 +657,24 @@ async fn configure_unmuted(client: &reqwest::Client, handle_url: &str) -> Result
     }
 }
 
+/// How long the best-effort `destroy` of an abandoned session may take.
+const DESTROY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Best-effort `destroy` of a session the hub is abandoning, so its participant leaves the room
+/// and stops sending the old room mix to our port. A failure is only logged (Janus drops an
+/// abandoned session on its own after 60 s without a keepalive).
+async fn destroy_session(client: &reqwest::Client, session_url: &str) {
+    let sent = client
+        .post(session_url)
+        .timeout(DESTROY_TIMEOUT)
+        .json(&build_destroy("destroy"))
+        .send()
+        .await;
+    if let Err(e) = sent {
+        tracing::debug!(error = %e, "janus: destroy of the old session failed (Janus times it out)");
+    }
+}
+
 /// Everything the adapter task needs besides its config (grouped to keep the spawn short).
 pub struct JanusAdapterIo {
     /// The ring the block loop feeds with the phones' N-1 mix (48 kHz mono).
@@ -685,12 +725,20 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
             return;
         }
     };
+    let encoder = match TxEncoder::new(cfg.codec) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(codec = cfg.codec.as_str(), error = %e, "janus: cannot create the encoder — adapter disabled");
+            return;
+        }
+    };
     let shared = Arc::new(PacedSenderShared::default());
     if let Err(e) = spawn_paced_sender(
         PacedSenderConfig {
             socket: send_socket,
             codec: cfg.codec,
             ssrc,
+            encoder,
         },
         ring,
         shared.clone(),
@@ -735,6 +783,7 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         // keeps failing while create/attach/join succeed, spin at RTT and orphan a session each pass.
         if let Err(e) = configure_unmuted(&client, &handle_url).await {
             tracing::warn!(error = %e, backoff_s = backoff.as_secs(), "janus: configure failed — backing off");
+            destroy_session(&client, &session_url).await;
             stats.mark_left();
             stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(backoff).await;
@@ -763,13 +812,16 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
                 // The room mix minus ourselves: decode + push to the phones jitter buffer.
                 recvd = socket.recv_from(&mut recv_buf) => {
                     match recvd {
-                        Ok((len, _from)) => {
+                        // Only this session's Janus endpoint: an abandoned session's leftovers or a
+                        // stray datagram must not feed (or lock out) the room mix.
+                        Ok((len, from)) if is_session_peer(from, session.janus_rtp_addr) => {
                             if let Some(rtp) = rtp_depacketize(&recv_buf[..len]) {
                                 if rtp.payload_type == session.payload_type && !rtp.payload.is_empty() {
                                     push_room_mix(&mut decoder, &rtp, &jitter, phones_id, &stats);
                                 }
                             }
                         }
+                        Ok(_) => {}
                         Err(e) => { tracing::warn!(error = %e, "janus: RTP recv failed — re-establishing"); break; }
                     }
                 }
@@ -790,6 +842,7 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
 
         keepalive.abort();
         shared.set_target(None);
+        destroy_session(&client, &session_url).await;
         stats.mark_left();
         stats.rejoin_count.fetch_add(1, Ordering::Relaxed);
         tokio::time::sleep(backoff).await;
@@ -806,7 +859,8 @@ fn bind_rtp_sockets(bind: SocketAddr) -> std::io::Result<(tokio::net::UdpSocket,
     Ok((tokio::net::UdpSocket::from_std(std_socket)?, send_socket))
 }
 
-/// Decode one received packet and push the audio (mono → both phones input channels).
+/// Decode one received packet and push the audio. It is mono: the phones jitter buffer (built with
+/// `with_min_channels(2)`) fans it out to both input channels.
 fn push_room_mix(
     decoder: &mut RxDecoder,
     rtp: &RtpParsed,
@@ -814,6 +868,7 @@ fn push_room_mix(
     phones_id: usize,
     stats: &JanusSharedStats,
 ) {
+    decoder.observe_ssrc(rtp.ssrc);
     let decoded = match decoder.decode(rtp.seq, &rtp.payload) {
         Ok(d) => d,
         Err(e) => {
@@ -827,7 +882,7 @@ fn push_room_mix(
     let frames = decoded.samples.len();
     let audio = DecodedAudio {
         stream_name: "janus-phones".to_string(),
-        channels: vec![decoded.samples.clone(), decoded.samples],
+        channels: vec![decoded.samples],
         frames,
     };
     if let Ok(mut jb) = jitter.lock() {

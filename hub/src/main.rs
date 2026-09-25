@@ -19,7 +19,9 @@ use std::sync::mpsc::SyncSender;
 
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
-use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
+use intercom_hub::janus_pacing::{
+    hub_block_period, PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES,
+};
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig, LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES,
@@ -180,7 +182,9 @@ async fn main() -> Result<()> {
                 room: jcfg.room,
                 secret,
                 rtp_bind,
-                display: "strih-lx-hub".to_string(),
+                // The name the phones see in the room: this box's own hostname, so a second strih
+                // hub (Poprad) is not also called "strih-lx-hub".
+                display: janus_display_name(),
                 codec: jcfg.codec,
             };
             let stats = Arc::new(intercom_hub::janus_rtp::JanusSharedStats::new(jcfg.codec));
@@ -301,9 +305,9 @@ async fn main() -> Result<()> {
         // Status push cadence: ~1 s worth of blocks.
         let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
         tokio::spawn(async move {
-            let period = std::time::Duration::from_micros(
-                (block_frames as u64) * 1_000_000 / (sample_rate.max(1) as u64),
-            );
+            // Exact to the ns (issue 1345, 25.9.2026): the old whole-µs period (5333 instead of
+            // 5333.33) ran the loop 62.5 ppm fast, so every egress drifted against its consumer.
+            let period = hub_block_period(block_frames, sample_rate.max(1));
             let mut ticker = tokio::time::interval(period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tx_packets = vec![0u64; n];
@@ -340,9 +344,9 @@ async fn main() -> Result<()> {
                     let interleaved = output.interleaved(*pid, block_frames);
                     if !interleaved.is_empty() {
                         let mono = stereo_to_mono(&interleaved);
-                        if let Ok(mut r) = ring.lock() {
-                            r.push(&mono);
-                        }
+                        // A poisoned lock still holds a valid ring: keep feeding it, exactly as
+                        // the sender thread keeps popping it.
+                        ring.lock().unwrap_or_else(|e| e.into_inner()).push(&mono);
                     }
                 }
 
@@ -604,6 +608,15 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         reports,
         local_sinks,
     }
+}
+
+/// `<hostname>-hub` (e.g. `strih-lx-hub`), or `intercom-hub` when the hostname is unreadable.
+fn janus_display_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .map_or_else(|| "intercom-hub".to_string(), |h| format!("{h}-hub"))
 }
 
 async fn shutdown_signal() {

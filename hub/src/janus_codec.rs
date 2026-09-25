@@ -106,6 +106,7 @@ pub struct RxDecoded {
 pub struct RxDecoder {
     kind: RxKind,
     last_seq: Option<u16>,
+    last_ssrc: Option<u32>,
 }
 
 enum RxKind {
@@ -126,15 +127,33 @@ impl RxDecoder {
         Ok(RxDecoder {
             kind,
             last_seq: None,
+            last_ssrc: None,
         })
     }
 
     /// Start from a clean state (a new Janus session).
     pub fn reset(&mut self) -> Result<()> {
         self.last_seq = None;
+        self.last_ssrc = None;
         match &mut self.kind {
             RxKind::Opus(dec) => dec.reset_state().context("opus decoder reset"),
             RxKind::Pcmu => Ok(()),
+        }
+    }
+
+    /// Note the SSRC of the packet about to be decoded. A new SSRC is a new sender with its own
+    /// sequence numbers, so the sequence plan and the codec state start over.
+    pub fn observe_ssrc(&mut self, ssrc: u32) {
+        if self.last_ssrc != Some(ssrc) {
+            if self.last_ssrc.is_some() {
+                self.last_seq = None;
+                if let RxKind::Opus(dec) = &mut self.kind {
+                    if let Err(e) = dec.reset_state() {
+                        tracing::warn!(error = %e, "janus: decoder reset on a new SSRC failed");
+                    }
+                }
+            }
+            self.last_ssrc = Some(ssrc);
         }
     }
 
