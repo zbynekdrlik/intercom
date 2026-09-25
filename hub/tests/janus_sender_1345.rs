@@ -104,7 +104,9 @@ fn opus_packets_leave_on_the_20ms_grid_with_contiguous_numbering() {
     assert!((19.0..=21.0).contains(&mean), "mean interval {mean:.3} ms");
     let facet = stats.snapshot();
     assert_eq!(facet.codec, "opus");
-    assert!(facet.tx_packets >= 30);
+    // The counter moves after `send_to` returns, while loopback may already have woken the
+    // receiver inside it: packet 30 may not be counted yet.
+    assert!(facet.tx_packets >= 29);
     assert_eq!(facet.tx_overflow_trims, 0);
 }
 

@@ -52,14 +52,32 @@ fn ring_primes_to_the_target_before_the_first_audio_frame() {
     assert_eq!(r.underflows(), 0);
 }
 
+/// Review round 2: priming ends at the target, not above it. What piled up past the target while
+/// silence went out is the oldest audio; dropping it is inaudible and keeps latency at the target.
+#[test]
+fn priming_ends_exactly_at_the_target() {
+    let mut r = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
+    r.push(&ramp(0, RING_TARGET_FRAMES + 700));
+    let (f, k) = r.pop_frame();
+    assert_eq!(k, PopKind::Audio);
+    assert_eq!(
+        f,
+        ramp(700, FRAME_48K),
+        "the oldest 700 samples were dropped"
+    );
+    assert_eq!(r.fill(), RING_TARGET_FRAMES - FRAME_48K);
+    assert_eq!(r.trims(), 0, "not an overflow trim");
+}
+
 #[test]
 fn every_pop_is_exactly_one_frame() {
     let mut r = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
-    r.push(&ramp(0, RING_CAP_FRAMES));
+    r.push(&ramp(0, RING_TARGET_FRAMES));
     for _ in 0..3 {
         let (f, k) = r.pop_frame();
         assert_eq!(k, PopKind::Audio);
         assert_eq!(f.len(), FRAME_48K);
+        r.push(&ramp(0, FRAME_48K));
     }
 }
 
@@ -79,7 +97,8 @@ fn underflow_bridges_with_a_whole_silent_frame_and_reprimes() {
     // Re-priming: silent until the target is back, then audio resumes with the kept samples first.
     r.push(&ramp(600, 1000));
     assert_eq!(r.pop_frame().1, PopKind::Priming);
-    r.push(&ramp(1600, RING_TARGET_FRAMES));
+    // Refilled to exactly the target (priming trims only what lies ABOVE the target).
+    r.push(&ramp(1600, RING_TARGET_FRAMES - 1500));
     let (f, k) = r.pop_frame();
     assert_eq!(k, PopKind::Audio);
     assert_eq!(f[..500], ramp(100, 500)[..]);
@@ -188,8 +207,14 @@ struct SimResult {
 /// Feed 256-frame blocks every `block_us` (skipping one block every `skip_every_s` seconds, as a
 /// late tokio tick with `MissedTickBehavior::Skip` does) against the 20 ms pop, for `secs`.
 fn simulate(block_us: f64, secs: f64, skip_every_s: Option<f64>) -> SimResult {
+    simulate_from(0.0, block_us, secs, skip_every_s)
+}
+
+/// [`simulate`] with the first mix block arriving `start_us` after the clocks start (the phase of
+/// the block feed against the 20 ms pop).
+fn simulate_from(start_us: f64, block_us: f64, secs: f64, skip_every_s: Option<f64>) -> SimResult {
     let mut ring = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
-    let mut next_block = 0.0f64;
+    let mut next_block = start_us;
     let mut next_tick = 20_000.0f64;
     let mut next_skip = skip_every_s.map(|s| s * 1e6);
     let mut audio = 0u64;
@@ -278,30 +303,81 @@ fn the_servo_leaves_a_steady_exact_feed_alone() {
     assert_eq!(r.ring.trims(), 0);
 }
 
+/// Review round 2: priming used to hand out audio at whatever fill it first reached (up to ~2940
+/// samples, since nothing is consumed while priming), so the servo then dropped ~8 ms right after
+/// every (re)prime and latency started near 60 ms. Whatever the phase of the block feed, a steady
+/// exact feed must never wake the servo.
 #[test]
-fn a_servo_repeat_keeps_the_frame_whole_and_continuous() {
-    // Fill that sits below the low threshold for a whole second: the next pop takes 1 ms less and
-    // repeats its own last millisecond, so the frame is still exactly 960 samples of real audio.
+fn the_servo_leaves_a_steady_exact_feed_alone_at_every_start_phase() {
+    let block_us = 1e6 * 256.0 / 48_000.0;
+    for step in 0..16 {
+        let start_us = step as f64 * 20_000.0 / 16.0;
+        let r = simulate_from(start_us, block_us, 120.0, None);
+        assert_eq!(r.ring.servo_drops(), 0, "phase {start_us} us");
+        assert_eq!(r.ring.servo_repeats(), 0, "phase {start_us} us");
+        assert_eq!(r.ring.underflows(), 0, "phase {start_us} us");
+        assert!(
+            r.max_before_pop <= RING_TARGET_FRAMES + BLOCK,
+            "phase {start_us} us: primed too full, max pre-pop fill {}",
+            r.max_before_pop
+        );
+    }
+}
+
+/// Run a continuous slow ramp (one step per 8 samples) through the ring with the pre-pop fill held
+/// at `level` until the servo has acted, and return everything that was popped.
+fn servo_run(level: usize) -> (PacedRing, Vec<i16>) {
     let mut r = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
-    r.push(&ramp(0, RING_TARGET_FRAMES));
-    let mut last = Vec::new();
+    let mut counter: i32 = 0;
+    let mut feed = |r: &mut PacedRing, n: usize| {
+        let chunk: Vec<i16> = (0..n)
+            .map(|_| {
+                counter += 1;
+                (counter / 8) as i16
+            })
+            .collect();
+        r.push(&chunk);
+    };
+    feed(&mut r, RING_TARGET_FRAMES);
+    let mut out = Vec::new();
     for _ in 0..200 {
-        let low = RING_TARGET_FRAMES - FRAME_48K / 2;
-        if r.fill() < low {
-            r.push(&ramp(3, low - r.fill()));
+        if r.fill() < level {
+            let n = level - r.fill();
+            feed(&mut r, n);
         }
         let (f, k) = r.pop_frame();
         assert_eq!(k, PopKind::Audio);
-        assert_eq!(f.len(), FRAME_48K);
-        last = f;
-        if r.servo_repeats() > 0 {
+        assert_eq!(f.len(), FRAME_48K, "a servo action keeps the frame whole");
+        out.extend(f);
+        if r.servo_repeats() + r.servo_drops() > 0 {
             break;
         }
     }
-    assert!(r.servo_repeats() > 0, "the servo acted");
-    let tail = &last[FRAME_48K - 48..];
-    let before = &last[FRAME_48K - 96..FRAME_48K - 48];
-    assert_eq!(tail, before, "the last millisecond is repeated");
+    (r, out)
+}
+
+fn max_step(x: &[i16]) -> i32 {
+    x.windows(2)
+        .map(|w| (i32::from(w[1]) - i32::from(w[0])).abs())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Review round 2: a 1 ms repeat is crossfaded, never a hard splice (a click). On the slow ramp a
+/// hard splice jumps by 6; the crossfaded output never steps by more than 2.
+#[test]
+fn a_servo_repeat_is_crossfaded_not_a_click() {
+    let (r, out) = servo_run(RING_TARGET_FRAMES - FRAME_48K / 2);
+    assert!(r.servo_repeats() > 0, "the servo repeated 1 ms");
+    assert!(max_step(&out) <= 2, "max step {}", max_step(&out));
+}
+
+/// Review round 2: the same for a 1 ms drop.
+#[test]
+fn a_servo_drop_is_crossfaded_not_a_click() {
+    let (r, out) = servo_run(RING_TARGET_FRAMES + FRAME_48K);
+    assert!(r.servo_drops() > 0, "the servo dropped 1 ms");
+    assert!(max_step(&out) <= 2, "max step {}", max_step(&out));
 }
 
 // --- the schedule ----------------------------------------------------------------------------

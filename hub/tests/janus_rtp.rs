@@ -229,7 +229,7 @@ fn only_the_session_peer_is_accepted() {
     assert!(is_session_peer("10.77.9.202:10000".parse().unwrap(), peer));
     assert!(
         !is_session_peer("10.77.9.202:10002".parse().unwrap(), peer),
-        "an old session's port"
+        "another port"
     );
     assert!(
         !is_session_peer("10.77.9.50:10000".parse().unwrap(), peer),
