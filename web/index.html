@@ -2,68 +2,123 @@
 <html lang="sk">
 <head>
   <meta charset="utf-8" />
+  <!-- Pinch-zoom stays allowed (the viewport never disables scaling): the cameraman may zoom into
+       the picture. -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Interkom — telefón kameramana</title>
   <link rel="stylesheet" href="/style.css" />
-  <!-- issue 1345 M3b: installable phone web app (PWA). The manifest + service worker (registered
-       in app.js) let the phone install this page as a windowed app with its own icon. -->
+  <!-- issue 1345: installable phone web app (PWA). The manifest + service worker (registered in
+       app.js) let the phone install this page as a windowed app with its own icon. -->
   <link rel="manifest" href="/manifest.webmanifest" />
-  <meta name="theme-color" content="#14171c" />
+  <meta name="theme-color" content="#101318" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
 </head>
 <body>
-  <header class="app-header">
-    <h1 class="app-title">Interkom</h1>
-    <!-- version-on-dashboard: the hub injects its version here at serve time. -->
-    <span id="app-version" class="app-version" data-role="version" data-testid="version">v{{VERSION}}</span>
-  </header>
+  <!-- Phone UX (owner ruling 25.9.2026): opening the link connects immediately, receive-only, mic
+       OFF. The screen answers three questions with LIVE data: am I connected (this bar), does the
+       cutter's voice arrive (the incoming meter), do they hear me (the mic button + its meter). -->
+  <div class="conn" data-role="conn" data-state="connecting" role="status" aria-live="polite">
+    <span class="conn-dot" aria-hidden="true"></span>
+    <span class="conn-text" data-role="conn-text">Pripájam…</span>
+    <span class="conn-detail" data-role="conn-detail"></span>
+  </div>
 
-  <!-- The Interkom monitor picture (issue 1347 / M3c serves /interkom.mjpeg). Until that route
-       exists the picture stays hidden and the placeholder shows; app.js only sets the <img> src
-       once the hub is reachable, and retries every 5 s. -->
-  <div class="picture-wrap" data-role="picture-wrap">
-    <img id="interkom" class="picture" data-role="picture" alt="Interkom obraz" hidden />
-    <div id="picture-placeholder" class="picture-placeholder" data-role="picture-placeholder">
-      Obraz zatiaľ nie je k dispozícii
+  <main class="app">
+    <!-- The cutter's picture (the hub's /interkom.mjpeg). Fills the width; a tap toggles fullscreen
+         (Fullscreen API, or a CSS maximised overlay where the phone has no element fullscreen). -->
+    <div class="picture-wrap" data-role="picture-wrap" data-fullscreen="false" role="button" tabindex="0"
+         aria-label="Obraz od strihača — ťukni pre zväčšenie">
+      <img id="interkom" class="picture" data-role="picture" alt="Obraz od strihača" hidden />
+      <div class="picture-placeholder" data-role="picture-placeholder">Obraz zatiaľ nie je k dispozícii</div>
+      <span class="picture-hint" data-role="picture-hint" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        zväčšiť
+      </span>
+      <span class="picture-close" data-role="picture-close" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </span>
+    </div>
+
+    <!-- INCOMING: the live level of the room audio this phone receives. -->
+    <section class="card incoming" aria-label="Zvuk od strihača">
+      <div class="card-head">
+        <svg class="card-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4zM16 8.5a4.5 4.5 0 010 7M18.5 6a8 8 0 010 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="card-title">Strihač / réžia</span>
+        <span class="card-state" data-role="meter-in-state">ticho</span>
+      </div>
+      <div class="meter" data-role="meter-in" data-db="-120" data-active="false" aria-hidden="true">
+        <span class="meter-fill"></span>
+      </div>
+    </section>
+
+    <!-- MY MIC: one huge toggle. It defaults OFF; the mic permission is asked only on the first ON.
+         While ON it is red and carries a live level meter of my own mic. -->
+    <button type="button" id="mic-toggle" class="mic" data-role="mic-toggle" data-muted="true"
+            data-state="off" aria-pressed="false">
+      <span class="mic-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="44" height="44"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M8.5 21h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path class="mic-slash" d="M4 4l16 16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      </span>
+      <span class="mic-label" data-role="mic-label">Mikrofón vypnutý</span>
+      <span class="mic-hint" data-role="mic-hint">Ťukni pre zapnutie</span>
+      <span class="meter meter-mic" data-role="meter-mic" data-db="-120" data-active="false" hidden>
+        <span class="meter-fill"></span>
+      </span>
+    </button>
+
+    <footer class="foot">
+      <button type="button" class="chipbtn" data-role="name-show" aria-label="Zmeniť meno">
+        <span class="chipbtn-k">Ty:</span> <span data-role="name-value">Kameraman</span>
+      </button>
+      <!-- version-on-dashboard: the hub injects its version here at serve time. -->
+      <span id="app-version" class="app-version" data-role="version" data-testid="version">v{{VERSION}}</span>
+      <button type="button" class="chipbtn" data-role="settings-open" aria-label="Nastavenia">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Nastavenia
+      </button>
+    </footer>
+  </main>
+
+  <!-- Settings: the mic device + a few technical lines. Small, out of the way. -->
+  <div class="sheet" data-role="settings" hidden>
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <h2 id="settings-title" class="sheet-title">Nastavenia</h2>
+      <label class="field-label" for="mic-select">Mikrofón (vstup)</label>
+      <select id="mic-select" class="field" data-role="mic-select" aria-label="Výber mikrofónu">
+        <option value="">Predvolený mikrofón</option>
+      </select>
+      <button type="button" class="btn btn-secondary" data-role="name-change">Zmeniť meno</button>
+      <dl class="info">
+        <dt>Hub</dt><dd data-role="info-hub">zisťujem…</dd>
+        <dt>V miestnosti</dt><dd data-role="info-room">—</dd>
+      </dl>
+      <button type="button" class="btn btn-primary" data-role="settings-close">Hotovo</button>
     </div>
   </div>
 
-  <!-- The ONE big primary action: the tap that grants autoplay + is the getUserMedia gesture.
-       After connecting it turns into a Disconnect button (app.js toggles the label/state). -->
-  <button type="button" id="connect-btn" class="btn btn-primary" data-role="connect">Pripojiť</button>
-
-  <!-- The rare mic control. Default OFF (muted); turns red when ON. When the phone has no
-       microphone or the permission is denied, app.js joins the room LISTEN-ONLY and DISABLES
-       this select + toggle (the chip then reads "Mikrofón: nedostupný (počúvate)"). -->
-  <div class="mic-row">
-    <label class="mic-select-label" for="mic-select">Mikrofón (vstup)</label>
-    <select id="mic-select" class="mic-select" data-role="mic-select" aria-label="Výber mikrofónu">
-      <option value="">Predvolený mikrofón</option>
-    </select>
-    <button type="button" id="mic-toggle" class="btn btn-mic" data-role="mic-toggle"
-            aria-pressed="false" data-muted="true">Mikrofón vypnutý</button>
+  <!-- The name, asked once and remembered on this phone. The connection never waits for it. -->
+  <div class="sheet" data-role="name-sheet" hidden>
+    <form class="sheet-card" data-role="name-form" role="dialog" aria-modal="true" aria-labelledby="name-title">
+      <h2 id="name-title" class="sheet-title">Ako sa voláš?</h2>
+      <p class="sheet-text">Meno uvidí strihač v interkome.</p>
+      <input type="text" id="name-input" class="field" data-role="name" maxlength="24"
+             placeholder="napr. Kamera 1" autocomplete="off" enterkeyhint="done" />
+      <button type="submit" class="btn btn-primary" data-role="name-save">Uložiť</button>
+    </form>
   </div>
 
-  <!-- The short display name, typed once and remembered in localStorage. -->
-  <div class="name-row">
-    <label class="name-label" for="name-input">Meno</label>
-    <input type="text" id="name-input" class="name-input" data-role="name" maxlength="24"
-           placeholder="napr. Kamera 1" autocomplete="off" />
+  <!-- Shown ONCE, only when the browser blocks sound until the first touch. The connection is
+       already up underneath; one tap anywhere turns the sound on. -->
+  <div class="tap-layer" data-role="tap-for-sound" hidden>
+    <button type="button" class="tap-btn">
+      <svg viewBox="0 0 24 24" width="64" height="64" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4zM16 8.5a4.5 4.5 0 010 7M18.5 6a8 8 0 010 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="tap-text">Ťukni pre zvuk</span>
+      <span class="tap-sub">Prehliadač pustí zvuk až po prvom dotyku.</span>
+    </button>
   </div>
 
-  <!-- Status chips: hub, Janus, zvuk (bytes received climbing), obraz (frame age). Every
-       fetch/WS failure is shown here, never thrown to the console. -->
-  <div class="chips" data-role="chips">
-    <span class="chip" id="chip-hub" data-role="chip-hub" data-state="wait">Hub: spájam…</span>
-    <span class="chip" id="chip-janus" data-role="chip-janus" data-state="idle">Janus: nepripojené</span>
-    <span class="chip" id="chip-audio" data-role="chip-audio" data-state="idle">Zvuk: —</span>
-    <span class="chip" id="chip-picture" data-role="chip-picture" data-state="wait">Obraz: čakám…</span>
-  </div>
-
-  <!-- The remote intercom audio sink. Autoplay + playsinline so iOS Safari plays it after the
-       "Pripojiť" gesture without opening a full-screen player. -->
+  <!-- The room audio sink. playsinline keeps iOS from opening a full-screen player. -->
   <audio id="remote-audio" data-role="remote-audio" autoplay playsinline></audio>
 
   <script src="/janus.js"></script>
