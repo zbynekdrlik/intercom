@@ -49,10 +49,15 @@ const EGRESS_QUEUE_BLOCKS: usize = 64;
 /// bursts of this many frames, whatever block size the hub pops.
 pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
 
-/// The node latency (in frames at `--rate`) the capture child asks PipeWire for: one hub block.
-/// pw-cat takes it as direct SAMPLES (`--latency 256` + `--rate 48000` = `node.latency 256/48000`);
-/// the literal `256/48000` is rejected by pw-cat 1.6.2 as a "bad unit" (issue 1345, live-verified).
-pub const PW_CAT_RECORD_LATENCY_FRAMES: usize = 256;
+/// The node latency (in frames at `--rate`) the capture child asks PipeWire for: the MiniFuse graph
+/// quantum itself ([`PW_GRAPH_BURST_FRAMES`], 1024). A smaller request pulls the WHOLE graph down to
+/// it: at `--latency 256` the graph ran quantum 256 while the MiniFuse playback ran period 1024, and
+/// the cameraman sounded robotic in the operator headphones (issue 1345, 24.9.2026; owner accepted
+/// the 1024 state 25.9). The capture ring already expects 1024-frame bursts
+/// ([`LOCAL_CAPTURE_TARGET_FRAMES`]), so asking for them costs nothing.
+/// pw-cat takes it as direct SAMPLES (`--latency 1024` + `--rate 48000` = `node.latency 1024/48000`);
+/// the literal `1024/48000` is rejected by pw-cat 1.6.2 as a "bad unit" (live-verified).
+pub const PW_CAT_RECORD_LATENCY_FRAMES: usize = PW_GRAPH_BURST_FRAMES;
 
 /// The local-capture ring's cap, in hub blocks (issue 1345: at least 32 blocks).
 pub const LOCAL_CAPTURE_CAP_BLOCKS: usize = 32;
@@ -103,8 +108,8 @@ pub fn pw_cat_playback_argv_with_map(
 }
 
 /// Build the `pw-cat` RECORD argv for a capture source (ingress). Raw interleaved s16 PCM comes out
-/// on stdout (`-`); `--target` names the MiniFuse 4 capture node; `--latency` asks for one hub block
-/// ([`PW_CAT_RECORD_LATENCY_FRAMES`]) instead of pw-cat's 100 ms default.
+/// on stdout (`-`); `--target` names the MiniFuse 4 capture node; `--latency` asks for the graph
+/// quantum ([`PW_CAT_RECORD_LATENCY_FRAMES`]) instead of pw-cat's 100 ms default.
 pub fn pw_cat_record_argv(target: &str, rate: u32, channels: u8) -> Vec<String> {
     vec![
         "pw-cat".into(),
