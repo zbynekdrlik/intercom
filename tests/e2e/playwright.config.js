@@ -4,15 +4,15 @@
 // stubbed hub API and the fake Janus. Chromium only, one worker, a phone-sized viewport, and the
 // Chromium fake-media flags so both level meters have a real (fake-device) audio signal.
 //
-// Two projects differ ONLY in the browser's autoplay policy:
-// - "phone"            : autoplay allowed (an installed PWA / a site the phone already trusts);
-// - "phone-autoplay-blocked": a user gesture is required, so the one-time "Ťukni pre zvuk" layer
-//   must appear. Tests tagged @blocked run only there; every other test runs only in "phone".
+// Autoplay is ALLOWED here (an installed PWA / a site the phone already trusts). Playwright-driven
+// Chromium plays media without a gesture whatever --autoplay-policy says (probed 25.9.2026: a plain
+// WAV and a MediaStream both play, headless shell AND headed), so the blocked-autoplay test
+// emulates the browser policy itself (see phone.spec.js) instead of a second project.
 const { defineConfig, devices } = require("@playwright/test");
 
 const PORT = Number(process.env.INTERKOM_E2E_PORT || 8792);
 
-function phone(autoplayPolicy) {
+function phone() {
   return {
     ...devices["Desktop Chrome"],
     viewport: { width: 390, height: 844 },
@@ -27,7 +27,7 @@ function phone(autoplayPolicy) {
       args: [
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
-        `--autoplay-policy=${autoplayPolicy}`,
+        "--autoplay-policy=no-user-gesture-required",
       ],
     },
   };
@@ -44,8 +44,7 @@ module.exports = defineConfig({
     trace: "off",
   },
   projects: [
-    { name: "phone", grepInvert: /@blocked/, use: phone("no-user-gesture-required") },
-    { name: "phone-autoplay-blocked", grep: /@blocked/, use: phone("user-gesture-required") },
+    { name: "phone", use: phone() },
   ],
   webServer: [
     {

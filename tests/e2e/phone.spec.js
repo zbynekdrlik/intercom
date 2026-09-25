@@ -257,9 +257,44 @@ test("the name is asked once and remembered", async ({ page }) => {
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
-test("@blocked when autoplay is blocked, one tap on 'Ťukni pre zvuk' turns the sound on", async ({ page }, testInfo) => {
+// Emulate a phone browser that blocks sound until the first touch: the spec-defined autoplay
+// rejection (play() -> NotAllowedError) until the first TRUSTED tap/key. Automated Chromium never
+// blocks on its own, and its navigator.userActivation already reads true on a fresh page under
+// Playwright (probed 25.9.2026), so the gate is our own trusted-event flag. It also records any
+// AudioContext created before the first touch — the page must not create one then (a real Chrome
+// logs a warning for it).
+async function emulateAutoplayBlocked(page) {
+  await page.addInitScript(() => {
+    window.__touched = false;
+    for (const type of ["click", "touchend", "keydown"]) {
+      document.addEventListener(
+        type,
+        (e) => {
+          if (e.isTrusted) window.__touched = true;
+        },
+        true
+      );
+    }
+    const realPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      if (!window.__touched) {
+        return Promise.reject(new DOMException("play() needs a user gesture", "NotAllowedError"));
+      }
+      return realPlay.call(this);
+    };
+    window.__ctxBeforeGesture = 0;
+    const RealCtx = window.AudioContext;
+    window.AudioContext = function (...args) {
+      if (!window.__touched) window.__ctxBeforeGesture += 1;
+      return new RealCtx(...args);
+    };
+  });
+}
+
+test("when autoplay is blocked, one tap on 'Ťukni pre zvuk' turns the sound on", async ({ page }, testInfo) => {
   const seen = watchConsole(page);
   await presetName(page, "Kamera 6");
+  await emulateAutoplayBlocked(page);
   await page.goto("/");
   await expectConnected(page);
 
@@ -267,6 +302,8 @@ test("@blocked when autoplay is blocked, one tap on 'Ťukni pre zvuk' turns the 
   await expect(layer).toBeVisible();
   await expect(layer).toContainText("Ťukni pre zvuk");
   await shot(page, testInfo, "phone-390x844-tap-for-sound.png");
+
+  expect(await page.evaluate(() => window.__ctxBeforeGesture), "no AudioContext before the first touch").toBe(0);
 
   await layer.click();
   await expect(layer).toBeHidden();
