@@ -519,7 +519,7 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   against its 48 kHz consumer. Never compute a period in truncated µs again.
 - **The ring's fill servo.** A missed mix tick (`MissedTickBehavior::Skip` loses a block) or a rate
   offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
-  ring drops 1 ms; after 50 below target-FRAME/4 it repeats the frame's last 1 ms.
+  ring drops 1 ms; after 50 below target-FRAME/4 it plays 1 ms twice (both mid-frame, crossfaded).
   - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
     triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent
     priming ticks is the oldest audio, dropped inaudibly), otherwise a prime that overshot to

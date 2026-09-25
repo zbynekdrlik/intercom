@@ -167,7 +167,8 @@ impl PacedRing {
     }
 
     /// Take exactly one [`FRAME_48K`] frame. Silence while priming or on an underflow; an underflow
-    /// keeps any partial samples and re-primes to the target.
+    /// keeps any partial samples and re-primes to the target (if the refill then overshoots the
+    /// target, the oldest samples, i.e. those kept ones, are the ones drained).
     pub fn pop_frame(&mut self) -> (Vec<i16>, PopKind) {
         if !self.primed {
             if self.buf.len() < self.target {

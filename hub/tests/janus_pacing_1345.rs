@@ -166,6 +166,9 @@ fn block_loop_feed_against_the_20ms_pop_never_underflows_or_trims() {
     }
     assert_eq!(r.underflows(), 0, "no silence bridge in steady state");
     assert_eq!(r.trims(), 0, "no trim in steady state");
+    // The servo does not hunt under realistic block-loop lateness (review round 3).
+    assert_eq!(r.servo_drops(), 0, "no servo drop under jitter");
+    assert_eq!(r.servo_repeats(), 0, "no servo repeat under jitter");
     assert!(
         audio >= 2990,
         "almost every tick is audio after priming, got {audio}"
