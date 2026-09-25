@@ -379,9 +379,14 @@ out_channels = 2
             "version placeholder substituted"
         );
         assert!(html.contains("<!DOCTYPE html>"), "index is the PWA HTML");
+        // The 25.9.2026 UX rework joins on load: no connect button, a live connection bar.
         assert!(
-            html.contains("data-role=\"connect\""),
-            "the connect gesture button"
+            !html.contains("data-role=\"connect\""),
+            "no connect button (the page joins on load)"
+        );
+        assert!(
+            html.contains("data-role=\"conn\""),
+            "the live connection indicator"
         );
         assert!(
             html.contains("/manifest.webmanifest"),
