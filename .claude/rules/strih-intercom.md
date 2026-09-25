@@ -513,7 +513,28 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   - Both directions use ONE UDP socket: the std socket is `try_clone`d. The tokio side needs
     `set_nonblocking(true)`, which is shared by the clone, so a `WouldBlock` send drops one packet
     (debug log) and is not treated as a dead session.
-- **The egress audit ("everywhere", owner 25.9.).** The other hub egresses do NOT have this beat:
+- **The block period is exact (`janus_pacing::hub_block_period`).** It used to be whole µs:
+  `256*1_000_000/48_000` = 5333 instead of 5333.33, so the loop ran 62.5 ppm fast. Every egress
+  (the Janus ring, VBAN to the camboxes, the program/cutters pw-cat pipes) gained about 3 samples/s
+  against its 48 kHz consumer. Never compute a period in truncated µs again.
+- **The ring's fill servo.** A missed mix tick (`MissedTickBehavior::Skip` loses a block) or a rate
+  offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
+  ring drops 1 ms; after 50 below target-FRAME/4 it repeats the frame's last 1 ms.
+  - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
+    triggers it.
+  - The 60 ms trim and the silent underflow frame are the last resort only.
+  - 20-minute simulations at ±62.5 ppm and with a skipped block every 30 s pin 0 trims and
+    0 underflows.
+- **Receive-side safety (review round 1).**
+  - Only the session's Janus endpoint is accepted (`is_session_peer`, port + ip unless Janus
+    advertised 0.0.0.0).
+  - A new SSRC restarts the sequence plan and codec state.
+  - `rx_gap` treats only a backward step of up to `MAX_MISORDER` (100) as late. A bigger backward
+    jump is a restart, so one stray packet cannot lock the stream out for ~11 min.
+  - An abandoned session is `destroy`ed (best effort, 2 s) before re-joining, so its participant
+    stops sending the old room mix to our port.
+- **The egress audit ("everywhere", owner 25.9.).** The other hub egresses do NOT have this beat
+  (they shared only the 62.5 ppm period error above, now fixed):
   - VBAN to the camboxes sends one 256-frame packet per 5.33 ms block (packet = tick, sd 0.6);
   - the `program_out` / cutters `pw-cat --playback` sinks are PULLED by the PipeWire driver.
     pw-cat raw mode `fread`s the requested quantum from stdin (pw-cat.c `stdin_play`), so our
