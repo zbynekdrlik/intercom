@@ -97,11 +97,11 @@ _MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 # to FL/FR/RL/RR and never lands on the AUX ports).
 _MINIFUSE_PLAYBACK_NODE = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
 
-# issue 1345 (24.9.2026): the talkback makeup gain, in dB, on every cutters -> phones and
-# cutters -> camN point. The operator's MiniFuse talkback reached the hub at about -68 dBFS with no
-# makeup gain. Target: speech at -20 to -12 dBFS (the owner also raises the MiniFuse preamp). ONE
-# constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
-TALKBACK_MAKEUP_DB = 12.0
+# issue 1345: the talkback makeup gain, in dB, on every cutters -> phones and cutters -> camN point.
+# ONE constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
+# Owner ruling 24.9.2026 ("nemal si menit hlasitosti na kamerach"): 0 dB -- the +12 dB tried that
+# day put noise into the cameramen's headsets; the talkback level is set on the MiniFuse preamp.
+TALKBACK_MAKEUP_DB = 0.0
 
 _TALKBACK_DST_ROLES = ("cambox", "phones")
 

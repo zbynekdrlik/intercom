@@ -164,224 +164,192 @@ src = "cutters"
 in_ch = 1
 dst = "phones"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "phones"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam2"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam2"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam3"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam3"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam5"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam5"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "phones"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "phones"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam2"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam2"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam3"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam3"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam5"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam5"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 1
-gain_db = 12.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 2
-gain_db = 12.0
 
 [[point]]
 src = "line34"
