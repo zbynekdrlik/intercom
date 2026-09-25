@@ -1,7 +1,7 @@
 //! Matrix `janus` adapter validation + the `[janus]` config table + the `/api/state` janus facet
 //! (issue 1345 M3a). The Janus audiobridge leg is only valid on the single `phones` participant.
 
-use intercom_hub::janus_rtp::JanusStats;
+use intercom_hub::janus_rtp::{JanusCodec, JanusStats};
 use intercom_hub::matrix::{Matrix, ADAPTER_JANUS};
 use intercom_hub::state::{HubState, RuntimeStats};
 
@@ -192,6 +192,21 @@ fn janus_table_defaults_when_absent_or_empty() {
     assert_eq!(j.room, 1000);
     assert_eq!(j.rtp_bind, "0.0.0.0:6990");
     assert!(j.room_secret_file.is_none());
+    // Issue 1345 (25.9.2026): the phones leg defaults to Opus.
+    assert_eq!(j.codec, JanusCodec::Opus);
+}
+
+#[test]
+fn janus_codec_is_selectable_and_fails_loud_on_an_unknown_value() {
+    let m = Matrix::from_toml(&toml_with_phones("janus", "\n[janus]\ncodec = \"pcmu\"")).unwrap();
+    assert_eq!(m.janus.unwrap().codec, JanusCodec::Pcmu);
+    let m = Matrix::from_toml(&toml_with_phones("janus", "\n[janus]\ncodec = \"opus\"")).unwrap();
+    assert_eq!(m.janus.unwrap().codec, JanusCodec::Opus);
+    // A typo must not silently fall back to a default codec.
+    assert!(
+        Matrix::from_toml(&toml_with_phones("janus", "\n[janus]\ncodec = \"g722\"")).is_err(),
+        "an unknown codec is refused at load"
+    );
 }
 
 #[test]
@@ -225,6 +240,12 @@ fn state_renders_the_janus_facet_only_for_the_janus_participant() {
         rejoin_count: 1,
         rx_packets: 300,
         tx_packets: 150,
+        codec: "opus",
+        tx_interval_ms_sd: 0.25,
+        tx_interval_ms_max: 20.5,
+        tx_underflows: 2,
+        tx_overflow_trims: 1,
+        rx_lost_frames: 3,
     });
     let hs = HubState::snapshot(&m, "1.7.0-test", &stats);
     let v: serde_json::Value = serde_json::to_value(&hs).unwrap();
@@ -239,6 +260,13 @@ fn state_renders_the_janus_facet_only_for_the_janus_participant() {
     assert_eq!(phones["janus"]["rejoin_count"], 1);
     assert_eq!(phones["janus"]["rx_packets"], 300);
     assert_eq!(phones["janus"]["tx_packets"], 150);
+    // Issue 1345 (25.9.2026): the codec and the pacing proof (the spacing of the last sends).
+    assert_eq!(phones["janus"]["codec"], "opus");
+    assert_eq!(phones["janus"]["tx_interval_ms_sd"], 0.25);
+    assert_eq!(phones["janus"]["tx_interval_ms_max"], 20.5);
+    assert_eq!(phones["janus"]["tx_underflows"], 2);
+    assert_eq!(phones["janus"]["tx_overflow_trims"], 1);
+    assert_eq!(phones["janus"]["rx_lost_frames"], 3);
     // A non-janus participant omits the facet entirely (skip_serializing_if).
     assert!(cam1.get("janus").is_none(), "cam1 must have no janus facet");
 }

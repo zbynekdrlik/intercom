@@ -4,6 +4,7 @@
 //! rules — so a future converter/XML change could produce a syntactically-valid TOML the daemon
 //! REJECTS at rig startup. This closes that Tier-0 gap: CI loads the real deployed matrix here.
 
+use intercom_hub::janus_rtp::JanusCodec;
 use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
 const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-lx.toml");
@@ -76,6 +77,8 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         j.room_secret_file.as_deref(),
         Some("/etc/intercom-hub/janus-room.secret")
     );
+    // Issue 1345 (25.9.2026): the deployed phones leg is Opus with in-band FEC, not PCMU.
+    assert_eq!(j.codec, JanusCodec::Opus);
 
     // issue 1344: the local PipeWire program-audio graph. VASIO8 is now the `program_out` sink OBS
     // captures (not the old M1 `program_monitor`), fed by the fohabl-strih + lv1-strih program feeds;

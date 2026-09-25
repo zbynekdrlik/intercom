@@ -124,6 +124,8 @@ def test_janus_table_emitted_with_defaults_and_no_inlined_secret():
     assert j["room"] == 1000
     assert j["room_secret_file"] == "/etc/intercom-hub/janus-room.secret"
     assert j["rtp_bind"] == "0.0.0.0:6990"
+    # issue 1345 (25.9.2026): the phones leg is Opus 48 kHz with in-band FEC (PCMU stays selectable).
+    assert j["codec"] == "opus"
     assert "secret" not in j, "the room secret must NEVER be inlined in the TOML"
 
 
