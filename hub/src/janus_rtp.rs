@@ -154,9 +154,12 @@ impl RtpPacketizer {
     }
 }
 
-/// Whether a datagram from `from` belongs to the current session's Janus endpoint `peer`. An old
-/// session's leftovers (another port) and any other host are ignored, so they cannot feed or lock
-/// out the room mix. When Janus advertised an unspecified address only the port is compared.
+/// Whether a datagram from `from` belongs to the current session's Janus endpoint `peer`. Any other
+/// host or port is ignored, so a stray datagram cannot feed or lock out the room mix. When Janus
+/// advertised an unspecified address only the port is compared. NOTE: Janus reuses the SAME rtp
+/// port for every new session (live strih-lx, 24./25.9.2026), so this does NOT separate an old
+/// session from a new one; the SSRC restart (`RxDecoder::observe_ssrc`), `MAX_MISORDER` and the
+/// socket drain before a new session do that.
 pub fn is_session_peer(from: SocketAddr, peer: SocketAddr) -> bool {
     from.port() == peer.port() && (peer.ip().is_unspecified() || from.ip() == peer.ip())
 }
@@ -798,6 +801,15 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         if let Err(e) = decoder.reset() {
             tracing::warn!(error = %e, "janus: decoder reset failed");
         }
+        // Drop whatever the previous session left in the socket (Janus reuses its rtp port, so
+        // the peer filter cannot tell those packets apart): the new session starts from fresh audio.
+        let stale = drain_socket(&socket, &mut recv_buf);
+        if stale > 0 {
+            tracing::debug!(
+                stale,
+                "janus: dropped packets left over from the previous session"
+            );
+        }
         shared.set_target(Some(TxTarget {
             addr: session.janus_rtp_addr,
             session: session_number,
@@ -857,6 +869,15 @@ fn bind_rtp_sockets(bind: SocketAddr) -> std::io::Result<(tokio::net::UdpSocket,
     let send_socket = std_socket.try_clone()?;
     std_socket.set_nonblocking(true)?;
     Ok((tokio::net::UdpSocket::from_std(std_socket)?, send_socket))
+}
+
+/// Read and discard every datagram already queued on the socket; returns how many.
+fn drain_socket(socket: &tokio::net::UdpSocket, buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    while socket.try_recv_from(buf).is_ok() {
+        n += 1;
+    }
+    n
 }
 
 /// Decode one received packet and push the audio. It is mono: the phones jitter buffer (built with

@@ -86,9 +86,9 @@ pub enum PopKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServoAction {
     None,
-    /// The fill sat high for a second: drop 1 ms of the oldest audio.
+    /// The fill sat high for a second: skip 1 ms mid-frame.
     Drop,
-    /// The fill sat low for a second: take 1 ms less and repeat the frame's last millisecond.
+    /// The fill sat low for a second: take 1 ms less and play 1 ms twice mid-frame.
     Repeat,
 }
 
@@ -98,7 +98,8 @@ enum ServoAction {
 /// The two sides run on the same monotonic clock, but a missed mix tick loses a block and any
 /// rounding in the block period is a slow rate offset. So a gentle fill servo keeps the pre-pop
 /// fill inside a band: after [`SERVO_TICKS`] pops in a row above `target + FRAME/2` it drops
-/// [`SERVO_STEP_FRAMES`]; after as many below `target - FRAME/4` it repeats 1 ms inside the frame.
+/// [`SERVO_STEP_FRAMES`]; after as many below `target - FRAME/4` it repeats 1 ms inside the frame
+/// (both splices are crossfaded mid-frame, so neither clicks).
 /// The 60 ms trim and the silent underflow frame stay as the last resort.
 #[derive(Debug, Clone)]
 pub struct PacedRing {
@@ -172,23 +173,27 @@ impl PacedRing {
             if self.buf.len() < self.target {
                 return (vec![0; FRAME_48K], PopKind::Priming);
             }
+            // Nothing is consumed while priming, so the fill can overshoot the target by up to a
+            // tick of mix blocks. Start exactly at the target: the excess is the OLDEST audio and
+            // silence went out in its place, so dropping it is inaudible and keeps the latency at
+            // the target (the servo would otherwise spend seconds dropping it 1 ms at a time).
+            let excess = self.buf.len() - self.target;
+            self.buf.drain(..excess);
             self.primed = true;
         }
         if self.buf.len() >= FRAME_48K {
             match self.servo(self.buf.len()) {
                 ServoAction::None => {}
                 ServoAction::Drop => {
-                    // Above the high threshold, so a whole frame is still left after the drop.
-                    self.buf.drain(..SERVO_STEP_FRAMES);
+                    // Above the high threshold, so a frame + 1 ms is always there.
+                    let x: Vec<i16> = self.buf.drain(..FRAME_48K + SERVO_STEP_FRAMES).collect();
                     self.servo_drops += 1;
+                    return (splice_drop(&x), PopKind::Audio);
                 }
                 ServoAction::Repeat => {
-                    let mut frame: Vec<i16> =
-                        self.buf.drain(..FRAME_48K - SERVO_STEP_FRAMES).collect();
-                    let tail_start = frame.len() - SERVO_STEP_FRAMES;
-                    frame.extend_from_within(tail_start..);
+                    let x: Vec<i16> = self.buf.drain(..FRAME_48K - SERVO_STEP_FRAMES).collect();
                     self.servo_repeats += 1;
-                    return (frame, PopKind::Audio);
+                    return (splice_repeat(&x), PopKind::Audio);
                 }
             }
             return (self.buf.drain(..FRAME_48K).collect(), PopKind::Audio);
@@ -232,6 +237,40 @@ impl PacedRing {
     pub fn trims(&self) -> u64 {
         self.trims
     }
+}
+
+/// Where inside a frame the servo splices (mid-frame, so both sides of the crossfade are in hand).
+const SPLICE_AT: usize = FRAME_48K / 2 - SERVO_STEP_FRAMES / 2;
+
+/// A linear crossfade of `SERVO_STEP_FRAMES` samples from `from` (fading out) to `to` (fading in).
+fn crossfade<'a>(from: &'a [i16], to: &'a [i16]) -> impl Iterator<Item = i16> + 'a {
+    let n = SERVO_STEP_FRAMES as f32 + 1.0;
+    from.iter().zip(to).enumerate().map(move |(i, (&a, &b))| {
+        let w = (i as f32 + 1.0) / n;
+        (f32::from(a) * (1.0 - w) + f32::from(b) * w).round() as i16
+    })
+}
+
+/// Build one frame from `FRAME + 1 ms` of audio, skipping 1 ms mid-frame with a crossfade (no
+/// click): the audio before the splice fades into the audio 1 ms later.
+fn splice_drop(x: &[i16]) -> Vec<i16> {
+    let (j, s) = (SPLICE_AT, SERVO_STEP_FRAMES);
+    let mut y = Vec::with_capacity(FRAME_48K);
+    y.extend_from_slice(&x[..j]);
+    y.extend(crossfade(&x[j..j + s], &x[j + s..j + 2 * s]));
+    y.extend_from_slice(&x[j + 2 * s..]);
+    y
+}
+
+/// Build one frame from `FRAME - 1 ms` of audio, playing 1 ms twice mid-frame with a crossfade (no
+/// click): after the splice point the audio fades back to 1 ms earlier and continues from there.
+fn splice_repeat(x: &[i16]) -> Vec<i16> {
+    let (j, s) = (SPLICE_AT, SERVO_STEP_FRAMES);
+    let mut y = Vec::with_capacity(FRAME_48K);
+    y.extend_from_slice(&x[..j + s]);
+    y.extend(crossfade(&x[j + s..j + 2 * s], &x[j..j + s]));
+    y.extend_from_slice(&x[j + s..]);
+    y
 }
 
 /// The sender's deadlines: exact multiples of [`TICK`] from its start, so the grid never drifts

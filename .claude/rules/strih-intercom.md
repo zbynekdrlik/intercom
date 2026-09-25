@@ -521,13 +521,20 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
   ring drops 1 ms; after 50 below target-FRAME/4 it repeats the frame's last 1 ms.
   - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
-    triggers it.
+    triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent
+    priming ticks is the oldest audio, dropped inaudibly), otherwise a prime that overshot to
+    ~2940 made the servo drop ~8 ms right after every (re)prime. Pinned for 16 start phases.
+  - Both splices (1 ms skip / 1 ms repeat) are 48-sample linear crossfades at mid-frame, never a
+    hard cut (a click).
   - The 60 ms trim and the silent underflow frame are the last resort only.
   - 20-minute simulations at ±62.5 ppm and with a skipped block every 30 s pin 0 trims and
     0 underflows.
 - **Receive-side safety (review round 1).**
   - Only the session's Janus endpoint is accepted (`is_session_peer`, port + ip unless Janus
-    advertised 0.0.0.0).
+    advertised 0.0.0.0). This keeps out stray hosts only: **Janus reuses the SAME rtp port
+    (10.77.9.202:10000) for every new session** (hub journal 24./25.9.), so old-vs-new session is
+    separated by the SSRC restart, `MAX_MISORDER` and a socket drain right before the sender is
+    pointed at the new session.
   - A new SSRC restarts the sequence plan and codec state.
   - `rx_gap` treats only a backward step of up to `MAX_MISORDER` (100) as late. A bigger backward
     jump is a restart, so one stray packet cannot lock the stream out for ~11 min.
