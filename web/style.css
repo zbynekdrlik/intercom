@@ -53,9 +53,10 @@ button { font: inherit; color: inherit; }
   font-weight: 700;
   font-size: 1.15rem;
   letter-spacing: 0.01em;
+  flex-wrap: wrap;
   background: var(--warn-bg);
   color: var(--warn);
-  transition: background-color 0.25s, color 0.25s;
+  /* No colour transition: the state must be readable the instant it changes. */
 }
 .conn-dot {
   flex: 0 0 auto;
@@ -72,6 +73,7 @@ button { font: inherit; color: inherit; }
   font-weight: 500;
   opacity: 0.85;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .conn[data-state="connected"] { background: var(--good-bg); color: var(--good); }
 .conn[data-state="reconnecting"] { background: var(--bad-bg); color: var(--bad); }

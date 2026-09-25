@@ -282,6 +282,8 @@ test("a dropped connection shows the reconnect state and reconnects with the mic
   const conn = page.locator('[data-role="conn"]');
   await expect(conn).toHaveAttribute("data-state", "reconnecting");
   await expect(conn).toContainText("Odpojené – skúšam znova");
+  // Red the instant the state changes (no colour transition that would show green for a moment).
+  expect(await conn.evaluate((e) => getComputedStyle(e).backgroundColor)).toBe("rgb(74, 20, 20)");
   // The mic stays ON but never claims "they hear you" while the session is down.
   await expect(page.locator('[data-role="mic-hint"]')).toHaveText("Zapnutý — čakám na spojenie");
   await expect(page.locator('[data-role="meter-in-state"]')).toHaveText("čakám…");
