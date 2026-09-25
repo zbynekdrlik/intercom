@@ -133,6 +133,13 @@ test("opening the link joins receive-only with the mic OFF, and the incoming met
   const box = await page.locator('[data-role="picture-wrap"]').boundingBox();
   expect(box && box.width, "the picture fills the phone width").toBeGreaterThanOrEqual(388);
 
+  // version-on-dashboard: the deployed version is visible and matches the hub's /api/version.
+  const version = page.locator('[data-testid="version"]');
+  await expect(version).toBeVisible();
+  await expect(version).toHaveText(/^v\d+\.\d+\.\d+(-dev\.\d+)?$/);
+  const api = await page.evaluate(() => fetch("/api/version").then((r) => r.json()));
+  await expect(version).toHaveText(`v${api.version}`);
+
   await shot(page, testInfo, "phone-390x844-connected.png");
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
@@ -202,7 +209,7 @@ test("a tap on the picture makes it fullscreen and a second tap returns", async 
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
-test("a dropped connection shows the reconnect state and reconnects with the mic state kept", async ({ page }) => {
+test("a dropped connection shows the reconnect state and reconnects with the mic state kept", async ({ page }, testInfo) => {
   const seen = watchConsole(page);
   await presetName(page, "Kamera 4");
   await page.goto("/");
@@ -220,6 +227,7 @@ test("a dropped connection shows the reconnect state and reconnects with the mic
   const conn = page.locator('[data-role="conn"]');
   await expect(conn).toHaveAttribute("data-state", "reconnecting");
   await expect(conn).toContainText("Odpojené – skúšam znova");
+  await shot(page, testInfo, "phone-390x844-reconnecting.png");
 
   await expectConnected(page);
   const f = await fake(page);

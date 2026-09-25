@@ -105,7 +105,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8792)
     ap.add_argument("--bind", default="127.0.0.1")
-    ap.add_argument("--version", default="0.0.0-e2e")
+    ap.add_argument("--version", default="1.7.0-dev.999")
     ap.add_argument("--real-janus", action="store_true", help="serve the vendored janus.js")
     args = ap.parse_args()
     server = ThreadingHTTPServer((args.bind, args.port), make_handler(args.version, args.real_janus))
