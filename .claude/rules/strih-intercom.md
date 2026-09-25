@@ -280,6 +280,12 @@ What was wrong live, and how the code now handles it. Read this before touching 
   gives `node.latency = "256/48000"`.
   - This was proven with an UNLINKED probe stream (`--target 0`, `timeout 2`), which is harmless on
     the live graph.
+  - **The capture child asks the graph quantum, 1024, never less** (`PW_CAT_RECORD_LATENCY_FRAMES =
+    PW_GRAPH_BURST_FRAMES`, owner accepted 25.9.2026). A request below the MiniFuse period pulls the
+    WHOLE graph down to it. At `--latency 256` the graph ran quantum 256 while the MiniFuse playback
+    ran period 1024, and the cameraman sounded robotic in the operator headphones. The
+    `51-strih-quantum-1024.conf` min-quantum floor (setup-strih step 12) is the second guard. See
+    `.claude/rules/strih-linux-provisioning.md` "The MiniFuse period + graph quantum 1024".
   - Argument checks that happen before the connect (such as `--channel-map` vs `--channels`) can be
     probed with `PIPEWIRE_REMOTE=<bogus> XDG_RUNTIME_DIR=/tmp/x pw-cat …`: a bad map fails with
     `channels and channel-map incompatible` before `pw_context_connect`.
