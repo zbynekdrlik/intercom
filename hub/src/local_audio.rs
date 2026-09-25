@@ -53,8 +53,8 @@ pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
 /// quantum itself ([`PW_GRAPH_BURST_FRAMES`], 1024). A smaller request pulls the WHOLE graph down to
 /// it: at `--latency 256` the graph ran quantum 256 while the MiniFuse playback ran period 1024, and
 /// the cameraman sounded robotic in the operator headphones (issue 1345, 24.9.2026; owner accepted
-/// the 1024 state 25.9). The capture ring already expects 1024-frame bursts
-/// ([`LOCAL_CAPTURE_TARGET_FRAMES`]), so asking for them costs nothing.
+/// the 1024 state 25.9). The capture ring is already sized for bursts of this size (target
+/// [`LOCAL_CAPTURE_TARGET_FRAMES`] = two bursts), so asking for them costs nothing.
 /// pw-cat takes it as direct SAMPLES (`--latency 1024` + `--rate 48000` = `node.latency 1024/48000`);
 /// the literal `1024/48000` is rejected by pw-cat 1.6.2 as a "bad unit" (live-verified).
 pub const PW_CAT_RECORD_LATENCY_FRAMES: usize = PW_GRAPH_BURST_FRAMES;
