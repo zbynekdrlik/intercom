@@ -8,7 +8,9 @@
 //! pro-audio node (`AUX0..AUX5`), so the sink carries an explicit channel map. Without the map,
 //! 4 channels default to FL/FR/RL/RR and never land on the AUX ports.
 
-use intercom_hub::local_audio::{pw_cat_playback_argv_with_map, pw_cat_record_argv};
+use intercom_hub::local_audio::{
+    pw_cat_playback_argv_with_map, pw_cat_record_argv, PW_GRAPH_BURST_FRAMES,
+};
 use intercom_hub::matrix::Matrix;
 
 const MINIFUSE_OUT: &str = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0";
@@ -170,13 +172,18 @@ fn the_playback_argv_carries_the_aux_channel_map_only_when_given() {
 }
 
 #[test]
-fn the_record_child_asks_for_a_256_frame_latency() {
-    // pw-cat takes the latency as direct SAMPLES at `--rate` (or a time unit): `--latency 256` with
-    // `--rate 48000` sets `node.latency = "256/48000"`. The literal `256/48000` is REJECTED by pw-cat
-    // 1.6.2 ("bad latency value ... (bad unit)", live-verified on strih-lx).
+fn the_record_child_asks_for_the_1024_frame_graph_quantum() {
+    // pw-cat takes the latency as direct SAMPLES at `--rate` (or a time unit): `--latency 1024` with
+    // `--rate 48000` sets `node.latency = "1024/48000"`. The literal `1024/48000` is REJECTED by
+    // pw-cat 1.6.2 ("bad latency value ... (bad unit)", live-verified on strih-lx).
+    //
+    // 24.9.2026 (owner accepted 25.9): the capture child asked `--latency 256` and pulled the whole
+    // graph down to quantum 256 while the MiniFuse playback ran period 1024 -- the cameraman sounded
+    // robotic in the operator headphones. The request must be the MiniFuse graph quantum itself.
     let a = pw_cat_record_argv("alsa_input.minifuse", 48000, 2);
     let pos = a.iter().position(|x| x == "--latency").expect("--latency");
-    assert_eq!(a[pos + 1], "256");
+    assert_eq!(a[pos + 1], "1024");
+    assert_eq!(a[pos + 1], PW_GRAPH_BURST_FRAMES.to_string());
     let rate = a.iter().position(|x| x == "--rate").unwrap();
     assert_eq!(a[rate + 1], "48000");
     assert_eq!(a.last().unwrap(), "-");
