@@ -517,13 +517,28 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
     the received track (analysed only, never routed to the speakers), RMS dBFS with fast attack /
     30 dB/s release, `data-db` + `data-active` for tests, "hovorí" / "ticho".
   - **My mic** — one huge toggle (`data-muted="true"` by default). `acquireMic()` is the ONLY
-    `getUserMedia` call site, reached on the first ON; the session is then re-negotiated from
-    receive-only with `createOffer({tracks:[{type:"audio", capture: micTrack, recv:true,
-    replace:true, dontStop:true}]})` + `configure` with the jsep. OFF = `configure {muted:true}` +
-    `track.enabled=false`; ON again only unmutes. The granted track is kept (`dontStop`) so a
-    reconnect offers WITH it (no second prompt) and keeps the mic state. A denied mic shows
-    `setMicUi("denied")` and the page keeps listening. While ON the button is red with a live meter
-    of my own mic (`data-role="meter-mic"`).
+    `getUserMedia` call site, reached on the first ON; the SAME session is then re-negotiated in
+    place: `pushMicToSession()` puts the track on the audio transceiver's sender itself
+    (`sender.replaceTrack` + direction `sendrecv`) and calls `createOffer({tracks: []})` +
+    `configure` with the jsep. A device change is a plain sender swap (no renegotiation). A mic
+    change while an offer is out waits for that answer (`negotiating` / `micPushPending`). OFF =
+    `configure {muted:true}` + `track.enabled=false`; ON again only unmutes. The granted track is
+    kept (`dontStop`) so a reconnect offers WITH it (janus.js's add path, no second prompt) and
+    keeps the mic state. A denied mic shows `setMicUi("denied")` and the page keeps listening.
+    While ON the button is red with a live meter of my own mic (`data-role="meter-mic"`); the hint
+    says "Počujú ťa" only while connected, else "Zapnutý — čakám na spojenie".
+  - **GOTCHA — janus.js 1.1.2's replace path crashes after a receive-only offer.** `createOffer`
+    with `replace:true` and `replaceTracks` end in `config.myStream.addTrack(nt)`, but `myStream`
+    is only created on the ADD path, so after a recv-only first offer it is null: a TypeError, the
+    offer's `error`, and (in the first cut of this rework) a silent full session rebuild on every
+    first mic ON. Never use janus.js's replace path on this page; swap the sender yourself and pass
+    `tracks: []` (captureDevices returns early). Never patch the vendored file.
+  - All Janus WebSockets go through `TrackedWebSocket` (passed to janus.js as its `WebSocket`
+    dependency at `Janus.init`, which is where janus.js binds `Janus.newWebSocket`): a torn-down
+    session's socket is closed even when janus.js never got its session id (its `destroy()` then
+    returns without touching the socket and a late connect would leave a zombie session); a still
+    CONNECTING socket is closed right after it opens, never while connecting (the browser logs an
+    error for that).
   - The **AudioContext** is created only once sound may play (`play()` resolved, or a click /
     touchend / keydown — never a touch `pointerdown`, which is not an activation event), so Chrome
     never logs "The AudioContext was not allowed to start". If `play()` is rejected, a one-time
@@ -612,15 +627,21 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   on `test_intercom_webui_1345.py` + `test_shading_https_install_808.py`; `bash -n` +
   `shellcheck -S warning` on the two scripts; `node --check` on `app.js`/`sw.js`/`janus.js`; the
   doc-lazy grep on the touched `.rs`.
-- **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job):
-  `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL `intercom/web`, `/`
-  with `{{VERSION}}` substituted, stub `/api/state` / `/api/version` / a PNG at `/interkom.mjpeg`,
-  and the Janus test double `fake-janus.js` at `/janus.js`; `--real-janus` serves the vendored
-  library instead). Chromium fake media (`--use-fake-device-for-media-stream`) gives both meters a
-  real signal; 390x844 phone viewport; every test asserts a COMPLETELY empty console. The double
-  records `joins` / `offers` / `configures` and has `dropConnection()` + `failConnects` controls.
-  The spec neutralises the SW registration and wraps `getUserMedia` to count the PAGE's prompts
-  (the double's "room audio" uses the unwrapped `window.__realGUM`).
+- **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
+  committed lockfile): `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
+  `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
+  `/api/state` / `/api/version` / a PNG at `/interkom.mjpeg`). Only the external Janus SERVER is
+  faked: the init script `fake-janus-server.js` replaces `window.WebSocket` for `…/janus` URLs with
+  an in-page socket speaking the Janus WS API (create/attach/message/trickle/keepalive/hangup/
+  detach/destroy + audiobridge join/configure) whose offers are answered by a REAL
+  `RTCPeerConnection` (sends a fake-device "room audio" track, receives the phone's mic). So SDP
+  directions, the renegotiation and the audio really flow through WebRTC; the double records
+  `joins` / `configures` / `offers` (with the audio direction) / `sessions`, and has
+  `dropConnection()`, `failConnects` and `inboundAudioBytes()`. **Never go back to a JS-API
+  double of janus.js** — the first one accepted any `createOffer` and hid the replace-path crash
+  above. Chromium fake media gives both meters a real signal; 390x844 viewport; every test asserts
+  a COMPLETELY empty console. The spec neutralises the SW registration and wraps `getUserMedia` to
+  count the PAGE's prompts (the double's room audio uses the unwrapped `window.__realGUM`).
 - **Local run under Tier-0 (no npm install needed):** borrow an existing `@playwright/test`
   (`NODE_PATH=<repo>/e2e/node_modules`, run its `cli.js test` from `intercom/tests/e2e`) and point
   `INTERKOM_E2E_CHROMIUM` at an installed Chromium when the revisions differ. Run it from a script
@@ -633,10 +654,14 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `HTMLMediaElement.prototype.play` rejects `NotAllowedError` until the first TRUSTED
   click/touchend/keydown (its own flag, not `userActivation`), and it counts any `AudioContext`
   created before that tap (must be 0).
-- **Live check against the real Janus (manual, receive-only):** `stub_hub.py --real-janus` + the
-  page at `/?janus=wss://interkom-lx.newlevel.media/janus` joined the live room, reached
-  `Pripojené` with the room audio playing and an empty console (25.9.2026). Never turn the mic ON
-  in such a live run — the fake-device beep would go into the camboxes' headsets.
+- **Live check against the real Janus (manual):** `stub_hub.py` (without the fake-server init
+  script) + the page at `/?janus=wss://interkom-lx.newlevel.media/janus` joined the live room,
+  reached `Pripojené` (transceiver `recvonly`) with the room audio playing and an empty console;
+  then a SILENT in-place renegotiation from `page.evaluate` (`await acquireMic("");
+  micTrack.enabled = false; pushMicToSession(false)` — the top-level functions/`let`s of the
+  classic script are reachable by name) came back `sendrecv` on the SAME session, still connected
+  (25.9.2026). Never turn the mic ON through the UI in such a live run — the fake-device beep would
+  go into the camboxes' headsets.
 - Gotchas kept from M3b: a python static test can't catch a JS/CSS runtime bug — run the browser
   check; and the service worker + HTTP cache serve a stale `app.js` across a same-origin re-run
   after an edit — verify on a FRESH origin (a different port).
