@@ -1,8 +1,10 @@
 // @ts-check
 // Real-browser E2E for the interkom phone PWA (issue 1345, owner ruling 25.9.2026 — the phone UX
-// rework). The page is the REAL intercom/web client served by stub_hub.py; only the external Janus
-// server is a test double (fake-janus.js). Chromium's fake media device gives a real audio signal
-// to both level meters. Every test asserts a completely clean browser console.
+// rework). The page is the REAL intercom/web client AND the real vendored janus.js, served by
+// stub_hub.py; only the external Janus SERVER is a test double (fake-janus-server.js: a WebSocket
+// double with a real in-page RTCPeerConnection), so SDP directions, renegotiation and audio really
+// flow through WebRTC. Chromium's fake media device gives both level meters a real signal. Every
+// test asserts a completely clean browser console.
 const fs = require("fs");
 const path = require("path");
 const { test, expect } = require("@playwright/test");
@@ -14,7 +16,8 @@ const SCREENSHOT_DIR = process.env.INTERKOM_E2E_SCREENSHOT_DIR || "";
 //   SW; Playwright's own `serviceWorkers: "block"` logs a console warning, which the zero-console
 //   gate would catch) — the same pattern as the bkshading panel spec;
 // - count the page's own getUserMedia calls, keeping the unwrapped one for the fake Janus's
-//   "room audio" (so the fake's remote track is never counted as a mic permission request).
+//   "room audio" (so the fake's remote track is never counted as a mic permission request);
+// - install the fake Janus server.
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     if (navigator.serviceWorker) {
@@ -34,6 +37,7 @@ test.beforeEach(async ({ page }) => {
       };
     }
   });
+  await page.addInitScript({ path: path.join(__dirname, "fake-janus-server.js") });
 });
 
 function watchConsole(page) {
@@ -61,7 +65,6 @@ async function fake(page) {
       joins: f.joins,
       offers: f.offers,
       configures: f.configures,
-      replaces: f.replaces,
       gumCalls: window.__gumCalls,
     };
   });
@@ -120,7 +123,7 @@ test("opening the link joins receive-only with the mic OFF, and the incoming met
   expect(f.joins.length).toBe(1);
   expect(f.joins[0].muted).toBe(true);
   expect(f.joins[0].display).toBe("Kamera 1");
-  expect(f.offers[0]).toMatchObject({ capture: false, recv: true });
+  expect(f.offers[0].direction, "the auto-join offer is receive-only").toBe("recvonly");
   expect(f.gumCalls, "no microphone permission is requested on load").toBe(0);
 
   // The incoming ("Strihač / réžia") meter shows the live room audio.
@@ -157,11 +160,20 @@ test("the mic toggle asks for permission once, sends my mic with a live meter, a
 
   let f = await fake(page);
   expect(f.gumCalls, "the first mic ON asks for the microphone").toBe(1);
-  const reneg = f.offers[f.offers.length - 1];
-  expect(reneg).toMatchObject({ capture: true, recv: true, replace: true });
+  await expect.poll(async () => (await fake(page)).offers.length).toBe(2);
+  f = await fake(page);
+  expect(f.offers[1].direction, "the first mic ON re-negotiates the same session with send").toBe("sendrecv");
+  expect(f.sessions, "the session is NOT rebuilt for the mic").toBe(1);
+  expect(f.joins.length).toBe(1);
   const on = f.configures[f.configures.length - 1];
   expect(on.message.muted).toBe(false);
-  expect(on.jsep, "the first mic ON re-negotiates with send").toBe(true);
+  expect(on.jsep).toBe(true);
+  await expect(page.locator('[data-role="conn"]')).toHaveAttribute("data-state", "connected");
+  // The mic audio really reaches the (fake) Janus over WebRTC.
+  const before = await page.evaluate(() => window.__fakeJanus.inboundAudioBytes());
+  await expect
+    .poll(async () => page.evaluate(() => window.__fakeJanus.inboundAudioBytes()), { timeout: 10000 })
+    .toBeGreaterThan(before + 1000);
 
   const micMeter = page.locator('[data-role="meter-mic"]');
   await expect(micMeter).toBeVisible();
@@ -182,9 +194,26 @@ test("the mic toggle asks for permission once, sends my mic with a live meter, a
   await expect(mic).toHaveAttribute("data-muted", "false");
   f = await fake(page);
   expect(f.gumCalls).toBe(1);
+  expect(f.offers.length, "ON again does not re-negotiate").toBe(2);
   const again = f.configures[f.configures.length - 1];
   expect(again.message.muted).toBe(false);
   expect(again.jsep).toBe(false);
+
+  // Another mic from the settings sheet: a fresh getUserMedia, swapped in place — no new offer,
+  // no new session, the connection stays up.
+  await page.locator('[data-role="settings-open"]').click();
+  const select = page.locator('[data-role="mic-select"]');
+  await expect.poll(async () => select.locator("option").count()).toBeGreaterThan(2);
+  const other = await select.locator("option").nth(2).getAttribute("value");
+  await select.selectOption(other);
+  await page.locator('[data-role="settings-close"]').click();
+  await expect.poll(async () => (await fake(page)).gumCalls).toBe(2);
+  f = await fake(page);
+  expect(f.offers.length, "a device change is a plain track swap").toBe(2);
+  expect(f.sessions).toBe(1);
+  await expect(page.locator('[data-role="conn"]')).toHaveAttribute("data-state", "connected");
+  await expect(mic).toHaveAttribute("data-muted", "false");
+  expectMoving(await meterSamples(page, "meter-mic", 2500), "own mic meter after a device change");
 
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
@@ -227,13 +256,17 @@ test("a dropped connection shows the reconnect state and reconnects with the mic
   const conn = page.locator('[data-role="conn"]');
   await expect(conn).toHaveAttribute("data-state", "reconnecting");
   await expect(conn).toContainText("Odpojené – skúšam znova");
+  // The mic stays ON but never claims "they hear you" while the session is down.
+  await expect(page.locator('[data-role="mic-hint"]')).toHaveText("Zapnutý — čakám na spojenie");
+  await expect(page.locator('[data-role="meter-in-state"]')).toHaveText("čakám…");
   await shot(page, testInfo, "phone-390x844-reconnecting.png");
 
   await expectConnected(page);
   const f = await fake(page);
   expect(f.joins.length, "the page joined again on its own").toBe(2);
   const offer = f.offers[f.offers.length - 1];
-  expect(offer.capture, "the rebuilt session sends the mic that was ON").toBe(true);
+  expect(offer.direction, "the rebuilt session sends the mic that was ON").toBe("sendrecv");
+  await expect(page.locator('[data-role="mic-hint"]')).toContainText("Počujú ťa");
   const cfg = f.configures[f.configures.length - 1];
   expect(cfg.message.muted).toBe(false);
   expect(f.gumCalls, "no new permission prompt after a reconnect").toBe(1);

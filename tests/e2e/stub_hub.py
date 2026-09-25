@@ -8,10 +8,9 @@ Serves the REAL embedded client (`intercom/web/*`) exactly the way the hub's `ht
 - `/api/state`   -> a minimal hub state with two participants
 - `/interkom.mjpeg` -> a small generated PNG (the page shows it in an <img>; the format does not
   matter to the browser, only that the route answers 200 with an image)
-- `/janus.js`    -> the test double `fake-janus.js` (the real Janus is an external network service
-  the test cannot run; the double answers the audiobridge join/configure and hands the page a
-  fake-device audio track, so the page's own code runs unmodified). `--real-janus` serves the
-  vendored library instead, for a manual run against a live Janus.
+- `/janus.js`    -> the REAL vendored janus.js. The external Janus SERVER is faked inside the page
+  by the spec's init script `fake-janus-server.js` (a WebSocket double with a real in-page
+  RTCPeerConnection), so the page's own code AND the library run unmodified.
 
 Standard library only. `--port` picks the port; `/__health` is the Playwright readiness URL.
 """
@@ -56,7 +55,7 @@ def picture_png(width=320, height=180):
             + chunk(b"IEND", b""))
 
 
-def make_handler(version, real_janus):
+def make_handler(version):
     picture = picture_png()
 
     class Handler(BaseHTTPRequestHandler):
@@ -82,8 +81,7 @@ def make_handler(version, real_janus):
                     html = f.read().replace("{{VERSION}}", version)
                 return self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
             if path == "/janus.js":
-                src = os.path.join(WEB, "janus.js") if real_janus else os.path.join(HERE, "fake-janus.js")
-                with open(src, "rb") as f:
+                with open(os.path.join(WEB, "janus.js"), "rb") as f:
                     return self._send(200, "text/javascript; charset=utf-8", f.read())
             if path == "/api/version":
                 return self._send(200, "application/json", json.dumps({"version": version}).encode())
@@ -106,9 +104,8 @@ def main():
     ap.add_argument("--port", type=int, default=8792)
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--version", default="1.7.0-dev.999")
-    ap.add_argument("--real-janus", action="store_true", help="serve the vendored janus.js")
     args = ap.parse_args()
-    server = ThreadingHTTPServer((args.bind, args.port), make_handler(args.version, args.real_janus))
+    server = ThreadingHTTPServer((args.bind, args.port), make_handler(args.version))
     server.serve_forever()
 
 
