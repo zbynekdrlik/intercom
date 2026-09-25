@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use intercom_hub::janus_pacing::{
-    rx_gap, IntervalStats, PaceSchedule, PacedRing, PopKind, RxGap, FRAME_48K, MAX_CONCEAL_FRAMES,
-    RING_CAP_FRAMES, RING_TARGET_FRAMES, TICK,
+    hub_block_period, rx_gap, IntervalStats, PaceSchedule, PacedRing, PopKind, RxGap, FRAME_48K,
+    MAX_CONCEAL_FRAMES, MAX_MISORDER, RING_CAP_FRAMES, RING_TARGET_FRAMES, TICK,
 };
 
 const BLOCK: usize = 256;
@@ -157,6 +157,153 @@ fn block_loop_feed_against_the_20ms_pop_never_underflows_or_trims() {
     );
 }
 
+// --- the block clock + the ring's fill servo (review round 1) --------------------------------
+
+/// The block loop's period must be exact. `256 * 1_000_000 / 48_000` in whole µs is 5333 µs, not
+/// 5333.33: the loop then ran 62.5 ppm fast, so every egress (the Janus ring, VBAN to the camboxes,
+/// the PipeWire sinks) gained ~3 samples/s against a 48 kHz consumer.
+#[test]
+fn hub_block_period_is_exact_to_the_nanosecond() {
+    assert_eq!(
+        hub_block_period(256, 48_000),
+        Duration::from_nanos(5_333_333)
+    );
+    assert_eq!(hub_block_period(480, 48_000), Duration::from_millis(10));
+    // One hour of blocks is one hour to well under a millisecond (the µs version was 225 ms off).
+    let blocks_per_hour = 3600 * 48_000 / 256;
+    let hour = hub_block_period(256, 48_000) * blocks_per_hour;
+    assert!(Duration::from_secs(3600) - hour < Duration::from_millis(1));
+    // A degenerate rate never divides by zero.
+    assert_eq!(hub_block_period(256, 0), Duration::ZERO);
+}
+
+/// What a long feed-vs-pop run did to the ring.
+struct SimResult {
+    ring: PacedRing,
+    audio: u64,
+    min_before_pop: usize,
+    max_before_pop: usize,
+}
+
+/// Feed 256-frame blocks every `block_us` (skipping one block every `skip_every_s` seconds, as a
+/// late tokio tick with `MissedTickBehavior::Skip` does) against the 20 ms pop, for `secs`.
+fn simulate(block_us: f64, secs: f64, skip_every_s: Option<f64>) -> SimResult {
+    let mut ring = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
+    let mut next_block = 0.0f64;
+    let mut next_tick = 20_000.0f64;
+    let mut next_skip = skip_every_s.map(|s| s * 1e6);
+    let mut audio = 0u64;
+    let mut min_before_pop = usize::MAX;
+    let mut max_before_pop = 0usize;
+    let end = secs * 1e6;
+    while next_tick < end {
+        if next_block <= next_tick {
+            let skip = matches!(next_skip, Some(at) if next_block >= at);
+            if skip {
+                next_skip = next_skip.map(|at| at + skip_every_s.unwrap_or(0.0) * 1e6);
+            } else {
+                ring.push(&[1i16; BLOCK]);
+            }
+            next_block += block_us;
+        } else {
+            let before = ring.fill();
+            let (_, k) = ring.pop_frame();
+            if k == PopKind::Audio {
+                audio += 1;
+                if next_tick > 5e6 {
+                    min_before_pop = min_before_pop.min(before);
+                    max_before_pop = max_before_pop.max(before);
+                }
+            }
+            next_tick += 20_000.0;
+        }
+    }
+    SimResult {
+        ring,
+        audio,
+        min_before_pop,
+        max_before_pop,
+    }
+}
+
+#[test]
+fn a_fast_feed_is_absorbed_by_1ms_drops_never_a_60ms_trim() {
+    // The old truncated 5333 µs period: 62.5 ppm fast, 20 minutes.
+    let r = simulate(5333.0, 1200.0, None);
+    assert_eq!(r.ring.trims(), 0, "no overflow cliff");
+    assert_eq!(r.ring.underflows(), 0);
+    assert!(r.ring.servo_drops() > 0, "the servo dropped the excess");
+    assert_eq!(r.ring.servo_repeats(), 0);
+    assert!(
+        r.max_before_pop <= RING_TARGET_FRAMES + FRAME_48K,
+        "latency stays bounded, max fill {}",
+        r.max_before_pop
+    );
+}
+
+#[test]
+fn a_slow_feed_is_absorbed_by_1ms_repeats_never_a_silent_frame() {
+    // 62.5 ppm slow, 20 minutes.
+    let r = simulate(5333.667, 1200.0, None);
+    assert_eq!(r.ring.underflows(), 0, "no silence bridge");
+    assert_eq!(r.ring.trims(), 0);
+    assert!(r.ring.servo_repeats() > 0, "the servo filled the deficit");
+    assert!(
+        r.min_before_pop >= FRAME_48K,
+        "min fill {}",
+        r.min_before_pop
+    );
+}
+
+#[test]
+fn skipped_mix_blocks_are_recovered_without_an_underflow() {
+    // The exact rate, but the block loop misses one tick every 30 s (256 samples lost each time).
+    let r = simulate(1e6 * 256.0 / 48_000.0, 1200.0, Some(30.0));
+    assert_eq!(r.ring.underflows(), 0, "no silence bridge");
+    assert_eq!(r.ring.trims(), 0);
+    assert!(r.ring.servo_repeats() > 0);
+    assert!(
+        r.audio >= 59_990,
+        "every tick carries audio, got {}",
+        r.audio
+    );
+}
+
+#[test]
+fn the_servo_leaves_a_steady_exact_feed_alone() {
+    let r = simulate(1e6 * 256.0 / 48_000.0, 600.0, None);
+    assert_eq!(r.ring.servo_drops(), 0);
+    assert_eq!(r.ring.servo_repeats(), 0);
+    assert_eq!(r.ring.underflows(), 0);
+    assert_eq!(r.ring.trims(), 0);
+}
+
+#[test]
+fn a_servo_repeat_keeps_the_frame_whole_and_continuous() {
+    // Fill that sits below the low threshold for a whole second: the next pop takes 1 ms less and
+    // repeats its own last millisecond, so the frame is still exactly 960 samples of real audio.
+    let mut r = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
+    r.push(&ramp(0, RING_TARGET_FRAMES));
+    let mut last = Vec::new();
+    for _ in 0..200 {
+        let low = RING_TARGET_FRAMES - FRAME_48K / 2;
+        if r.fill() < low {
+            r.push(&ramp(3, low - r.fill()));
+        }
+        let (f, k) = r.pop_frame();
+        assert_eq!(k, PopKind::Audio);
+        assert_eq!(f.len(), FRAME_48K);
+        last = f;
+        if r.servo_repeats() > 0 {
+            break;
+        }
+    }
+    assert!(r.servo_repeats() > 0, "the servo acted");
+    let tail = &last[FRAME_48K - 48..];
+    let before = &last[FRAME_48K - 96..FRAME_48K - 48];
+    assert_eq!(tail, before, "the last millisecond is repeated");
+}
+
 // --- the schedule ----------------------------------------------------------------------------
 
 /// Deadlines are exact multiples of 20 ms from the start, however late each wake-up is — the
@@ -290,4 +437,22 @@ fn rx_gap_classifies_sequence_numbers() {
     );
     assert_eq!(rx_gap(Some(10), 10), RxGap::Stale, "duplicate");
     assert_eq!(rx_gap(Some(10), 9), RxGap::Stale, "reordered late packet");
+}
+
+/// Review round 1: only a SMALL backward step is a late packet. A big backward jump (a new sender,
+/// or one stray packet far ahead) is a fresh start, so the real stream is never locked out for
+/// up to 32 768 packets (~11 minutes).
+#[test]
+fn rx_gap_treats_a_big_backward_jump_as_a_restart() {
+    assert_eq!(MAX_MISORDER, 100);
+    assert_eq!(rx_gap(Some(30_000), 0), RxGap::Resync);
+    assert_eq!(
+        rx_gap(Some(10), 10u16.wrapping_sub(MAX_MISORDER)),
+        RxGap::Stale
+    );
+    assert_eq!(
+        rx_gap(Some(10), 10u16.wrapping_sub(MAX_MISORDER + 1)),
+        RxGap::Resync
+    );
+    assert_eq!(rx_gap(Some(10), 10u16.wrapping_add(0x8000)), RxGap::Resync);
 }

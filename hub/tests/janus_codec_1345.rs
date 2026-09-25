@@ -70,10 +70,7 @@ fn opus_conceals_a_lost_packet_so_the_timeline_stays_whole() {
         total += d.samples.len();
         concealed += d.concealed_frames;
     }
-    assert_eq!(
-        concealed, 1,
-        "the one lost frame is concealed (FEC from the next packet)"
-    );
+    assert_eq!(concealed, 1, "the one lost frame is concealed (FEC or PLC)");
     assert_eq!(total, 10 * FRAME_48K, "no hole in the decoded timeline");
 }
 
@@ -93,6 +90,38 @@ fn opus_decoder_drops_duplicates_and_resyncs_after_a_long_gap() {
     let far = dec.decode(5000, &pkts[1]).unwrap();
     assert_eq!(far.samples.len(), FRAME_48K);
     assert_eq!(far.concealed_frames, 0);
+}
+
+/// Review round 1: a new sender (a new SSRC) starts a fresh sequence, so a stream whose numbers are
+/// far BEHIND the last accepted packet must not be dropped as late.
+#[test]
+fn a_new_ssrc_restarts_the_sequence_plan() {
+    let input = tone(2);
+    let mut enc = TxEncoder::new(JanusCodec::Opus).unwrap();
+    let pkts: Vec<Vec<u8>> = input
+        .chunks(FRAME_48K)
+        .map(|f| enc.encode(f).unwrap())
+        .collect();
+    let mut dec = RxDecoder::new(JanusCodec::Opus).unwrap();
+    dec.observe_ssrc(0xAAAA);
+    assert_eq!(
+        dec.decode(40_000, &pkts[0]).unwrap().samples.len(),
+        FRAME_48K
+    );
+    dec.observe_ssrc(0xBBBB);
+    let fresh = dec.decode(39_990, &pkts[1]).unwrap();
+    assert_eq!(
+        fresh.samples.len(),
+        FRAME_48K,
+        "not dropped as a late packet"
+    );
+    assert_eq!(fresh.concealed_frames, 0);
+    // The same SSRC again changes nothing.
+    dec.observe_ssrc(0xBBBB);
+    assert!(
+        dec.decode(39_990, &pkts[1]).unwrap().samples.is_empty(),
+        "a duplicate"
+    );
 }
 
 #[test]

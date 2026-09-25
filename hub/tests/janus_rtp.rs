@@ -5,9 +5,10 @@
 //! `muted` field, and the transport/plugin `error` shapes.
 
 use intercom_hub::janus_rtp::{
-    build_attach, build_configure, build_create, build_join, build_keepalive, build_leave,
-    parse_error, parse_joined, parse_success_id, rtp_depacketize, JanusCodec, JoinSpec, JoinedInfo,
-    RtpPacketizer, AUDIOBRIDGE_PLUGIN, OPUS_PAYLOAD_TYPE, PCMU_PAYLOAD_TYPE, RTP_HEADER_LEN,
+    build_attach, build_configure, build_create, build_destroy, build_join, build_keepalive,
+    build_leave, is_session_peer, parse_error, parse_joined, parse_success_id, rtp_depacketize,
+    JanusCodec, JoinSpec, JoinedInfo, RtpPacketizer, AUDIOBRIDGE_PLUGIN, OPUS_PAYLOAD_TYPE,
+    PCMU_PAYLOAD_TYPE, RTP_HEADER_LEN,
 };
 use serde_json::json;
 
@@ -210,6 +211,49 @@ fn build_configure_muted_field() {
     assert_eq!(v["janus"], "message");
     assert_eq!(v["body"]["request"], "configure");
     assert_eq!(v["body"]["muted"], false);
+}
+
+#[test]
+fn build_destroy_shape() {
+    // Review round 1: before re-joining, the hub destroys its old session so the old participant's
+    // room mix stops arriving on the same local port.
+    assert_eq!(
+        build_destroy("d1"),
+        json!({ "janus": "destroy", "transaction": "d1" })
+    );
+}
+
+#[test]
+fn only_the_session_peer_is_accepted() {
+    let peer: std::net::SocketAddr = "10.77.9.202:10000".parse().unwrap();
+    assert!(is_session_peer("10.77.9.202:10000".parse().unwrap(), peer));
+    assert!(
+        !is_session_peer("10.77.9.202:10002".parse().unwrap(), peer),
+        "an old session's port"
+    );
+    assert!(
+        !is_session_peer("10.77.9.50:10000".parse().unwrap(), peer),
+        "another host"
+    );
+    // Janus may advertise an unspecified address: then only the port is compared.
+    let any: std::net::SocketAddr = "0.0.0.0:10000".parse().unwrap();
+    assert!(is_session_peer("10.77.9.202:10000".parse().unwrap(), any));
+    assert!(!is_session_peer("10.77.9.202:9999".parse().unwrap(), any));
+}
+
+#[test]
+fn a_skipped_frame_advances_seq_and_timestamp_without_a_packet() {
+    // Review round 1: when a frame cannot be encoded, RTP time still moves on, so Janus sees one
+    // lost packet instead of a stream that falls 20 ms behind the wall clock.
+    let mut p = RtpPacketizer::with_payload_type(9, OPUS_PAYLOAD_TYPE);
+    let a = p.packetize_samples(&[1u8; 40], 960);
+    p.skip(960);
+    let b = p.packetize_samples(&[2u8; 40], 960);
+    let seq = |x: &[u8]| u16::from_be_bytes([x[2], x[3]]);
+    let ts = |x: &[u8]| u32::from_be_bytes([x[4], x[5], x[6], x[7]]);
+    assert_eq!(seq(&b), seq(&a) + 2);
+    assert_eq!(ts(&b), ts(&a) + 1920);
+    assert_eq!(b[1] & 0x80, 0, "a skip is not a new talkspurt");
 }
 
 #[test]
