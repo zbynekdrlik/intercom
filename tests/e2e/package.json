@@ -1,0 +1,12 @@
+{
+  "name": "interkom-phone-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright E2E for the interkom phone PWA (issue 1345 phone UX rework)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

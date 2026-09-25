@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Interkom phone PWA structural tests (issue 1345 M3b).
 
-The strih-lx intercom hub serves an installable phone web app (PWA) at `/` — a cameraman opens ONE
-link, taps "Pripojiť" (the single autoplay + getUserMedia gesture), immediately hears the intercom
-(WebRTC via a vendored janus.js → Janus audiobridge) and sees the Interkom picture (MJPEG from the
-hub, M3c / issue 1347), and can rarely pick a mic and unmute it.
+The strih-lx intercom hub serves an installable phone web app (PWA) at `/`. Owner ruling 25.9.2026
+(the phone UX rework): opening the link CONNECTS immediately, receive-only, with the microphone OFF
+(no connect button). The page shows three live answers: the connection state, a live level meter of
+the incoming audio ("Strihač / réžia") and one huge mic toggle with a live meter of my own mic. The
+Interkom picture (MJPEG from the hub) fills the width and a tap makes it fullscreen. Audio is WebRTC
+via a vendored janus.js → Janus audiobridge.
 
 These stdlib-only structural tests run in the `python-tests` CI job (no browser, no Rust toolchain).
 They pin the PWA CONTRACT so the embedded assets can't silently regress:
@@ -12,16 +14,18 @@ They pin the PWA CONTRACT so the embedded assets can't silently regress:
  - the manifest is an installable standalone app with 192/512 + maskable icons;
  - the service worker is a pure passthrough (NO Cache Storage API — a cached intercom client is a
    broken one);
- - the page has EXACTLY ONE primary connect button (the gesture), a mic <select>, a mic toggle that
-   DEFAULTS TO MUTED, and the <img> that shows the /interkom.mjpeg picture;
- - app.js joins the room MUTED (`muted: true`), talks to Janus over a PATH-RELATIVE `/janus` WS URL
+ - the page has NO connect button, an unmistakable connection state, both live meters, a mic
+   <select> (in the settings sheet), a mic toggle that DEFAULTS TO MUTED, the one-time
+   "Ťukni pre zvuk" layer (hidden by default) and the <img> that shows the /interkom.mjpeg picture;
+ - app.js auto-joins the room RECEIVE-ONLY and MUTED (`muted: true`) at boot, asks for the mic only
+   on the first mic ON, reconnects with backoff, talks to Janus over a PATH-RELATIVE `/janus` WS URL
    (derived from location.host, never a hard-coded host), and NEVER logs to the console on a handled
-   failure (browser-console-zero-errors — failures become status chips);
+   failure (browser-console-zero-errors — failures become visible page state);
  - the vendored janus.js keeps its MIT licence header and its pinned tag is recorded in VENDORED.md;
  - NO `localhost` / `127.0.0.1` appears anywhere in the served assets.
 
-A python static test CANNOT catch a JS/CSS runtime bug — the real browser check is a Playwright run
-against the hub-served page (a Tier-0 lane runs it against `python3 -m http.server intercom/web`).
+A python static test CANNOT catch a JS/CSS runtime bug — the real browser check is the Playwright
+spec `intercom/web/tests/e2e/phone.spec.js` (stub hub + a fake Janus, Chromium fake media).
 Runnable directly (`python3 tests/python/test_intercom_webui_1345.py`) or under pytest.
 """
 import json
@@ -92,15 +96,35 @@ def test_index_links_manifest_and_serves_pwa_icons():
     assert 'name="theme-color"' in html
 
 
-def test_index_has_exactly_one_primary_connect_button():
+def test_index_has_no_connect_button_and_an_unmistakable_connection_state():
     html = _read(INDEX)
-    # EXACTLY ONE big primary action (the autoplay/getUserMedia gesture).
-    primary = re.findall(r'class="[^"]*\bbtn-primary\b[^"]*"', html)
-    assert len(primary) == 1, "expected exactly ONE primary connect button, found %d" % len(primary)
-    connect = re.findall(r'data-role="connect"', html)
-    assert len(connect) == 1, "expected exactly ONE data-role=connect element"
-    # The Slovak connect label the cameraman taps.
-    assert "Pripojiť" in html
+    # Owner ruling 25.9.2026: opening the link = connected. No connect button at all.
+    assert 'data-role="connect"' not in html, "the connect button is gone (auto-join)"
+    assert "Pripojiť" not in html, "no 'Pripojiť' label on the page"
+    # The ONE connection indicator starts in the connecting state.
+    tag = re.search(r'<[a-z]+[^>]*data-role="conn"[^>]*>', html)
+    assert tag, "a data-role=conn connection indicator is present"
+    assert 'data-state="connecting"' in tag.group(0), "it starts in the connecting state"
+    assert "Pripájam…" in html, "its initial Slovak text is 'Pripájam…'"
+    # The old technical chips (Hub/Janus/Zvuk/Obraz) are gone from the main screen.
+    assert 'data-role="chips"' not in html, "no technical status chips on the main screen"
+
+
+def test_index_has_both_live_meters():
+    html = _read(INDEX)
+    assert 'data-role="meter-in"' in html, "the incoming-audio meter is present"
+    assert "Strihač / réžia" in html, "the incoming meter is labelled 'Strihač / réžia'"
+    assert 'data-role="meter-mic"' in html, "my own mic meter is present"
+
+
+def test_index_has_hidden_tap_for_sound_layer_and_name_sheet():
+    html = _read(INDEX)
+    tap = re.search(r'<[a-z]+[^>]*data-role="tap-for-sound"[^>]*>', html)
+    assert tap, "the one-time 'Ťukni pre zvuk' layer is present"
+    assert re.search(r"\bhidden\b", tap.group(0)), "it is hidden by default"
+    assert "Ťukni pre zvuk" in html
+    assert 'data-role="name-sheet"' in html, "the one-time name sheet is present"
+    assert 'data-role="settings"' in html, "the small settings sheet is present"
 
 
 def test_index_has_mic_select_and_muted_default_toggle():
@@ -148,7 +172,7 @@ def test_app_js_never_logs_console_error_on_failure():
     assert "console.error" not in js, "handled failures must become chips, never console.error"
     assert "console.warn" not in js, "handled failures must become chips, never console.warn"
     # Failures are surfaced as chips instead.
-    assert "chip(" in js, "app.js surfaces state via chips"
+    assert "setConn(" in js, "app.js surfaces the connection state on the page"
 
 
 def test_no_localhost_in_served_assets():
@@ -170,46 +194,64 @@ def test_vendored_janus_keeps_mit_header_and_pinned_tag():
     assert "meetecho/janus-gateway" in vend, "VENDORED.md names the upstream repo"
 
 
-# --- Listen-only join when the microphone is unavailable/denied (issue 1345 M3 follow-up) --------
-# A cameraman who refuses (or has no) microphone must STILL join the room receive-only and HEAR the
-# intercom — never dead-end at the old `Janus: mic chyba` chip. app.js falls back from the send+recv
-# offer to a recv-only offer, disables the mic controls, and shows a listening chip.
-def test_app_js_listen_only_joins_recv_only_when_mic_unavailable():
+# --- Phone UX rework (owner ruling 25.9.2026) ---------------------------------------------------
+def _boot_section(js):
+    idx = js.find("// ---- Boot")
+    assert idx != -1, "app.js has a '// ---- Boot' section"
+    return js[idx:]
+
+
+def test_app_js_auto_joins_receive_only_at_boot():
     js = _read(APP_JS)
-    assert "joinListenOnly" in js, "app.js has a listen-only join path"
-    # The listen-only offer is RECV-ONLY: a recv track with NO `capture` (so janus.js never calls
-    # getUserMedia). The send path uses `capture, recv` — this regex matches only the recv-only one.
+    assert "startSession(" in _boot_section(js), "the page starts the Janus session at boot"
+    # The first offer is RECV-ONLY: a recv track with NO capture, so no getUserMedia at load.
     assert re.search(r'tracks:\s*\[\{\s*type:\s*"audio",\s*recv:\s*true\s*\}\]', js), (
-        "the listen-only offer is recv-only (a recv track with no capture)"
+        "the auto-join offer is receive-only"
     )
-    # The mic failure is classified (getUserMedia NotFoundError/NotAllowedError/…) before falling
-    # back — a non-mic signalling error is NOT silently turned into listen-only.
-    assert "isMicError" in js, "the mic failure is classified before falling back to listen-only"
 
 
-def test_app_js_listen_only_disables_mic_controls_and_shows_chip():
+def test_app_js_asks_for_the_mic_only_in_the_mic_path():
     js = _read(APP_JS)
-    assert re.search(r"micToggle\.disabled\s*=\s*true", js), "listen-only disables the mic toggle"
-    assert re.search(r"micSelect\.disabled\s*=\s*true", js), "listen-only disables the mic select"
-    assert "Mikrofón: nedostupný (počúvate)" in js, (
-        "listen-only shows the 'mic unavailable, listening' chip"
-    )
-    # The old dead-end chip is GONE — a mic-less cameraman is never left stuck at an error.
-    assert "Janus: mic chyba" not in js, (
-        "the dead-end mic-error chip must be replaced by the listen-only fallback"
-    )
+    calls = [m.start() for m in re.finditer(r"getUserMedia\(", js)]
+    assert len(calls) == 1, "exactly one getUserMedia call site, found %d" % len(calls)
+    fn = js.find("async function acquireMic(")
+    assert fn != -1, "acquireMic() exists"
+    nxt = js.find("\nfunction ", fn + 1)
+    nxt_async = js.find("\nasync function ", fn + 1)
+    ends = [e for e in (nxt, nxt_async) if e != -1]
+    body = js[fn:min(ends)] if ends else js[fn:]
+    assert "getUserMedia(" in body, "the only getUserMedia call lives in acquireMic()"
+    assert "getUserMedia(" not in _boot_section(js), "boot never asks for the mic"
 
 
-def test_app_js_listen_only_resets_on_reconnect():
+def test_app_js_drives_live_level_meters_from_webaudio():
     js = _read(APP_JS)
-    # A second "Pripojiť" cycle re-enables the mic controls so a re-granted mic re-negotiates WITH
-    # send (design: the re-grant path).
-    assert re.search(r"micToggle\.disabled\s*=\s*false", js), (
-        "a fresh connect re-enables the mic toggle (re-grant path)"
-    )
-    assert re.search(r"micSelect\.disabled\s*=\s*false", js), (
-        "a fresh connect re-enables the mic select (re-grant path)"
-    )
+    assert "createAnalyser(" in js, "the meters use a WebAudio AnalyserNode"
+    assert "requestAnimationFrame(" in js, "the meters are redrawn live"
+
+
+def test_app_js_reconnects_with_backoff_and_shows_it():
+    js = _read(APP_JS)
+    assert "scheduleReconnect(" in js, "a lost session schedules a reconnect"
+    assert "Odpojené – skúšam znova" in js, "the reconnect state is shown in Slovak"
+    assert "Pripojené" in js, "the connected state is shown in Slovak"
+    assert re.search(r"RECONNECT_MAX_MS\s*=", js), "the backoff has a cap"
+
+
+def test_picture_tap_goes_fullscreen_with_a_css_fallback():
+    js = _read(APP_JS)
+    css = _read(STYLE)
+    html = _read(INDEX)
+    assert "requestFullscreen" in js, "a tap on the picture uses the Fullscreen API"
+    assert ".is-max" in css, "a CSS maximised overlay is the fallback (iPhone has no element fullscreen)"
+    assert "user-scalable=no" not in html and "maximum-scale=1" not in html, "pinch-zoom stays allowed"
+
+
+def test_app_js_remembers_the_name_and_keeps_listening_when_the_mic_is_denied():
+    js = _read(APP_JS)
+    assert "interkom.display" in js, "the display name is remembered in localStorage"
+    # A denied mic never tears the session down: the page keeps listening and says so.
+    assert 'setMicUi("denied")' in js, "a denied mic shows a clear denied state"
 
 
 if __name__ == "__main__":

@@ -73,9 +73,19 @@ fn index_is_the_pwa_and_injects_the_version() {
         html.contains("/manifest.webmanifest"),
         "the PWA index links the manifest"
     );
+    // Owner ruling 25.9.2026: opening the link connects immediately — no connect button, one
+    // unmistakable connection indicator instead.
     assert!(
-        html.contains("data-role=\"connect\""),
-        "the connect gesture button is present"
+        !html.contains("data-role=\"connect\""),
+        "the connect button is gone (the page auto-joins)"
+    );
+    assert!(
+        html.contains("data-role=\"conn\""),
+        "the connection state indicator is present"
+    );
+    assert!(
+        html.contains("data-role=\"mic-toggle\""),
+        "the mic toggle is present"
     );
     assert!(
         html.contains("id=\"interkom\""),

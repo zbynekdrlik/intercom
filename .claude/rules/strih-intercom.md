@@ -590,14 +590,60 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `/api/state`, `/ws` stay byte-identical. Each asset has a pure `*_asset()` fn + a
   `*_CONTENT_TYPE` const so the route tests (`intercom/hub/tests/webui_assets_1345.rs`) pin the
   payload + type without a server. `/sw.js` carries `Service-Worker-Allowed: /`. NO new crate.
-- **The page contract** (`index.html` + `app.js`, Slovak UI): ONE big primary "Pripojiť" button is
-  the single autoplay + `getUserMedia` gesture → it connects janus.js, attaches
-  `janus.plugin.audiobridge`, joins room 1000 MUTED (`muted: true` in BOTH the `join` and the
-  `configure` payload), and starts the room mix in an `<audio autoplay playsinline>`. The mic
-  `<select>` is filled from `enumerateDevices()` (labels appear only after the first grant); the
-  big "Mikrofón" toggle DEFAULTS OFF (`data-muted="true"`, `aria-pressed="false"`), turns red when
-  ON, and calls `configure {muted:false}` / `replaceTracks` on a device change. The display name is
-  typed once and remembered in `localStorage`.
+- **The page contract — the phone UX rework (owner ruling 25.9.2026, design comment 5828494404).**
+  Opening the link CONNECTS: there is NO connect button. At boot `startSession()` joins room 1000
+  MUTED (`muted: true`) with a RECEIVE-ONLY offer (`tracks: [{ type: "audio", recv: true }]`, no
+  `capture`, so no `getUserMedia` and no permission prompt at load). The screen answers three
+  questions with LIVE data, never a static label:
+  - **Connection** — one bar `data-role="conn"`: `Pripojené` (green) / `Pripájam…` (amber) /
+    `Odpojené – skúšam znova` (red + a countdown). "Connected" = `webrtcState(true)`, not just the
+    join reply. A lost WS, an ICE `failed`, a join error, `oncleanup`, or a session with no media
+    after 15 s → `scheduleReconnect()` with a 1 s → 15 s backoff (`RECONNECT_MAX_MS`); `online` and
+    "page visible again" retry at once. Every Janus callback checks a session generation counter,
+    so a torn-down session never acts.
+  - **Incoming** — `data-role="meter-in"` labelled "Strihač / réžia": a WebAudio `AnalyserNode` on
+    the received track (analysed only, never routed to the speakers), RMS dBFS with fast attack /
+    30 dB/s release, `data-db` + `data-active` for tests, "hovorí" / "ticho".
+  - **My mic** — one huge toggle (`data-muted="true"` by default). `acquireMic()` is the ONLY
+    `getUserMedia` call site, reached on the first ON; the SAME session is then re-negotiated in
+    place: `pushMicToSession()` puts the track on the audio transceiver's sender itself
+    (`sender.replaceTrack` + direction `sendrecv`) and calls `createOffer({tracks: []})` +
+    `configure` with the jsep. A device change is a plain sender swap (no renegotiation). A mic
+    change while an offer is out waits for that answer (`negotiating` / `micPushPending`); an offer
+    Janus rejects (an error event while negotiating) or leaves unanswered for 10 s
+    (`ANSWER_TIMEOUT_MS`) rebuilds the session, which then offers WITH the mic. OFF =
+    `configure {muted:true}` + `track.enabled=false`; ON again only unmutes. The granted track is
+    kept (`dontStop`) so a reconnect offers WITH it (janus.js's add path, no second prompt) and
+    keeps the mic state. A denied mic shows `setMicUi("denied")` and the page keeps listening.
+    While ON the button is red with a live meter of my own mic (`data-role="meter-mic"`); the hint
+    says "Počujú ťa" only while connected, else "Zapnutý — čakám na spojenie".
+  - **GOTCHA — janus.js 1.1.2's replace path crashes after a receive-only offer.** `createOffer`
+    with `replace:true` and `replaceTracks` end in `config.myStream.addTrack(nt)`, but `myStream`
+    is only created on the ADD path, so after a recv-only first offer it is null: a TypeError, the
+    offer's `error`, and (in the first cut of this rework) a silent full session rebuild on every
+    first mic ON. Never use janus.js's replace path on this page; swap the sender yourself and pass
+    `tracks: []` (captureDevices returns early). Never patch the vendored file.
+  - All Janus WebSockets go through `TrackedWebSocket` (passed to janus.js as its `WebSocket`
+    dependency at `Janus.init`, which is where janus.js binds `Janus.newWebSocket`): a torn-down
+    session's socket is closed even when janus.js never got its session id (its `destroy()` then
+    returns without touching the socket and a late connect would leave a zombie session); a still
+    CONNECTING socket is closed right after it opens, never while connecting (the browser logs an
+    error for that).
+  - The **AudioContext** is created only once sound may play (`play()` resolved, or a click /
+    touchend / keydown — never a touch `pointerdown`, which is not an activation event), so Chrome
+    never logs "The AudioContext was not allowed to start". If `play()` is rejected, a one-time
+    full-screen "Ťukni pre zvuk" layer (`data-role="tap-for-sound"`) appears; the connection is
+    already up underneath.
+  - **Picture** — fills the phone width; a tap toggles fullscreen (Fullscreen API + a best-effort
+    landscape lock; a `.is-max` CSS overlay where element fullscreen is missing — iPhone Safari);
+    `data-fullscreen` mirrors the state; pinch-zoom stays allowed (the viewport never disables
+    scaling). The manifest orientation is `any` so the installed app can rotate.
+  - The name is asked ONCE in a sheet (`interkom.display` in `localStorage`); the join never waits
+    for it and a change is sent with `configure {display}`. The mic device (`interkom.micDevice`)
+    and the hub/room info lines live in a small settings sheet. The old Hub/Janus/Zvuk/Obraz chips
+    are gone from the main screen.
+  - The client never names a codec — it works with whatever Janus negotiates (the hub's own leg to
+    Janus is a separate lane).
 - **Path-relative Janus WS** — `app.js` builds `wss://<location.host>/janus` (the TLS front proxies
   `/janus`), never a hard-coded host; a `?janus=<url>` query overrides it for a dev host. `janus.js`
   is init'd with `debug: false` so its `Janus.log/warn/error` are ALL no-ops → the library never
@@ -606,10 +652,11 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   UA) — janus.js 1.x only reads `browserDetails` for per-browser branches; the stream-attach helpers
   live inside janus.js itself.
 - **Console-clean discipline** — `app.js` NEVER calls `console.error`/`console.warn`; every hub /
-  Janus / picture failure is surfaced as a status CHIP. The hub chip uses an `/api/state` FETCH
-  poll (2 s), NOT a `/ws` connection, precisely so an unreachable hub logs no browser WS network
-  error; Janus is only contacted on the button click; and the picture `<img src>` is set ONLY once
-  the hub is reachable, so a bare 404 to a missing route never fires while the hub is down.
+  Janus / picture failure becomes visible page state (the connection bar, the settings info
+  lines). The hub info uses an `/api/state` FETCH poll (3 s), NOT a `/ws` connection, precisely so
+  an unreachable hub logs no browser WS network error; and the picture `<img src>` is set ONLY once
+  the hub is reachable, so a bare 404 to a missing route never fires while the hub is down. A dead
+  Janus WS still logs the browser's own network line on each retry (network class, not a JS error).
 - **The MJPEG picture contract with M3c (issue 1347)** — the `<img id="interkom">` shows
   `/interkom.mjpeg`, which **M3c** serves. Until then (and whenever the hub is up but M3c is not),
   the `<img>` `error` handler shows the "Obraz zatiaľ nie je k dispozícii" placeholder and a 5 s
@@ -670,17 +717,45 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   on `test_intercom_webui_1345.py` + `test_shading_https_install_808.py`; `bash -n` +
   `shellcheck -S warning` on the two scripts; `node --check` on `app.js`/`sw.js`/`janus.js`; the
   doc-lazy grep on the touched `.rs`.
-- **The real browser check (Playwright, zero builds):** `python3 -m http.server` on
-  `intercom/web` + a small stub that returns 200 for `/api/state`+`/api/version`+`/interkom.mjpeg`
-  (the happy path) → `browser_console_messages` is EMPTY (0 errors, 0 warnings) and the UI renders
-  the version, the muted-default toggle, the "Hub: OK" chip and the picture. Gotcha inherited from
-  bkshading: a python static test can't catch a JS/CSS runtime bug — run the browser check. Two
-  more gotchas found here: (1) against a bare static server (no hub API) the ONLY console entries
-  are the browser's own "Failed to load resource 404" network logs for the absent `/api/*` — there
-  are ZERO JS exceptions / `console.error` / `console.warn`, i.e. the graceful-into-chips path; a
-  clean console needs the hub API stubbed 200 (the real hub returns 200). (2) The service worker +
-  HTTP cache serve a stale `app.js` across a same-origin re-run after an edit — verify a code change
-  on a FRESH origin (a different port) or the console/DOM reflects the pre-edit JS.
+- **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
+  committed lockfile): `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
+  `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
+  `/api/state` / `/api/version` / a PNG at `/interkom.mjpeg`). Only the external Janus SERVER is
+  faked: the init script `fake-janus-server.js` replaces `window.WebSocket` for `…/janus` URLs with
+  an in-page socket speaking the Janus WS API (create/attach/message/trickle/keepalive/hangup/
+  detach/destroy + audiobridge join/configure) whose offers are answered by a REAL
+  `RTCPeerConnection` (sends a fake-device "room audio" track, receives the phone's mic). So SDP
+  directions, the renegotiation and the audio really flow through WebRTC; the double records
+  `joins` / `configures` / `offers` (with the audio direction) / `sessions`, and has
+  `dropConnection()`, `failConnects` and `inboundAudioBytes()`. **Never go back to a JS-API
+  double of janus.js** — the first one accepted any `createOffer` and hid the replace-path crash
+  above. Chromium fake media gives both meters a real signal; 390x844 viewport; every test asserts
+  a COMPLETELY empty console. The spec neutralises the SW registration and wraps `getUserMedia` to
+  count the PAGE's prompts (the double's room audio uses the unwrapped `window.__realGUM`).
+- **Local run under Tier-0 (no npm install needed):** borrow an existing `@playwright/test`
+  (`NODE_PATH=<repo>/e2e/node_modules`, run its `cli.js test` from `intercom/tests/e2e`) and point
+  `INTERKOM_E2E_CHROMIUM` at an installed Chromium when the revisions differ. Run it from a script
+  FILE (`bash /abs/run.sh`); the worktree guard refuses the inline shape.
+- **Gotcha — automated Chromium NEVER blocks autoplay.** Probed 25.9.2026: under Playwright a plain
+  WAV and a MediaStream both `play()` with `--autoplay-policy=user-gesture-required` or
+  `document-user-activation-required`, headless shell AND headed, and
+  `navigator.userActivation.hasBeenActive` already reads true on a fresh page. A second project
+  with a different policy flag tests nothing. The blocked-autoplay test EMULATES the policy:
+  `HTMLMediaElement.prototype.play` rejects `NotAllowedError` until the first TRUSTED
+  click/touchend/keydown (its own flag, not `userActivation`), and it counts any `AudioContext`
+  created before that tap (must be 0).
+- **Live check against the real Janus (manual):** open `stub_hub.py` directly in a browser (the
+  fake-server init script is only added by the spec) at
+  `/?janus=wss://interkom-lx.newlevel.media/janus`; it joined the live room,
+  reached `Pripojené` (transceiver `recvonly`) with the room audio playing and an empty console;
+  then a SILENT in-place renegotiation from `page.evaluate` (`await acquireMic("");
+  micTrack.enabled = false; pushMicToSession(false)` — the top-level functions/`let`s of the
+  classic script are reachable by name) came back `sendrecv` on the SAME session, still connected
+  (25.9.2026). Never turn the mic ON through the UI in such a live run — the fake-device beep would
+  go into the camboxes' headsets.
+- Gotchas kept from M3b: a python static test can't catch a JS/CSS runtime bug — run the browser
+  check; and the service worker + HTTP cache serve a stale `app.js` across a same-origin re-run
+  after an edit — verify on a FRESH origin (a different port).
 - **At CI (first compile):** the `intercom-hub` job type-checks + runs the Rust route/asset unit
   tests. Expect a Rust TYPE mistake to surface at CI, not locally (the M1 first-compile list above
   still applies — axum `Json<Arc<T>>` needs serde `rc` (already on), `chunks_exact` deny lint, etc.).
@@ -808,14 +883,11 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   write scratch files with the `Write` tool (not a Bash heredoc). (3) Janus 1.1.x jcfg bind keys
   (confirmed from the upstream `conf/*.sample`): WebSockets transport = `ws_ip`/`ws_interface`
   (single IP), HTTP transport = `ip`/`interface` + `port`/`http`/`https`/`admin_http`.
-- **Listen-only join when the microphone is unavailable/denied — DONE (this lane).** The PWA no
-  longer dead-ends at `Janus: mic chyba`: on a `getUserMedia` rejection (NotFoundError/NotAllowedError/…,
-  classified by `isMicError`) `app.js` falls back to a **recv-only offer** (`tracks:[{type:"audio",
-  recv:true}]`, no `capture` → janus.js never calls getUserMedia), keeps the room audio playing,
-  DISABLES the mic toggle + device select, and shows the chip `Mikrofón: nedostupný (počúvate)`. A
-  second "Pripojiť" cycle re-enables the controls (`resetMicControls`) so a re-granted mic re-negotiates
-  WITH send. While the hub is down the page still logs one Chromium `502`/`404` resource error per poll
-  (network class, not a JS error) — expected.
+- **Listen-only when the microphone is unavailable/denied** — SUPERSEDED by the 25.9.2026 phone UX
+  rework: every session now STARTS receive-only, the mic is asked only on the first ON, and a denied
+  mic shows `setMicUi("denied")` while the page keeps listening (a later tap asks again). While the
+  hub is down the page still logs one Chromium `502`/`404` resource error per poll (network class,
+  not a JS error) — expected.
 - **The live M3 test shape that worked:** transient `intercom-hub-m3` unit (NO DynamicUser, so the
   room-secret file is readable) on a cam1 + cutters + phones(janus) matrix with
   `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-LX (interkom)`); the PWA
