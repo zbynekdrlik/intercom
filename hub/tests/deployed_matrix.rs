@@ -128,8 +128,9 @@ fn deployed_matrix_plays_the_cutters_mix_to_the_minifuse_with_talkback_gain() {
     assert_eq!(*chans, 4, "the 4 MiniFuse outputs the VB-Matrix fed");
     assert_eq!(map.as_deref(), Some("AUX0,AUX1,AUX2,AUX3"));
 
-    // Every cutters -> phones / camN point carries the +12 dB talkback makeup gain.
+    // Owner ruling 24.9.2026: no hub makeup gain on the talkback -- every cutters -> phones / camN
+    // point is unity (the level is set on the MiniFuse preamp).
     let talkback: Vec<_> = m.points.iter().filter(|p| p.src == cutters).collect();
     assert!(!talkback.is_empty());
-    assert!(talkback.iter().all(|p| (p.gain_db - 12.0).abs() < 1e-6));
+    assert!(talkback.iter().all(|p| p.gain_db.abs() < 1e-6));
 }

@@ -221,10 +221,11 @@ def test_cutters_play_their_n1_mix_to_the_minifuse_outputs():
 
 
 def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cams():
-    """The MiniFuse talkback reached the hub at about -68 dBFS with no makeup gain. Every cutters ->
-    phones / cutters -> camN point carries the ONE converter constant (never a hand-edited TOML);
-    every other point keeps its VB-Matrix gain."""
-    assert conv.TALKBACK_MAKEUP_DB == 12.0
+    """Every cutters -> phones / cutters -> camN point carries the ONE converter constant (never a
+    hand-edited TOML); every other point keeps its VB-Matrix gain. Owner ruling 24.9.2026 ("nemal si
+    menit hlasitosti na kamerach"): the makeup is 0 dB -- the talkback level is set on the MiniFuse
+    preamp, never by the hub."""
+    assert conv.TALKBACK_MAKEUP_DB == 0.0
     _hub, _parts, points = _model()
     talkback = [
         pt for pt in points if pt["src"] == "cutters" and (pt["dst"] == "phones" or pt["dst"] in _CAMS)
@@ -236,4 +237,4 @@ def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cam
     others = [pt for pt in points if pt not in talkback]
     assert all(pt["gain_db"] in (0.0, -8.0, -10.0) for pt in others)
     text = conv.convert(_xml())
-    assert "gain_db = 12.0" in text
+    assert "gain_db = 12.0" not in text
