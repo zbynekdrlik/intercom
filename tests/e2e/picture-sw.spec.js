@@ -37,10 +37,7 @@ function watchConsole(page) {
 // page from its very first request — the state an installed phone is in on every later visit.
 async function openControlledByWorker(page) {
   await page.goto("/");
-  await page.evaluate(async () => {
-    const reg = await navigator.serviceWorker.ready;
-    return reg.active ? reg.active.state : "none";
-  });
+  await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
   await page.reload();
   const controlled = await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
@@ -49,14 +46,21 @@ async function openControlledByWorker(page) {
   expect(controlled, "the service worker controls the page").toBe(true);
 }
 
+// The native player's mirror canvas: app.js draws the picture <img> into it and feeds its
+// captureStream() to the native video. A top-level `let` of the classic app.js script, so it is
+// reachable by name from page.evaluate.
+const NATIVE_MIRROR = "native-mirror";
+
 // The centre-band colour of what an element currently shows, drawn into a canvas: "r" / "g" / "b"
 // for one of the three stub frames, "bg" for the dark frame edge, "none" when nothing is decoded.
-async function centreColour(page, selector) {
-  return page.evaluate((sel) => {
-    const el = document.querySelector(sel);
+// `target` is a CSS selector or NATIVE_MIRROR.
+async function centreColour(page, target) {
+  return page.evaluate(([sel, mirror]) => {
+    const el = sel === mirror ? (typeof nativeCanvas === "undefined" ? null : nativeCanvas) : document.querySelector(sel);
     if (!el) return "none";
-    const w = el.naturalWidth || el.videoWidth || 0;
-    const h = el.naturalHeight || el.videoHeight || 0;
+    const isImg = el instanceof HTMLImageElement;
+    const w = isImg ? el.naturalWidth : el.width;
+    const h = isImg ? el.naturalHeight : el.height;
     if (!w || !h) return "none";
     const c = document.createElement("canvas");
     c.width = w;
@@ -69,14 +73,14 @@ async function centreColour(page, selector) {
     if (b > 150 && r < 110 && g < 110) return "b";
     if (r < 60 && g < 60 && b < 70) return "bg";
     return `other(${r},${g},${b})`;
-  }, selector);
+  }, [target, NATIVE_MIRROR]);
 }
 
-async function coloursSeen(page, selector, ms) {
+async function coloursSeen(page, target, ms) {
   const seen = new Set();
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    seen.add(await centreColour(page, selector));
+    seen.add(await centreColour(page, target));
     await page.waitForTimeout(150);
   }
   return [...seen].sort();
@@ -113,16 +117,24 @@ test("with the service worker controlling the page an iPhone tap still opens the
   await openControlledByWorker(page);
 
   await expect(page.locator('[data-role="picture"]')).toBeVisible({ timeout: 15000 });
-  // The native video is armed from the picture and really carries it (the canvas mirror of the
-  // multipart <img> is drawn into the stream the video plays).
+  // The native video is armed from the picture and plays the mirror's frames at the picture's size.
   await expect
-    .poll(() => page.evaluate(() => document.querySelector('[data-role="picture-native"]').readyState), {
-      timeout: 10000,
-    })
-    .toBeGreaterThanOrEqual(2);
-  await expect
-    .poll(() => centreColour(page, '[data-role="picture-native"]'), { timeout: 10000 })
-    .toMatch(/^[rgb]$/);
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const v = document.querySelector('[data-role="picture-native"]');
+          return v.readyState >= 2 && !v.paused ? `${v.videoWidth}x${v.videoHeight}` : "not playing";
+        }),
+      { timeout: 10000 }
+    )
+    .toBe("320x180");
+  // What the video plays is the mirror canvas, and the mirror really carries the LIVE multipart
+  // picture (the 27.9.2026 rollback's first suspect: WebKit handing a multipart <img> frame to a
+  // canvas). The mirror is read, not the video: in Playwright's headless WebKit a canvas draw of ANY
+  // captureStream-fed video reads transparent (a solid-colour canvas stream reads [0,0,0,0] too,
+  // probed 27.9.2026), which is the test engine, not the page.
+  const mirror = (await coloursSeen(page, NATIVE_MIRROR, 3000)).filter((c) => c.length === 1);
+  expect(mirror.length, `the native mirror follows the live picture (saw ${mirror})`).toBeGreaterThanOrEqual(2);
 
   await page.locator('[data-role="picture-wrap"]').click();
   const calls = await page.evaluate(() => window.__nativeFs);
