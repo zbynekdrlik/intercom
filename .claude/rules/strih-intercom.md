@@ -726,7 +726,9 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 - **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
   committed lockfile): `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
   `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
-  `/api/state` / `/api/version` / a PNG at `/interkom.mjpeg`). Only the external Janus SERVER is
+  `/api/state` / `/api/version` / a real endless multipart JPEG stream at `/interkom.mjpeg` since
+  issue 1379; `picture-sw.spec.js` also runs on WebKit, see "The service worker must never proxy the
+  picture stream" below). Only the external Janus SERVER is
   faked: the init script `fake-janus-server.js` replaces `window.WebSocket` for `…/janus` URLs with
   an in-page socket speaking the Janus WS API (create/attach/message/trickle/keepalive/hangup/
   detach/destroy + audiobridge join/configure) whose offers are answered by a REAL
@@ -842,6 +844,55 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 - **Live end-to-end (supervisor, needs the rig):** run the hub `--features ndi` against a live NDI
   source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
   in when the source drops.
+
+## The service worker must never proxy the picture stream (issue 1379, 27.9.2026)
+
+- **What broke.** `intercom/web/sw.js` answered every fetch with `respondWith(fetch(event.request))`,
+  including the endless `multipart/x-mixed-replace` `/interkom.mjpeg`. WebKit (iPhone Safari) never
+  hands that never-ending response to the page's `<img>` through a worker.
+  - The `load` event never fires, so the `<img>` stays `hidden` and the 5 s retry loops forever.
+  - dev1 nginx logged the iPhone's picture requests as 200 with 0 bytes on hub 711 AND hub 676. The
+    phone keeps its registered worker across hub versions, so the 711 rollback could not help.
+  - Chromium delivers the same stream fine through the worker. And `phone.spec.js` neutralises the
+    worker registration. So no Chromium run could catch it.
+- **The rule for `sw.js`.**
+  - Requests in `STREAM_PATHS` (matched on the URL pathname, so the `?t=` buster still matches) and
+    every non-GET request get NO `respondWith`, so the browser fetches them itself. Everything else
+    keeps the passthrough.
+  - Any NEW endless or streaming route (another MJPEG, SSE) goes into `STREAM_PATHS` in the same
+    change.
+  - Never delete the `fetch` handler: the Android install path keys on it (design comment
+    5858372332, approach 2 rejected).
+  - Bump the `Worker version:` line on every `sw.js` change. An installed phone replaces its worker
+    only when the bytes of `/sw.js` differ. After the swap (`skipWaiting` + `clients.claim`), the
+    page's 5 s picture retry fetches the stream natively, so the first visit heals itself.
+  - `bkshading/service/web/sw.js` has the same proxy-everything shape. Its preview is a polled
+    single JPEG (`preview.jpg?t=`), a finite response, so it is not affected. If it ever moves to a
+    multipart stream, give it the same exclusion.
+- **The regression test.** `intercom/tests/e2e/picture-sw.spec.js` does not neutralise the worker.
+  - It waits for `navigator.serviceWorker.ready`, reloads so the worker controls the page, and
+    asserts `controller` is set.
+  - The picture must decode at 320x180, and its centre band must change colour (at least two of
+    red / green / blue), which proves progressive delivery and not one frozen part.
+  - The second test is the iPhone native-player tap with the worker in control.
+  - `stub_hub.py` streams the three committed frames `fixtures/picture-{0,1,2}.jpg` as HTTP/1.1
+    chunked multipart parts framed like `mjpeg_part`, at 10 fps, until the client leaves. Stdlib
+    Python has no JPEG encoder, so the frames are committed files (made once with PIL).
+  - It runs in the Chromium `phone` project AND the `iphone-webkit` project (`devices["iPhone
+    14"]`). The WebKit project runs only this spec, because the audio specs need Chromium's fake
+    media devices. The `intercom-web-e2e` CI job installs `chromium webkit`.
+- **Gotcha: in Playwright's headless WebKit, `drawImage` of ANY `captureStream`-fed `<video>` reads
+  transparent `[0,0,0,0]`.** A control video fed by a solid-green canvas stream reads the same
+  (probed 27.9.2026). So verify the native player through its mirror canvas and the video's
+  `readyState` / `videoWidth`, never through a video pixel. The mirror is `nativeCanvas`, a
+  top-level `let` of the classic `app.js`, reachable by name from `page.evaluate`.
+- **Local run on dev1.** `npm ci` in `intercom/tests/e2e`. Playwright 1.49.1's WebKit (revision
+  2104, WebKit 18.2) is already in `~/.cache/ms-playwright`. Run the script-file wrapper with
+  `--project=iphone-webkit`.
+- **After merge (supervisor).** The web assets are embedded, so the new `sw.js` ships with the hub
+  binary. Redeploy the hub on strih-lx with `install`, keeping the old binary. Then read `/sw.js`
+  from the public URL and confirm it carries `Worker version: 2`. The real-iPhone check is passive:
+  the owner's next use.
 
 ## M3 live findings on strih-lx / dev1 (19.9.2026) — read before the phone test or the M4 cut-over
 
