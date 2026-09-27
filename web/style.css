@@ -123,6 +123,16 @@ button { font: inherit; color: inherit; }
   display: block;
   pointer-events: none;
 }
+/* The iPhone native-player feed (issue 1379): rendered (so it can enter fullscreen) but not seen. */
+.picture-native {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
 .picture-placeholder {
   color: var(--muted);
   font-size: 0.95rem;

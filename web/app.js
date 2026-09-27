@@ -20,6 +20,10 @@
 const ROOM = numParam("room", 1000); // the Janus audiobridge room the intercom mixes into.
 const HUB_POLL_MS = 3000; // /api/state poll (picture availability + the settings info lines).
 const PICTURE_RETRY_MS = 5000; // retry the MJPEG picture while the hub is up but the picture is not.
+// iPhone native player (issue 1379): how often the picture is mirrored into its video — slow while
+// idle (only keeps the video primed for the tap), full rate while the native player shows it.
+const NATIVE_IDLE_MS = 500;
+const NATIVE_LIVE_MS = 40;
 const RECONNECT_BASE_MS = 1000; // first retry delay; doubles per failed attempt …
 const RECONNECT_MAX_MS = 15000; // … up to this cap.
 const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebuilt.
@@ -60,6 +64,7 @@ const connDetail = role("conn-detail");
 const pictureWrap = role("picture-wrap");
 const pictureImg = role("picture");
 const picturePlaceholder = role("picture-placeholder");
+const pictureNative = role("picture-native");
 const meterInEl = role("meter-in");
 const meterInState = role("meter-in-state");
 const incomingCard = meterInEl.closest(".incoming");
@@ -811,6 +816,80 @@ function syncFullscreen() {
   const on = fullscreenElement() === pictureWrap || pictureWrap.classList.contains("is-max");
   pictureWrap.dataset.fullscreen = on ? "true" : "false";
 }
+// ---- iPhone: the native video player (issue 1379) ----------------------------------------------
+// iPhone Safari has no element Fullscreen API; only a <video> can go truly fullscreen, in the
+// native player (webkitEnterFullscreen). The picture is an MJPEG <img>, so there it is mirrored
+// into a canvas whose captureStream() feeds a muted playsinline video. The video is armed as soon
+// as the picture loads: webkitEnterFullscreen must run inside the tap and needs the video's
+// metadata already there. Browsers with the Fullscreen API never arm it.
+let nativeCanvas = null;
+let nativeCtx = null;
+let nativeTimer = 0;
+let nativeLive = false;
+function nativePlayerSupported() {
+  return (
+    !(pictureWrap.requestFullscreen || pictureWrap.webkitRequestFullscreen) &&
+    typeof pictureNative.webkitEnterFullscreen === "function" &&
+    typeof HTMLCanvasElement.prototype.captureStream === "function"
+  );
+}
+function drawNative() {
+  if (!nativeCtx || pictureImg.hidden || !pictureImg.naturalWidth) return;
+  try {
+    nativeCtx.drawImage(pictureImg, 0, 0, nativeCanvas.width, nativeCanvas.height);
+  } catch (e) {
+    // a frame the image cannot hand out right now — the next tick draws again
+  }
+}
+function scheduleNative() {
+  clearInterval(nativeTimer);
+  nativeTimer = setInterval(drawNative, nativeLive ? NATIVE_LIVE_MS : NATIVE_IDLE_MS);
+}
+function armNativePlayer() {
+  if (!nativePlayerSupported()) return;
+  const w = pictureImg.naturalWidth;
+  const h = pictureImg.naturalHeight;
+  if (!w || !h) return;
+  if (!nativeCanvas) {
+    nativeCanvas = document.createElement("canvas");
+    nativeCtx = nativeCanvas.getContext("2d");
+  }
+  if (nativeCanvas.width !== w || nativeCanvas.height !== h) {
+    nativeCanvas.width = w;
+    nativeCanvas.height = h;
+  }
+  drawNative();
+  if (!pictureNative.srcObject) {
+    pictureNative.srcObject = nativeCanvas.captureStream();
+    const p = pictureNative.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  }
+  scheduleNative();
+}
+function enterNativePlayer() {
+  if (!nativePlayerSupported() || !pictureNative.srcObject || pictureNative.readyState < 1) {
+    return false;
+  }
+  try {
+    pictureNative.webkitEnterFullscreen();
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+pictureImg.addEventListener("load", armNativePlayer);
+pictureNative.addEventListener("webkitbeginfullscreen", () => {
+  nativeLive = true;
+  scheduleNative();
+});
+pictureNative.addEventListener("webkitendfullscreen", () => {
+  nativeLive = false;
+  scheduleNative();
+  // the native player can pause the video on exit; keep it primed for the next tap
+  const p = pictureNative.play();
+  if (p && typeof p.catch === "function") p.catch(() => {});
+});
+
 function maximise(on) {
   pictureWrap.classList.toggle("is-max", on);
   syncFullscreen();
@@ -822,7 +901,9 @@ function lockLandscape() {
 function enterFullscreen() {
   const req = pictureWrap.requestFullscreen || pictureWrap.webkitRequestFullscreen;
   if (!req) {
-    maximise(true); // iPhone Safari: no element fullscreen — a CSS maximised overlay instead
+    // iPhone Safari: no element fullscreen — the native video player (issue 1379), else a CSS
+    // maximised overlay while that player is not ready yet.
+    if (!enterNativePlayer()) maximise(true);
     return;
   }
   let p;

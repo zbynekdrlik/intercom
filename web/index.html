@@ -31,6 +31,11 @@
     <div class="picture-wrap" data-role="picture-wrap" data-fullscreen="false" role="button" tabindex="0"
          aria-label="Obraz od strihača — ťukni pre zväčšenie">
       <img id="interkom" class="picture" data-role="picture" alt="Obraz od strihača" hidden />
+      <!-- iPhone Safari only (issue 1379): the picture mirrored into a video so a tap can open the
+           native player (webkitEnterFullscreen). Rendered but invisible — a display:none video
+           cannot go fullscreen. Unused where the element Fullscreen API exists. -->
+      <video class="picture-native" data-role="picture-native" muted playsinline autoplay
+             aria-hidden="true" tabindex="-1"></video>
       <div class="picture-placeholder" data-role="picture-placeholder">Obraz zatiaľ nie je k dispozícii</div>
       <span class="picture-hint" data-role="picture-hint" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
