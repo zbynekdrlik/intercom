@@ -3,9 +3,9 @@
 // One webServer: the stdlib stub hub (stub_hub.py) that serves the REAL intercom/web client plus a
 // stubbed hub API and the fake Janus. One worker. The `phone` project is Chromium at a phone-sized
 // viewport with the Chromium fake-media flags, so both level meters have a real (fake-device) audio
-// signal; it runs every spec. The `iphone-webkit` project (issue 1379) is the iPhone engine and runs
-// only picture-sw.spec.js, the picture with the service worker in control -- a WebKit-only failure
-// that no Chromium run can catch.
+// signal; it runs every spec but the WebKit-only upgrade spec. The `iphone-webkit` project (issue
+// 1379) is the iPhone engine and runs only picture-sw.spec.js (the picture with the service worker in
+// control -- a WebKit-only failure that no Chromium run can catch) and picture-sw-upgrade.spec.js.
 //
 // Autoplay is ALLOWED here (an installed PWA / a site the phone already trusts). Playwright-driven
 // Chromium plays media without a gesture whatever --autoplay-policy says (probed 25.9.2026: a plain
@@ -47,10 +47,11 @@ module.exports = defineConfig({
     trace: "off",
   },
   projects: [
-    { name: "phone", use: phone() },
+    // Every spec except the WebKit-only worker-upgrade spec (see its header).
+    { name: "phone", use: phone(), testIgnore: /picture-sw-upgrade\.spec\.js$/ },
     // The iPhone engine (issue 1379): WebKit at the iPhone 14 shape. Only the picture/service-worker
-    // spec runs here -- the audio specs lean on Chromium's fake media devices, which WebKit lacks.
-    { name: "iphone-webkit", use: { ...devices["iPhone 14"] }, testMatch: /picture-sw\.spec\.js$/ },
+    // specs run here -- the audio specs lean on Chromium's fake media devices, which WebKit lacks.
+    { name: "iphone-webkit", use: { ...devices["iPhone 14"] }, testMatch: /picture-sw(-upgrade)?\.spec\.js$/ },
   ],
   webServer: [
     {

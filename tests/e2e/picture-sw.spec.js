@@ -9,88 +9,21 @@
 // versions, so the picture was gone on every hub. Here the worker registers for real, the page is
 // reloaded so the worker controls it, and the picture must then actually decode and keep moving:
 // stub_hub.py streams the three committed JPEG frames (red / green / blue centre band) as real
-// multipart parts. The last test starts from the OLD proxy-everything worker (the state every
-// installed phone is in) and requires one reload to bring the picture back. Runs in the Chromium
-// phone project AND the WebKit iPhone project; every test asserts a completely clean console.
-const path = require("path");
+// multipart parts. Runs in the Chromium phone project AND the WebKit iPhone project; every test
+// asserts a completely clean console. The upgrade from the old worker is picture-sw-upgrade.spec.js.
 const { test, expect } = require("@playwright/test");
+const {
+  preparePicturePage,
+  watchConsole,
+  openControlledByWorker,
+  NATIVE_MIRROR,
+  coloursSeen,
+  pictureColours,
+} = require("./picture-helpers");
 
 test.beforeEach(async ({ page }) => {
-  // The fake Janus server only keeps the page's audio side quiet; this file does not test audio.
-  await page.addInitScript({ path: path.join(__dirname, "fake-janus-server.js") });
-  await page.addInitScript(() => {
-    try {
-      localStorage.setItem("interkom.display", "Kamera 8");
-    } catch (e) {
-      // private mode: the name sheet shows, which does not affect the picture
-    }
-  });
+  await preparePicturePage(page);
 });
-
-// The upgrade test switches the stub to the old worker; never let that leak into the next test.
-test.afterEach(async ({ request }) => {
-  await request.get("/__test/legacy-sw/off");
-});
-
-function watchConsole(page) {
-  const seen = [];
-  page.on("console", (msg) => seen.push(`${msg.type()}: ${msg.text()}`));
-  page.on("pageerror", (err) => seen.push(`pageerror: ${err.message}`));
-  return seen;
-}
-
-// Load the page, wait for /sw.js to be installed and active, then reload so the worker controls the
-// page from its very first request — the state an installed phone is in on every later visit.
-async function openControlledByWorker(page) {
-  await page.goto("/");
-  await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
-  await page.reload();
-  const controlled = await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-    return !!navigator.serviceWorker.controller;
-  });
-  expect(controlled, "the service worker controls the page").toBe(true);
-}
-
-// The native player's mirror canvas: app.js draws the picture <img> into it and feeds its
-// captureStream() to the native video. A top-level `let` of the classic app.js script, so it is
-// reachable by name from page.evaluate.
-const NATIVE_MIRROR = "native-mirror";
-
-// The centre-band colour of what an element currently shows, drawn into a canvas: "r" / "g" / "b"
-// for one of the three stub frames, "bg" for the dark frame edge, "none" when nothing is decoded.
-// `target` is a CSS selector or NATIVE_MIRROR.
-async function centreColour(page, target) {
-  return page.evaluate(([sel, mirror]) => {
-    const el = sel === mirror ? (typeof nativeCanvas === "undefined" ? null : nativeCanvas) : document.querySelector(sel);
-    if (!el) return "none";
-    const isImg = el instanceof HTMLImageElement;
-    const w = isImg ? el.naturalWidth : el.width;
-    const h = isImg ? el.naturalHeight : el.height;
-    if (!w || !h) return "none";
-    const c = document.createElement("canvas");
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext("2d");
-    ctx.drawImage(el, 0, 0, w, h);
-    const [r, g, b] = ctx.getImageData(Math.floor(w / 2), Math.floor(h / 2), 1, 1).data;
-    if (r > 150 && g < 110 && b < 110) return "r";
-    if (g > 150 && r < 110 && b < 110) return "g";
-    if (b > 150 && r < 110 && g < 110) return "b";
-    if (r < 60 && g < 60 && b < 70) return "bg";
-    return `other(${r},${g},${b})`;
-  }, [target, NATIVE_MIRROR]);
-}
-
-async function coloursSeen(page, target, ms) {
-  const seen = new Set();
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    seen.add(await centreColour(page, target));
-    await page.waitForTimeout(150);
-  }
-  return [...seen].sort();
-}
 
 test("with the service worker controlling the page the picture decodes and keeps moving (issue 1379)", async ({ page }) => {
   const seen = watchConsole(page);
@@ -103,7 +36,7 @@ test("with the service worker controlling the page the picture decodes and keeps
   expect(size, "a decoded 320x180 frame").toEqual([320, 180]);
 
   // A live stream, not one frozen part: the centre band changes colour as the parts arrive.
-  const colours = (await coloursSeen(page, '[data-role="picture"]', 2500)).filter((c) => c.length === 1);
+  const colours = await pictureColours(page, 2500);
   expect(colours.length, `the picture keeps updating (saw ${colours})`).toBeGreaterThanOrEqual(2);
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
@@ -160,83 +93,4 @@ test("with the service worker controlling the page an iPhone tap still opens the
   expect(calls[0].hasStream).toBe(true);
   await expect(page.locator('[data-role="picture-wrap"]')).toHaveAttribute("data-fullscreen", "false");
   expect(seen, "browser console must stay completely clean").toEqual([]);
-});
-
-// While the OLD worker proxies the picture stream, WebKit logs stack-less page errors right next to
-// each failed /interkom.mjpeg request (probed 27.9.2026: two per failed request, "" + "Cannot load .",
-// and rarely another text for the same failure). They are attributed by that coincidence, never by
-// their text: a stack-less page error within this window of a failed picture request.
-const STREAM_FAILURE_WINDOW_MS = 1500;
-
-// Every installed phone is in this state when the fixed hub goes live: it still runs the old
-// worker that proxies every request. One ordinary reload must install the new worker and bring the
-// picture back (the new worker claims the page, and the page's 5 s picture retry then fetches the
-// stream natively). On WebKit the picture can only appear once the new worker is in control; on
-// Chromium the old worker never broke the picture, so there this only proves the upgrade is clean.
-test("a phone still on the old proxy-everything worker takes the new one on its next load and the picture returns (issue 1379)", async ({ page, request, browserName }) => {
-  // Every console message and page error, in order, with when it arrived.
-  const log = [];
-  page.on("console", (msg) => log.push({ text: `${msg.type()}: ${msg.text()}`, pageerror: false, t: Date.now() }));
-  page.on("pageerror", (err) => log.push({ text: `pageerror: ${err.message}`, pageerror: true, stackless: !err.stack, t: Date.now() }));
-  const isPicture = (req) => new URL(req.url()).pathname === "/interkom.mjpeg";
-  const failedAt = []; // WebKit: when a picture request the old worker's proxy failed
-  let workerServedPictures = 0; // Chromium: a picture response a worker answered
-  page.on("requestfailed", (req) => {
-    if (isPicture(req)) failedAt.push(Date.now());
-  });
-  page.on("response", (res) => {
-    if (isPicture(res.request()) && res.fromServiceWorker()) workerServedPictures += 1;
-  });
-
-  const on = await request.get("/__test/legacy-sw/on");
-  expect(on.ok(), "the stub serves the old worker").toBe(true);
-  await openControlledByWorker(page);
-  // Prove the OLD worker really handles the picture before the flip, or this test would quietly
-  // become a copy of the first one.
-  if (browserName === "webkit") {
-    await expect
-      .poll(() => failedAt.length, { timeout: 15000, message: "the old worker breaks the picture on WebKit" })
-      .toBeGreaterThanOrEqual(1);
-  } else {
-    await expect
-      .poll(() => workerServedPictures, { timeout: 15000, message: "the old worker serves the picture" })
-      .toBeGreaterThanOrEqual(1);
-  }
-  const off = await request.get("/__test/legacy-sw/off");
-  expect(off.ok(), "the stub serves the new worker again").toBe(true);
-
-  // The reload tears the old document down (its pending picture request fails with it) and commits
-  // a new one; failures after the commit belong to the new document.
-  let failedAtCommit = -1;
-  const onNavigated = (frame) => {
-    if (frame === page.mainFrame()) failedAtCommit = failedAt.length;
-  };
-  page.on("framenavigated", onNavigated);
-  await page.reload();
-  page.off("framenavigated", onNavigated);
-  expect(failedAtCommit, "the reload committed a new document").toBeGreaterThanOrEqual(0);
-
-  const img = page.locator('[data-role="picture"]');
-  await expect(img, "the picture is back after one reload").toBeVisible({ timeout: 20000 });
-  const settled = log.length;
-  const failedAtSettle = failedAt.length;
-  const colours = (await coloursSeen(page, '[data-role="picture"]', 2500)).filter((c) => c.length === 1);
-  expect(colours.length, `the picture keeps updating (saw ${colours})`).toBeGreaterThanOrEqual(2);
-
-  const texts = (entries) => entries.map((e) => e.text);
-  if (browserName === "webkit") {
-    // The old worker's failing picture requests may log their stack-less page errors, at most two
-    // each. In the new document at most ONE picture request may fail: the reloaded page can start
-    // under the old worker before the new one takes it over. Nothing else may log.
-    const before = log.slice(0, settled);
-    const nearFailure = (e) => failedAt.some((t) => Math.abs(e.t - t) <= STREAM_FAILURE_WINDOW_MS);
-    const other = before.filter((e) => !(e.pageerror && e.stackless && nearFailure(e)));
-    expect(texts(other), "only the old worker's failing picture stream may log during the upgrade").toEqual([]);
-    expect(before.length, "at most two page errors per failed picture request").toBeLessThanOrEqual(2 * failedAtSettle);
-    expect(failedAtSettle - failedAtCommit, "at most one picture request fails in the reloaded page").toBeLessThanOrEqual(1);
-  } else {
-    expect(texts(log.slice(0, settled)), "the console stays completely clean during the upgrade").toEqual([]);
-  }
-  expect(texts(log.slice(settled)), "the console stays completely clean once the picture is back").toEqual([]);
-  expect(failedAt.length - failedAtSettle, "no picture request fails once the picture is back").toBe(0);
 });
