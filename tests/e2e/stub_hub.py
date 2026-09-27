@@ -6,8 +6,14 @@ Serves the REAL embedded client (`intercom/web/*`) exactly the way the hub's `ht
 
 - `/api/version` -> {"version": "<--version>"}
 - `/api/state`   -> a minimal hub state with two participants
-- `/interkom.mjpeg` -> a small generated PNG (the page shows it in an <img>; the format does not
-  matter to the browser, only that the route answers 200 with an image)
+- `/interkom.mjpeg` -> a REAL endless `multipart/x-mixed-replace; boundary=frame` stream of JPEG
+  parts, framed byte-for-byte like the hub's `http.rs::mjpeg_part` and sent HTTP/1.1 chunked like
+  the hub (axum), cycling the three committed frames in `fixtures/picture-{0,1,2}.jpg` (a dark
+  320x180 frame whose centre band is red / green / blue) at `MJPEG_FPS` until the client leaves.
+  It must be the real multipart shape: issue 1379 was a service worker that swallowed exactly this
+  endless response in WebKit, and a single still image never exercises that path. The fixtures were
+  made once with PIL (`Image.new("RGB", (320, 180), (30, 34, 42))` + a filled centre rectangle,
+  quality 90, 4:4:4); stdlib Python has no JPEG encoder, so they are committed files.
 - `/janus.js`    -> the REAL vendored janus.js. The external Janus SERVER is faked inside the page
   by the spec's init script `fake-janus-server.js` (a WebSocket double with a real in-page
   RTCPeerConnection), so the page's own code AND the library run unmodified.
@@ -17,8 +23,7 @@ Standard library only. `--port` picks the port; `/__health` is the Playwright re
 import argparse
 import json
 import os
-import struct
-import zlib
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,30 +40,36 @@ STATIC = {
 }
 
 
-def picture_png(width=320, height=180):
-    """A deterministic 16:9 test picture: a dark frame with a lighter centre band."""
-    rows = []
-    for y in range(height):
-        row = bytearray([0])  # filter byte: none
-        for x in range(width):
-            band = height // 3 <= y < 2 * height // 3 and width // 4 <= x < 3 * width // 4
-            row += bytes((90, 140, 200) if band else (30, 34, 42))
-        rows.append(bytes(row))
-    raw = b"".join(rows)
+MJPEG_FPS = 10
+FIXTURES = os.path.join(HERE, "fixtures")
 
-    def chunk(tag, data):
-        body = tag + data
-        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
 
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9))
-            + chunk(b"IEND", b""))
+def picture_frames():
+    """The committed JPEG frames the MJPEG stream cycles through, in order."""
+    names = sorted(n for n in os.listdir(FIXTURES) if n.startswith("picture-") and n.endswith(".jpg"))
+    frames = []
+    for name in names:
+        with open(os.path.join(FIXTURES, name), "rb") as f:
+            frames.append(f.read())
+    if len(frames) < 2:
+        raise SystemExit(f"stub_hub: need at least two picture-*.jpg frames in {FIXTURES}, found {names}")
+    return frames
+
+
+def mjpeg_part(jpeg):
+    """One multipart part, the same bytes as the hub's `http.rs::mjpeg_part`."""
+    header = f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n\r\n"
+    return header.encode("ascii") + jpeg + b"\r\n"
 
 
 def make_handler(version):
-    picture = picture_png()
+    frames = picture_frames()
 
     class Handler(BaseHTTPRequestHandler):
+        # HTTP/1.1 like the hub (axum): every fixed response carries Content-Length, the MJPEG
+        # stream is chunked.
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, fmt, *args):  # keep the Playwright output clean
             pass
 
@@ -71,6 +82,23 @@ def make_handler(version):
                 self.send_header("Service-Worker-Allowed", "/")
             self.end_headers()
             self.wfile.write(body)
+
+        def _stream_mjpeg(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            n = 0
+            try:
+                while True:
+                    part = mjpeg_part(frames[n % len(frames)])
+                    self.wfile.write(f"{len(part):X}\r\n".encode("ascii") + part + b"\r\n")
+                    self.wfile.flush()
+                    n += 1
+                    time.sleep(1.0 / MJPEG_FPS)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True  # the page left or replaced the picture
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
@@ -89,7 +117,7 @@ def make_handler(version):
                 state = {"participants": [{"name": "cam1"}, {"name": "phones"}]}
                 return self._send(200, "application/json", json.dumps(state).encode())
             if path == "/interkom.mjpeg":
-                return self._send(200, "image/png", picture)
+                return self._stream_mjpeg()
             if path in STATIC:
                 name, ctype = STATIC[path]
                 with open(os.path.join(WEB, name), "rb") as f:

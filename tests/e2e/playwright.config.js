@@ -1,8 +1,11 @@
 // @ts-check
 // Playwright config for the phone interkom PWA E2E (issue 1345, the 25.9.2026 phone UX rework).
 // One webServer: the stdlib stub hub (stub_hub.py) that serves the REAL intercom/web client plus a
-// stubbed hub API and the fake Janus. Chromium only, one worker, a phone-sized viewport, and the
-// Chromium fake-media flags so both level meters have a real (fake-device) audio signal.
+// stubbed hub API and the fake Janus. One worker. The `phone` project is Chromium at a phone-sized
+// viewport with the Chromium fake-media flags, so both level meters have a real (fake-device) audio
+// signal; it runs every spec. The `iphone-webkit` project (issue 1379) is the iPhone engine and runs
+// only picture-sw.spec.js, the picture with the service worker in control -- a WebKit-only failure
+// that no Chromium run can catch.
 //
 // Autoplay is ALLOWED here (an installed PWA / a site the phone already trusts). Playwright-driven
 // Chromium plays media without a gesture whatever --autoplay-policy says (probed 25.9.2026: a plain
@@ -45,6 +48,9 @@ module.exports = defineConfig({
   },
   projects: [
     { name: "phone", use: phone() },
+    // The iPhone engine (issue 1379): WebKit at the iPhone 14 shape. Only the picture/service-worker
+    // spec runs here -- the audio specs lean on Chromium's fake media devices, which WebKit lacks.
+    { name: "iphone-webkit", use: { ...devices["iPhone 14"] }, testMatch: /picture-sw\.spec\.js$/ },
   ],
   webServer: [
     {
