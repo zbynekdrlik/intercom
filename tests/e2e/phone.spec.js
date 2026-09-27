@@ -264,6 +264,48 @@ test("a tap on the picture makes it fullscreen and a second tap returns", async 
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
+test("on iPhone Safari a tap on the picture opens the native video player (issue 1379)", async ({ page }) => {
+  // iPhone Safari: no element Fullscreen API, only HTMLVideoElement.webkitEnterFullscreen (the
+  // native player). Emulate exactly that shape and record the native-player call.
+  await page.addInitScript(() => {
+    delete Element.prototype.requestFullscreen;
+    delete Element.prototype.webkitRequestFullscreen;
+    window.__nativeFs = [];
+    HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
+      window.__nativeFs.push({
+        role: this.dataset.role,
+        readyState: this.readyState,
+        hasStream: !!this.srcObject,
+      });
+    };
+  });
+  const seen = watchConsole(page);
+  await presetName(page, "Kamera 5");
+  await page.goto("/");
+  await expectConnected(page);
+
+  const wrap = page.locator('[data-role="picture-wrap"]');
+  await expect(page.locator('[data-role="picture"]')).toBeVisible({ timeout: 10000 });
+  // The native video is armed from the picture before any tap (webkitEnterFullscreen needs its
+  // metadata and must run inside the tap itself).
+  await expect
+    .poll(() => page.evaluate(() => {
+      const v = document.querySelector('[data-role="picture-native"]');
+      return v ? v.readyState : -1;
+    }), { timeout: 10000 })
+    .toBeGreaterThanOrEqual(1);
+
+  await wrap.click();
+  const calls = await page.evaluate(() => window.__nativeFs);
+  expect(calls, "the tap opens the native player exactly once").toHaveLength(1);
+  expect(calls[0].role).toBe("picture-native");
+  expect(calls[0].hasStream, "the native video carries the live picture").toBe(true);
+  expect(calls[0].readyState).toBeGreaterThanOrEqual(1);
+  // The CSS overlay is NOT used when the native player took over.
+  await expect(wrap).toHaveAttribute("data-fullscreen", "false");
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("a dropped connection shows the reconnect state and reconnects with the mic state kept", async ({ page }, testInfo) => {
   const seen = watchConsole(page);
   await presetName(page, "Kamera 4");
