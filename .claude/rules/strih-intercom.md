@@ -878,10 +878,20 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
     video's track to be the mirror canvas's capture track (`track.canvas === nativeCanvas`).
   - The third test is the upgrade every installed phone takes: `/__test/legacy-sw/on` makes the
     stub serve the old proxy-everything worker, the page is loaded under it, then one reload with
-    the new worker must bring the picture back. While the old worker is in control, and once more at
-    the handover, WebKit logs its aborted proxied stream as stack-less page errors (`""`,
-    `"Cannot load ."`, `"Load failed"`) next to a failed `/interkom.mjpeg` request. Only those may
-    appear before the picture is back, and nothing after.
+    the new worker must bring the picture back.
+    - It first PROVES the old worker handles the picture (WebKit: a failed `/interkom.mjpeg`
+      request; Chromium: a picture response with `fromServiceWorker()`), and checks both switch
+      calls return 200. Without that precondition a broken switch made the test a silent copy of
+      the first one (review round 2).
+    - While the old worker is in control, WebKit logs two stack-less page errors per failed
+      picture request (`""` + `"Cannot load ."`, and rarely another text for the same failure).
+      It may log them once more at the handover, when the reloaded page starts under the old
+      worker. So on WebKit, before the picture is back, a page error is excused only when it is
+      stack-less AND arrives within 1.5 s of a failed `/interkom.mjpeg` request (attribution by
+      coincidence, never by message text), at most two per failed request, with at most one failed
+      request in the reloaded document (counted from its `framenavigated` commit; the old
+      document's pending request also fails when the reload tears it down). Chromium must stay
+      fully clean. Nothing may log, and no picture request may fail, once the picture is back.
   - `stub_hub.py` streams the three committed frames `fixtures/picture-{0,1,2}.jpg` as HTTP/1.1
     chunked multipart parts framed like `mjpeg_part`, at 10 fps, until the client leaves. Stdlib
     Python has no JPEG encoder, so the frames are committed files (made once with PIL). The real

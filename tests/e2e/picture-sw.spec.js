@@ -162,33 +162,81 @@ test("with the service worker controlling the page an iPhone tap still opens the
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
-// The page errors WebKit logs when the OLD worker's proxied picture stream is aborted (see below).
-const OLD_WORKER_STREAM_ABORT = new Set(["pageerror: ", "pageerror: Cannot load .", "pageerror: Load failed"]);
+// While the OLD worker proxies the picture stream, WebKit logs stack-less page errors right next to
+// each failed /interkom.mjpeg request (probed 27.9.2026: two per failed request, "" + "Cannot load .",
+// and rarely another text for the same failure). They are attributed by that coincidence, never by
+// their text: a stack-less page error within this window of a failed picture request.
+const STREAM_FAILURE_WINDOW_MS = 1500;
 
 // Every installed phone is in this state when the fixed hub goes live: it still runs the old
 // worker that proxies every request. One ordinary reload must install the new worker and bring the
 // picture back (the new worker claims the page, and the page's 5 s picture retry then fetches the
 // stream natively). On WebKit the picture can only appear once the new worker is in control; on
 // Chromium the old worker never broke the picture, so there this only proves the upgrade is clean.
-test("a phone still on the old proxy-everything worker takes the new one on its next load and the picture returns (issue 1379)", async ({ page, request }) => {
-  const seen = watchConsole(page);
-  await request.get("/__test/legacy-sw/on");
-  await openControlledByWorker(page);
-  await request.get("/__test/legacy-sw/off");
+test("a phone still on the old proxy-everything worker takes the new one on its next load and the picture returns (issue 1379)", async ({ page, request, browserName }) => {
+  // Every console message and page error, in order, with when it arrived.
+  const log = [];
+  page.on("console", (msg) => log.push({ text: `${msg.type()}: ${msg.text()}`, pageerror: false, t: Date.now() }));
+  page.on("pageerror", (err) => log.push({ text: `pageerror: ${err.message}`, pageerror: true, stackless: !err.stack, t: Date.now() }));
+  const isPicture = (req) => new URL(req.url()).pathname === "/interkom.mjpeg";
+  const failedAt = []; // WebKit: when a picture request the old worker's proxy failed
+  let workerServedPictures = 0; // Chromium: a picture response a worker answered
+  page.on("requestfailed", (req) => {
+    if (isPicture(req)) failedAt.push(Date.now());
+  });
+  page.on("response", (res) => {
+    if (isPicture(res.request()) && res.fromServiceWorker()) workerServedPictures += 1;
+  });
 
+  const on = await request.get("/__test/legacy-sw/on");
+  expect(on.ok(), "the stub serves the old worker").toBe(true);
+  await openControlledByWorker(page);
+  // Prove the OLD worker really handles the picture before the flip, or this test would quietly
+  // become a copy of the first one.
+  if (browserName === "webkit") {
+    await expect
+      .poll(() => failedAt.length, { timeout: 15000, message: "the old worker breaks the picture on WebKit" })
+      .toBeGreaterThanOrEqual(1);
+  } else {
+    await expect
+      .poll(() => workerServedPictures, { timeout: 15000, message: "the old worker serves the picture" })
+      .toBeGreaterThanOrEqual(1);
+  }
+  const off = await request.get("/__test/legacy-sw/off");
+  expect(off.ok(), "the stub serves the new worker again").toBe(true);
+
+  // The reload tears the old document down (its pending picture request fails with it) and commits
+  // a new one; failures after the commit belong to the new document.
+  let failedAtCommit = -1;
+  const onNavigated = (frame) => {
+    if (frame === page.mainFrame()) failedAtCommit = failedAt.length;
+  };
+  page.on("framenavigated", onNavigated);
   await page.reload();
+  page.off("framenavigated", onNavigated);
+  expect(failedAtCommit, "the reload committed a new document").toBeGreaterThanOrEqual(0);
+
   const img = page.locator('[data-role="picture"]');
   await expect(img, "the picture is back after one reload").toBeVisible({ timeout: 20000 });
-  const settled = seen.length;
+  const settled = log.length;
+  const failedAtSettle = failedAt.length;
   const colours = (await coloursSeen(page, '[data-role="picture"]', 2500)).filter((c) => c.length === 1);
   expect(colours.length, `the picture keeps updating (saw ${colours})`).toBeGreaterThanOrEqual(2);
 
-  // Until the new worker serves the page, the OLD worker's proxied picture stream gets aborted (while
-  // it is in control, and once more when the new worker takes the reloaded page over), and WebKit
-  // reports each abort as a stack-less page error ("", "Cannot load .", "Load failed") next to a
-  // failed /interkom.mjpeg request (probed 27.9.2026). That is the broken state and its one-time
-  // handover; nothing else may log then, and nothing at all once the picture is back.
-  const handover = seen.slice(0, settled).filter((e) => !OLD_WORKER_STREAM_ABORT.has(e));
-  expect(handover, "only the old worker's aborted picture stream may log during the upgrade").toEqual([]);
-  expect(seen.slice(settled), "the console stays completely clean once the picture is back").toEqual([]);
+  const texts = (entries) => entries.map((e) => e.text);
+  if (browserName === "webkit") {
+    // The old worker's failing picture requests may log their stack-less page errors, at most two
+    // each. In the new document at most ONE picture request may fail: the reloaded page can start
+    // under the old worker before the new one takes it over. Nothing else may log.
+    const before = log.slice(0, settled);
+    const nearFailure = (e) => failedAt.some((t) => Math.abs(e.t - t) <= STREAM_FAILURE_WINDOW_MS);
+    const other = before.filter((e) => !(e.pageerror && e.stackless && nearFailure(e)));
+    expect(texts(other), "only the old worker's failing picture stream may log during the upgrade").toEqual([]);
+    expect(before.length, "at most two page errors per failed picture request").toBeLessThanOrEqual(2 * failedAtSettle);
+    expect(failedAtSettle - failedAtCommit, "at most one picture request fails in the reloaded page").toBeLessThanOrEqual(1);
+  } else {
+    expect(texts(log.slice(0, settled)), "the console stays completely clean during the upgrade").toEqual([]);
+  }
+  expect(texts(log.slice(settled)), "the console stays completely clean once the picture is back").toEqual([]);
+  expect(failedAt.length - failedAtSettle, "no picture request fails once the picture is back").toBe(0);
 });
