@@ -14,6 +14,8 @@ Serves the REAL embedded client (`intercom/web/*`) exactly the way the hub's `ht
   endless response in WebKit, and a single still image never exercises that path. The fixtures were
   made once with PIL (`Image.new("RGB", (320, 180), (30, 34, 42))` + a filled centre rectangle,
   quality 90, 4:4:4); stdlib Python has no JPEG encoder, so they are committed files.
+- `/__test/legacy-sw/on` | `/__test/legacy-sw/off` -> switch `/sw.js` to the pre-issue-1379 worker
+  (`LEGACY_SW`, proxies every request) and back, for the worker-upgrade test.
 - `/janus.js`    -> the REAL vendored janus.js. The external Janus SERVER is faked inside the page
   by the spec's init script `fake-janus-server.js` (a WebSocket double with a real in-page
   RTCPeerConnection), so the page's own code AND the library run unmodified.
@@ -62,8 +64,22 @@ def mjpeg_part(jpeg):
     return header.encode("ascii") + jpeg + b"\r\n"
 
 
+# The interkom worker as the hubs shipped it before issue 1379: it answered EVERY request with
+# respondWith, the endless picture stream included. The upgrade test serves it first (switched on
+# with `/__test/legacy-sw/on`) to put the page in the state every installed phone was in.
+LEGACY_SW = b"""\
+"use strict";
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (event) => {
+  event.respondWith(fetch(event.request));
+});
+"""
+
+
 def make_handler(version):
     frames = picture_frames()
+    serve = {"legacy_sw": False}
 
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.1 like the hub (axum): every fixed response carries Content-Length, the MJPEG
@@ -97,13 +113,18 @@ def make_handler(version):
                     self.wfile.flush()
                     n += 1
                     time.sleep(1.0 / MJPEG_FPS)
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            except OSError:
                 self.close_connection = True  # the page left or replaced the picture
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/__health":
                 return self._send(200, "text/plain", b"ok")
+            if path in ("/__test/legacy-sw/on", "/__test/legacy-sw/off"):
+                serve["legacy_sw"] = path.endswith("/on")
+                return self._send(200, "text/plain", b"ok")
+            if path == "/sw.js" and serve["legacy_sw"]:
+                return self._send(200, "text/javascript; charset=utf-8", LEGACY_SW)
             if path == "/":
                 with open(os.path.join(WEB, "index.html"), encoding="utf-8") as f:
                     html = f.read().replace("{{VERSION}}", version)

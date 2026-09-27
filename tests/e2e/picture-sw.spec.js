@@ -9,8 +9,9 @@
 // versions, so the picture was gone on every hub. Here the worker registers for real, the page is
 // reloaded so the worker controls it, and the picture must then actually decode and keep moving:
 // stub_hub.py streams the three committed JPEG frames (red / green / blue centre band) as real
-// multipart parts. Runs in the Chromium phone project AND the WebKit iPhone project; every test
-// asserts a completely clean console.
+// multipart parts. The last test starts from the OLD proxy-everything worker (the state every
+// installed phone is in) and requires one reload to bring the picture back. Runs in the Chromium
+// phone project AND the WebKit iPhone project; every test asserts a completely clean console.
 const path = require("path");
 const { test, expect } = require("@playwright/test");
 
@@ -24,6 +25,11 @@ test.beforeEach(async ({ page }) => {
       // private mode: the name sheet shows, which does not affect the picture
     }
   });
+});
+
+// The upgrade test switches the stub to the old worker; never let that leak into the next test.
+test.afterEach(async ({ request }) => {
+  await request.get("/__test/legacy-sw/off");
 });
 
 function watchConsole(page) {
@@ -128,11 +134,22 @@ test("with the service worker controlling the page an iPhone tap still opens the
       { timeout: 10000 }
     )
     .toBe("320x180");
-  // What the video plays is the mirror canvas, and the mirror really carries the LIVE multipart
-  // picture (the 27.9.2026 rollback's first suspect: WebKit handing a multipart <img> frame to a
-  // canvas). The mirror is read, not the video: in Playwright's headless WebKit a canvas draw of ANY
-  // captureStream-fed video reads transparent (a solid-colour canvas stream reads [0,0,0,0] too,
-  // probed 27.9.2026), which is the test engine, not the page.
+  // What the video plays IS the mirror canvas: its track is that canvas's capture track.
+  const playsMirror = await page.evaluate(() => {
+    const v = document.querySelector('[data-role="picture-native"]');
+    const track = v.srcObject && v.srcObject.getVideoTracks()[0];
+    return !!track && typeof nativeCanvas !== "undefined" && track.canvas === nativeCanvas;
+  });
+  expect(playsMirror, "the native video plays the mirror canvas's capture track").toBe(true);
+  // And the mirror really carries the LIVE multipart picture (the 27.9.2026 rollback's first
+  // suspect: WebKit handing a multipart <img> frame to a canvas). The mirror is read, not the video:
+  // in Playwright's headless WebKit a canvas draw of ANY captureStream-fed video reads transparent (a
+  // solid-colour canvas stream reads [0,0,0,0] too, probed 27.9.2026), which is the test engine, not
+  // the page.
+  // Timing coupling: app.js redraws the mirror every NATIVE_IDLE_MS (500 ms) and the stub cycles
+  // three colours at 10 fps (a 300 ms cycle), so each redraw moves 5 frames and the colour changes.
+  // If NATIVE_IDLE_MS becomes a multiple of 300 ms, every redraw lands on the same colour and this
+  // check fails for a reason unrelated to the picture: change the stub's frame count or rate then.
   const mirror = (await coloursSeen(page, NATIVE_MIRROR, 3000)).filter((c) => c.length === 1);
   expect(mirror.length, `the native mirror follows the live picture (saw ${mirror})`).toBeGreaterThanOrEqual(2);
 
@@ -143,4 +160,35 @@ test("with the service worker controlling the page an iPhone tap still opens the
   expect(calls[0].hasStream).toBe(true);
   await expect(page.locator('[data-role="picture-wrap"]')).toHaveAttribute("data-fullscreen", "false");
   expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
+// The page errors WebKit logs when the OLD worker's proxied picture stream is aborted (see below).
+const OLD_WORKER_STREAM_ABORT = new Set(["pageerror: ", "pageerror: Cannot load .", "pageerror: Load failed"]);
+
+// Every installed phone is in this state when the fixed hub goes live: it still runs the old
+// worker that proxies every request. One ordinary reload must install the new worker and bring the
+// picture back (the new worker claims the page, and the page's 5 s picture retry then fetches the
+// stream natively). On WebKit the picture can only appear once the new worker is in control; on
+// Chromium the old worker never broke the picture, so there this only proves the upgrade is clean.
+test("a phone still on the old proxy-everything worker takes the new one on its next load and the picture returns (issue 1379)", async ({ page, request }) => {
+  const seen = watchConsole(page);
+  await request.get("/__test/legacy-sw/on");
+  await openControlledByWorker(page);
+  await request.get("/__test/legacy-sw/off");
+
+  await page.reload();
+  const img = page.locator('[data-role="picture"]');
+  await expect(img, "the picture is back after one reload").toBeVisible({ timeout: 20000 });
+  const settled = seen.length;
+  const colours = (await coloursSeen(page, '[data-role="picture"]', 2500)).filter((c) => c.length === 1);
+  expect(colours.length, `the picture keeps updating (saw ${colours})`).toBeGreaterThanOrEqual(2);
+
+  // Until the new worker serves the page, the OLD worker's proxied picture stream gets aborted (while
+  // it is in control, and once more when the new worker takes the reloaded page over), and WebKit
+  // reports each abort as a stack-less page error ("", "Cannot load .", "Load failed") next to a
+  // failed /interkom.mjpeg request (probed 27.9.2026). That is the broken state and its one-time
+  // handover; nothing else may log then, and nothing at all once the picture is back.
+  const handover = seen.slice(0, settled).filter((e) => !OLD_WORKER_STREAM_ABORT.has(e));
+  expect(handover, "only the old worker's aborted picture stream may log during the upgrade").toEqual([]);
+  expect(seen.slice(settled), "the console stays completely clean once the picture is back").toEqual([]);
 });

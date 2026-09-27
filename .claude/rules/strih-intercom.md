@@ -874,10 +874,24 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
     asserts `controller` is set.
   - The picture must decode at 320x180, and its centre band must change colour (at least two of
     red / green / blue), which proves progressive delivery and not one frozen part.
-  - The second test is the iPhone native-player tap with the worker in control.
+  - The second test is the iPhone native-player tap with the worker in control. It also requires the
+    video's track to be the mirror canvas's capture track (`track.canvas === nativeCanvas`).
+  - The third test is the upgrade every installed phone takes: `/__test/legacy-sw/on` makes the
+    stub serve the old proxy-everything worker, the page is loaded under it, then one reload with
+    the new worker must bring the picture back. While the old worker is in control, and once more at
+    the handover, WebKit logs its aborted proxied stream as stack-less page errors (`""`,
+    `"Cannot load ."`, `"Load failed"`) next to a failed `/interkom.mjpeg` request. Only those may
+    appear before the picture is back, and nothing after.
   - `stub_hub.py` streams the three committed frames `fixtures/picture-{0,1,2}.jpg` as HTTP/1.1
     chunked multipart parts framed like `mjpeg_part`, at 10 fps, until the client leaves. Stdlib
-    Python has no JPEG encoder, so the frames are committed files (made once with PIL).
+    Python has no JPEG encoder, so the frames are committed files (made once with PIL). The real
+    phone gets HTTP/2 over TLS from the dev1 nginx front; the bypass does not depend on the
+    transport.
+  - Timing coupling: the mirror check needs `NATIVE_IDLE_MS` (500 ms) NOT to be a multiple of the
+    stub's 300 ms colour cycle, or every redraw lands on the same colour. Change the stub's frame
+    count or rate if that interval ever moves.
+  - `tests/python/test_intercom_webui_1345.py` also checks statically that `sw.js` names
+    `"/interkom.mjpeg"` and carries the version line.
   - It runs in the Chromium `phone` project AND the `iphone-webkit` project (`devices["iPhone
     14"]`). The WebKit project runs only this spec, because the audio specs need Chromium's fake
     media devices. The `intercom-web-e2e` CI job installs `chromium webkit`.
