@@ -67,6 +67,17 @@ test("a phone still on the old proxy-everything worker takes the new one and the
   });
   expect(swapped, "the new worker takes the page over").toBe(true);
 
+  // The running page heals by itself: its 5 s picture retry now goes past the new worker. Once the
+  // picture is back, this document too must stay clean with no failed picture request.
+  const img = page.locator('[data-role="picture"]');
+  await expect(img, "the running page shows the picture again").toBeVisible({ timeout: 15000 });
+  const seenAtHeal = seen.length;
+  const failedAtHeal = failedPictures;
+  const healed = await pictureColours(page, 2500);
+  expect(healed.length, `the healed picture keeps updating (saw ${healed})`).toBeGreaterThanOrEqual(2);
+  expect(seen.slice(seenAtHeal), "the console stays clean once the running page has healed").toEqual([]);
+  expect(failedPictures - failedAtHeal, "no picture request fails once the running page has healed").toBe(0);
+
   // The next load: from its commit on, the console must stay completely clean and no picture
   // request may fail.
   let seenAtCommit = -1;
@@ -81,7 +92,7 @@ test("a phone still on the old proxy-everything worker takes the new one and the
   page.off("framenavigated", onNavigated);
   expect(seenAtCommit, "the reload committed a new document").toBeGreaterThanOrEqual(0);
 
-  await expect(page.locator('[data-role="picture"]'), "the next load shows the picture").toBeVisible({ timeout: 15000 });
+  await expect(img, "the next load shows the picture").toBeVisible({ timeout: 15000 });
   const colours = await pictureColours(page, 2500);
   expect(colours.length, `the picture keeps updating (saw ${colours})`).toBeGreaterThanOrEqual(2);
   expect(seen.slice(seenAtCommit), "the console stays completely clean on the next load").toEqual([]);

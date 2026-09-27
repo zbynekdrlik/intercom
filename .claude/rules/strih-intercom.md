@@ -889,8 +889,10 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
     worker; the page is loaded under it; the test PROVES that worker breaks the picture (a failed
     `/interkom.mjpeg` request in the controlled page, counted after `openControlledByWorker`
     because its reload also cancels the uncontrolled page's stream); `/off`; then an explicit
-    `reg.update()` must end in a `controllerchange`, and the next load must show the moving picture
-    with a completely clean console and no failed picture request from its commit on.
+    `reg.update()` must end in a `controllerchange`. The running page must then heal by itself
+    (its 5 s picture retry goes past the new worker; about 1-4 s), and the next load must show the
+    moving picture too. Both must keep a clean console and no failed picture request, the running
+    page from the moment its picture is back, the next load from its commit on.
     - Why not a bare reload under the old worker: it races the swap (the "context closed" above),
       and while the old worker proxies the picture WebKit logs a varying set of errors per failed
       request (page errors `""` / `"Cannot load ."` / `"Load failed"`, sometimes a console `Failed
@@ -900,7 +902,8 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
       fresh load by `picture-sw.spec.js`.
     - Mutants it catches: the switch path broken (404), the switch silently serving the new worker,
       and the pre-fix worker as the "new" one. Local stability (27.9.2026): 55/55 WebKit repeats of
-      the final version, 140/140 across the explicit-update design.
+      the final version (with the same-document heal check), 195/195 across the explicit-update
+      design.
   - `stub_hub.py` streams the three committed frames `fixtures/picture-{0,1,2}.jpg` as HTTP/1.1
     chunked multipart parts framed like `mjpeg_part`, at 10 fps, until the client leaves. Stdlib
     Python has no JPEG encoder, so the frames are committed files (made once with PIL). The real
