@@ -93,6 +93,29 @@ pub fn pipe_fill_bytes<F: AsFd>(pipe: F) -> io::Result<usize> {
     usize::try_from(queued).map_err(|_| io::Error::other("FIONREAD reported a negative pipe fill"))
 }
 
+/// Whether a pipe's read end has closed (the pw-cat child exited): `poll` reports `POLLERR` on the
+/// write end of a pipe that has no reader left. A sink that writes nothing (the start hold) never
+/// gets the `EPIPE` a write would, so it asks this instead (review round 1, issue 1401). Never
+/// blocks (timeout 0); a signal interrupting the call reads as "still there".
+pub fn pipe_reader_gone<F: AsFd>(pipe: F) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd: pipe.as_fd().as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the whole call, which never blocks (timeout 0); the fd is
+    // borrowed from its live owner for that call.
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(pfd.revents & libc::POLLERR != 0)
+}
+
 /// The bytes one block write puts into the pipe for `plan`, or `None` when the block is not written
 /// (a trim or the start hold): the silence of a top-up in front of the block, or the block stretched
 /// by one frame for a servo correction ([`stretch_interleaved`]).
@@ -146,7 +169,15 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         }
     }
 
+    /// The pipe fill in frames, or `BrokenPipe` once pw-cat closed its end: every reading, held or
+    /// written, notices a dead child, so the sink thread respawns it.
     fn fill_frames(&self) -> io::Result<usize> {
+        if pipe_reader_gone(&self.pipe)? {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "pw-cat closed its stdin pipe",
+            ));
+        }
         Ok(pipe_fill_bytes(&self.pipe)? / (self.channels * 2))
     }
 
