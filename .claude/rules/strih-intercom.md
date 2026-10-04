@@ -202,8 +202,10 @@ original migrated collection had it in all 7 program scenes).
   `fohabl-strih` + `lv1-strih`). The engine SUMS those streams into the participant's output via the
   matrix points (no new mixing code — the existing `program_ref` → `program_out` points do it); the
   block loop feeds `output.interleaved(program_out)` to a supervised `pw-cat --playback --target
-  strih-program` child (`PwCatSink`), through the pipe fill guard of issue 1401 (every write
-  measures the stdin pipe and keeps it at 2 graph quanta; see "VBAN legs", the egress bullet).
+  strih-program` child (`PwCatSink`), through the pipe fill controller of issue 1401 (the stdin
+  pipe is measured before every write and every ~1 ms between them, primed to 2 graph quanta,
+  held at the start until pw-cat reads, then servo-held at 1792 frames; see "VBAN legs", the
+  egress bullets).
 - **INGRESS — the talkback (`cutters` becomes a `pipewire` participant with `pipewire_source`):** a
   supervised `pw-cat --record --target <MiniFuse pro-input node>` child (`PwCatSource`) frames its
   stdout into blocks pushed into the `cutters` `JitterBuffer` the engine already pops — so the
@@ -397,13 +399,16 @@ are on issue 1401 (comment 5977982465).
     [servo=<drops>/<repeats>]`. The total still leads, so a `underruns=(\d+)` parser keeps
     working; a leg is named only when its sum > 0.
   - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
-- **The program audio is later: fixed within a run (clock drift aside), varying per restart.**
-  fohabl/lv1 feed `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed
-  with every restart; now it is the 32 ms program-feed target, plus the pw-cat pipe depth below
-  (at least the ~43 ms target, more by whatever pw-cat's connect left, and that part still varies
-  per restart). Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345
-  "10-20 ms" acceptance (design comment 5813703805) was about the talkback ring, not the program
-  feed; the 1401 designs accepted these delays knowingly.
+- **The program audio is later, by the same amount after every restart.** fohabl/lv1 feed
+  `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed with every
+  restart. Now it is:
+  - the 32 ms program-feed target;
+  - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below,
+    within about 1 ms whatever pw-cat's connect time.
+  
+  Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345 "10-20 ms"
+  acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
+  1401 designs accepted these delays knowingly.
 - **Supervisor live check after a hub deploy:**
   - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
     `target_frames` 1536 (a cambox: 768), `depth_frames` within +-16 of it, `depth_min_frames`
@@ -424,34 +429,63 @@ are on issue 1401 (comment 5977982465).
     write (16929 missed ticks, a full egress queue) drained it for good; below one quantum every
     cycle blocked and xrunned (ERR ~50/s on the program sink AND the cutters' MiniFuse cans, the
     pipe 0 bytes in 9 of 10 reads) until a hub restart.
-  - **The fill guard (`local_audio::PipeFillWriter`, the one `PwCatSink` for both sinks).** Before
-    each block it reads the pipe fill with `FIONREAD` on the write end (`pipe_fill_bytes`, the
-    hub's direct `libc` dependency; bytes per frame = channels x 2). `pipe_fill_plan(fill, block)`:
-    below one hub block -> top up with silence to `PIPE_TARGET_FRAMES` (2 quanta = 2048 frames,
-    42.7 ms), then write the block; above `PIPE_HIGH_FRAMES` (target + 2 quanta = 4096) -> drop the
-    block; otherwise write it. A drained pipe now costs ONE short silent gap, not continuous
-    chopping.
+  - **The guards (`pipe_fill::pipe_fill_plan`, last resort).** Before each block
+    `local_audio::PipeFillWriter` (the one `PwCatSink` for both sinks) reads the pipe fill with
+    `FIONREAD` on the write end (`pipe_fill_bytes`, the hub's direct `libc` dependency; bytes per
+    frame = channels x 2). Below one hub block -> top up with silence to `PIPE_TARGET_FRAMES`
+    (2 quanta = 2048 frames, 42.7 ms), then write the block. Above `PIPE_HIGH_FRAMES` (target + 2
+    quanta = 4096) -> drop the block (a trim). A drained pipe costs ONE short silent gap, not
+    continuous chopping. Since step 2 neither fires in a healthy run (see the servo below).
   - The first write after a spawn reads 0 and gets the same top-up, but it is the PRIME: logged at
     info, not counted as a refill. A refill (a pipe that drained under a running pw-cat) logs one
-    warn line `pipe ran low — topped up with silence`; a trim is debug only.
-  - **The start depth is the prime plus pw-cat's connect time.** pw-cat reads nothing until its
-    stream is streaming, and the hub keeps writing one block per tick meanwhile. The trim only drops
-    above 4096, so that backlog stays: the steady fill (and the program audio delay) is the target
-    (riding ~1024..2304 as pw-cat takes its 1024-frame quanta) plus the connect backlog, up to the
-    trim mark, and it can differ after every hub or pw-cat restart (review round 1 measured
-    ~3000..4096 frames, 62-85 ms). A read well above ~2304 is this, not a fault. Holding the
-    pipe at the target until pw-cat first consumes would make it the same every restart; that is
-    a design change, raised to the main session on the ticket.
-  - **Clock drift is not corrected on the pipe.** The hub ticks on the system clock and each
-    pw-cat sink is pulled by its PipeWire driver (the MiniFuse crystal for the cans). Any rate
-    offset walks the fill, 2.4 frames/s at 50 ppm. From the 2048 target a fast hub reaches the trim
-    mark in ~14 min and then trims a 5.3 ms block every ~107 s; a slow hub drains to one block in
-    ~12 min and then refills, a gap of up to 43 ms every ~14 min (2304 -> 256). From the measured
-    start depth (~3000..4096) a fast hub trims almost at once and a slow hub takes ~19-27 min to
-    its first refill. The guard bounds both, it does not remove them. A one-frame drop/repeat
-    servo on the pipe fill (the VBAN legs' drift-servo idea) is the follow-up.
-  - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims` and the last
-    `pipe_fill_frames` (measured before the last write). `tx_blocks` counts written blocks only.
+    warn line `pipe ran low — topped up with silence`; a trim is debug only. Both restart the
+    servo's window, like an underrun / overrun on a VBAN leg.
+  - **Egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274, design question 5979620130): a fixed
+    start depth and a drift servo.** `pipe_fill::PipeFillControl` (pure, clocked in ns by the
+    caller) plans every write: the guards, then the start hold, then the servo.
+    - **Start hold.** pw-cat reads nothing until its stream runs, and the hub kept writing on top
+      of the prime (62-85 ms, different after every restart). Until the fill first DROPS after the
+      spawn, a block that would take the fill above `PIPE_TARGET_FRAMES` is dropped (`StartHold`,
+      counted in `pipe_start_holds`, a debug line). pw-cat's first read therefore always finds
+      exactly the prime: the target + the prime's own block, 2304.
+    - **Servo.** The cans' sink is clocked by the MiniFuse crystal, not the hub's timer. Before
+      step 2 a 50 ppm offset ended in a 5.3 ms trim every ~107 s or a refill gap of up to 43 ms
+      every ~14 min. Now the VBAN legs' own `NetworkFill` holds the pipe: `servo_step` (the
+      `plan_pop` tail, extracted, ingress identical), with the 1 s mean, the gentle-then-steep
+      budget and >= 1000 frames between corrections. A drop / repeat writes the block one frame
+      short / long, spread per channel by `stretch_interleaved` (`stretch_block`).
+    - **The servo reads the TIME-WEIGHTED fill, never the pre-write readings.** pw-cat takes four
+      hub blocks at once. Between two read/write phase crossings the pre-write readings repeat the
+      same four values, so a drift reached them only as a whole-block (256-frame) step at each
+      crossing (every ~107 s at 50 ppm). The servo answered those with bursts of up to 47
+      corrections a second (the model on design question 5979620130). So the sink thread waits
+      with `recv_timeout(PIPE_SAMPLE_INTERVAL)` (1 ms) and reads the pipe (`sample_fill`) when no
+      block came, about 1000 `FIONREAD`s a second per sink (accepted). Each block's servo input is
+      the trapezoid mean of the readings since the last block.
+    - **Setpoint = the depth the hold leaves.** `pipe_servo_setpoint(block)` = target + block -
+      quantum / 2 = 1792 frames (37.3 ms), derived in code. That is the prime minus half a quantum,
+      the time-average over a read cycle and over where the first read falls in a hub block. So a
+      spawn starts on its setpoint: no walk-in, the same depth after every restart.
+    - **Never** go back to a setpoint of `PIPE_TARGET_FRAMES` on the pre-write fill: its mean sits
+      `(quantum + block) / 2` under the hold level, a +384-frame walk at 47 corrections a second
+      after every spawn.
+    - Measured on the two-clock bench (`tests/egress_servo_1401.rs`; pw-cat at quantum 1024 vs
+      256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact event times):
+      - 0 ppm: no corrections after 60 s, true depth within 18 of 1792;
+      - +-50 ppm: <= 3 corrections a second, true depth within 53;
+      - +-200 ppm: rate 9.6 a second (median 10, a bench second straddling two servo windows up to
+        15), true depth within 140;
+      - 0 trims, 0 refills, 0 starved reads in every 1 h run;
+      - 16 connect delays: first read = the prime every time, <= 9 corrections a second after the
+        spawn, settled (the servo's measured depth within 20, the true within 22) by 60 s, all 16
+        true depths 1775..1813;
+      - the residual is the 1 ms readings placing each read only within a millisecond, on top of
+        the servo's 16-frame band.
+  - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims`, the last
+    `pipe_fill_frames` (measured before the last write; it rides pw-cat's quantum reads, the
+    setpoint -/+ ~384, so never judge the depth from it), `pipe_start_holds`, `pipe_servo_drops`,
+    `pipe_servo_repeats`, `pipe_depth_frames` (the servo's 1 s time-weighted mean) and
+    `pipe_setpoint_frames` (1792). `tx_blocks` counts written blocks only (a corrected block is one).
   - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
     that is off wait in its unresolved ARP neighbour queue, charged to the socket that sent them.
     With ONE shared socket the queues of several off camboxes together filled its send buffer and
@@ -474,10 +508,17 @@ are on issue 1401 (comment 5977982465).
   - **Supervisor live check after the deploy (no FIONREAD needed):**
     - `pw-top -b` on strih-lx: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
       row's driver (the MiniFuse for the cans);
-    - `/api/state` -> `program_out` and `cutters` `local_audio`: `pipe_fill_frames` between one
-      block and 4096 (target ~1024..2304 plus the connect backlog, see above), `pipe_refills` 0
-      and `pipe_trims` flat; watch the `pipe_fill_frames` trend for at least 1 h, a steady walk is
-      clock drift (see above);
+    - `/api/state` -> `program_out` and `cutters` `local_audio` (egress step 2):
+      `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-60 of it, and within +-20 on the
+      program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
+      reading) anywhere in depth - 640 .. depth + 384, ~1000..2350 (it rides pw-cat's 1024-frame
+      reads); `pipe_refills` 0 and `pipe_trims` flat;
+      `pipe_start_holds` grows only at a pw-cat (re)spawn (pw-cat's connect time / 5.33 ms
+      blocks each), together with `spawns`;
+    - over >= 1 h: `pipe_servo_drops - pipe_servo_repeats` grows at the sink's drift and no
+      faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0); a jump of
+      hundreds within a minute is a burst, a finding. Note each `pw-cat` row's driver in `pw-top`
+      (the MiniFuse for the cans);
     - the status line shows no `missed=` while camboxes are off, and `tx_dropped` stays 0 on every
       leg; an off cambox shows as `unresolved_discards` rising (or `ip -s neigh show <ip>`
       INCOMPLETE/FAILED), not in the hub.
@@ -486,7 +527,15 @@ are on issue 1401 (comment 5977982465).
     counters, `classify_send`, `tx_dropped` on the facet + status line, the `main.rs` anchor of one
     sender per output, the sink-thread anchor feeding `record_write`) and `vban_io`'s in-file
     `a_sender_socket_never_blocks` (a `recv_from` with a 2 s timeout must return `WouldBlock` at
-    once).
+    once). Step 2: `tests/egress_servo_1401.rs`:
+    - the setpoint and its derivation, `servo_step` == the pop servo, `stretch_interleaved`, the
+      bytes per plan;
+    - the start hold, pure and on a real pipe;
+    - the facet counters, the sink-thread `recv_timeout` / `sample_fill` anchor;
+    - the two-clock bench (the 16 spawns, 0 / +-50 / +-200 ppm for 1 h; < 1 s in a debug build).
+    
+    Its bench seconds are not the servo's 1 s windows, so a per-second bound allows a straddled
+    second, the ingress bench's lesson.
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
     same change, which had grown past the ~300-line budget); `main()` only builds the
     `BlockLoop` and spawns it.
@@ -497,7 +546,13 @@ are on issue 1401 (comment 5977982465).
     (`intercom_hub::` -> `crate::`) runs the real-pipe FIONREAD test under plain `rustc --test`,
     and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
     copy its changed send-loop lines into the replica to type-check them against the real
-    `vban_io`.
+    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the servo + ingress test
+    files (`vban_jitter_1401.rs`, `vban_jitter_bench_1401.rs`) as modules, so one replica proves
+    both the egress acceptance and the unchanged ingress behaviour after the `servo_step`
+    extraction. Cut the tests' `serde_json` key checks (they compile at CI). For the RED, build
+    the same root from `git show <base>:` sources without `pipe_fill`. Compile the bench at
+    `-C opt-level=2 -C debug-assertions=on -C overflow-checks=on` for speed, and once at
+    opt-level 0 for the CI runtime.
   - **Gotcha: a code move out of `main()` leaves bindings only CI's clippy sees.** Moving the
     block loop into `run_block_loop` left `let block_frames` in `main()` unread, which is
     `unused_variables` under the job's `-D warnings` (caught by review round 2, not by any
@@ -788,8 +843,9 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
     exactly the consumer's rate means nothing ever refills the pipe, so every block the hub does
     not write drains it for good, and once it holds less than a quantum every cycle blocks and
     xruns (ERR ~50/s live). The 40430 s ERR-0 reading was a run with no lost blocks. Since issue
-    1401 every write measures the pipe and tops it up to 2 quanta (see "VBAN legs" above, the
-    egress bullet).
+    1401 every write measures the pipe and tops a drained one up to 2 quanta. Since its egress step
+    2 a drift servo holds the pipe at a fixed depth, because the cans' sink runs on the MiniFuse
+    crystal, not the hub's clock (see "VBAN legs" above, the egress bullets).
 - **Opus.** `[janus].codec = "opus"` (default) | `"pcmu"`. Unknown values fail the load.
   - The join sends a top-level `codec`, `rtp.payload_type` 111 and `rtp.fec: true`. The receiver
     filters on the payload type Janus echoes in `joined` (fallback: ours).
