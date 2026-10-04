@@ -264,7 +264,8 @@ fn dropped_vban_packets_show_per_participant_and_on_the_status_line_only_when_th
         "the leading shape a parser reads: {line}"
     );
 
-    // cam2 is off: its own socket fills and its packets are dropped; cam1 sends as before.
+    // cam2's own socket backed up (a NIC or queue stall) and dropped packets; cam1 sends as
+    // before. (A cambox that is off does not land here: the kernel discards its packets.)
     let stats = vec![
         RuntimeStats {
             tx_packets: 187,
@@ -316,5 +317,30 @@ fn the_block_loop_sends_every_output_through_its_own_sender_and_counts_the_drops
     assert!(
         src.contains("s.tx_dropped = tx_dropped[id]"),
         "the drops reach /api/state"
+    );
+}
+
+#[test]
+fn the_sink_thread_counts_and_logs_every_guarded_write() {
+    // The pw-cat sink thread is not unit-testable (it spawns pw-cat); anchor that the counters the
+    // facet test above checks are the ones the thread feeds, and that a broken pipe still respawns.
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/local_audio.rs");
+    let src = std::fs::read_to_string(&p).expect("read local_audio.rs");
+    let sink_loop = src.find("fn local_sink_loop(").expect("the sink thread");
+    let source_loop = src
+        .find("fn local_source_loop(")
+        .expect("the capture thread");
+    let body = &src[sink_loop..source_loop];
+    let write = body
+        .find("sink.write_block(&block)")
+        .expect("every block goes through the guarded write");
+    let record = body
+        .find("stats.record_write(&report)")
+        .expect("the write's report reaches the local_audio facet");
+    assert!(write < record);
+    assert!(body.contains("log_pipe_write(label, &target, &report)"));
+    assert!(
+        body.contains("Err(e) => break e"),
+        "a failed write respawns"
     );
 }
