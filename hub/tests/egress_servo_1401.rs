@@ -25,7 +25,7 @@ use intercom_hub::local_audio::{
 };
 use intercom_hub::pipe_fill::{
     pipe_servo_setpoint, stretch_interleaved, PipeFillControl, PipeFillPlan, PipeServoDepth,
-    PipeWriteReport, PIPE_SAMPLE_INTERVAL, PIPE_TARGET_FRAMES,
+    PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL, PIPE_TARGET_FRAMES,
 };
 use intercom_hub::vban_jitter::{NetworkFill, PopPlan, ServoStep};
 
@@ -213,6 +213,77 @@ fn the_start_hold_drops_blocks_until_pw_cat_first_reads() {
     let r = c.plan_block(201 * ms, PRIME - QUANTUM, BLOCK);
     assert_eq!(r.plan, PipeFillPlan::Write);
     assert_eq!(c.servo_depth().map(|d| d.setpoint_frames), Some(SETPOINT));
+}
+
+#[test]
+fn the_servo_measures_from_pw_cats_first_read() {
+    // The hold ends either at a 1 ms reading (here after a 400 ms hub stall, so the hold level
+    // would weigh in heavily) or at the pre-write reading itself. Either way the servo's first
+    // sample is the fill after the read, never the hold level before it.
+    let step = 5 * MS;
+    let after_read = PRIME - QUANTUM;
+    // Every later block reads 1280 before its write and leaves 1536 after it: a trapezoid of 1408.
+    let later = (after_read + after_read + BLOCK) / 2;
+    for drop_seen_at_a_sample in [true, false] {
+        let mut c = PipeFillControl::new();
+        c.plan_block(0, 0, BLOCK);
+        assert_eq!(
+            c.plan_block(step, PRIME, BLOCK).plan,
+            PipeFillPlan::StartHold
+        );
+        let mut t = 400 * MS;
+        if drop_seen_at_a_sample {
+            c.sample(t, after_read);
+            t += MS;
+        }
+        assert_eq!(c.plan_block(t, after_read, BLOCK).plan, PipeFillPlan::Write);
+        for _ in 0..187 {
+            t += step;
+            c.plan_block(t, after_read, BLOCK);
+        }
+        // One full servo window (188 blocks): the first sample (1280) and 187 trapezoids of 1408.
+        let expected = (after_read + 187 * later) / 188;
+        assert_eq!(
+            c.servo_depth().map(|d| d.depth_frames),
+            Some(expected),
+            "drop seen at a sample: {drop_seen_at_a_sample}"
+        );
+    }
+}
+
+#[test]
+fn a_guard_forgets_the_servos_pending_corrections() {
+    // A trim or a refill is the last resort. The budget the servo planned from the fill before it
+    // must not run on afterwards (a VBAN leg restarts its window on an underrun / overrun too).
+    let step = 16_000_000 / 3;
+    let high = SETPOINT + 400;
+    for guard_fill in [PIPE_HIGH_FRAMES + 1, 0] {
+        let mut c = PipeFillControl::new();
+        c.plan_block(0, 0, BLOCK);
+        c.sample(step / 2, PRIME - QUANTUM);
+        let mut t = step;
+        // 250 blocks far above the setpoint: the first window (188 blocks) plans a full budget of
+        // drops, and the guard comes in the middle of spending it.
+        let mut drops = 0;
+        for _ in 0..250 {
+            if c.plan_block(t, high, BLOCK).plan == PipeFillPlan::ServoDrop {
+                drops += 1;
+            }
+            t += step;
+        }
+        assert!(drops > 5, "the servo was correcting ({drops})");
+        let guard = c.plan_block(t, guard_fill, BLOCK).plan;
+        assert!(
+            matches!(guard, PipeFillPlan::Drop | PipeFillPlan::TopUp { .. }),
+            "{guard:?}"
+        );
+        // The same high fill for 150 more blocks, less than one window: no stale correction.
+        for i in 0..150 {
+            t += step;
+            let plan = c.plan_block(t, high, BLOCK).plan;
+            assert_eq!(plan, PipeFillPlan::Write, "block {i} after {guard:?}");
+        }
+    }
 }
 
 #[test]
@@ -605,6 +676,14 @@ fn a_50_ppm_sink_is_held_for_an_hour_with_a_few_corrections_a_second() {
         assert!(max <= 4, "{ppm} ppm: {max} corrections in one second");
         let err = o.max_depth_error_from(120);
         assert!(err <= 60.0, "{ppm} ppm: the true depth is off by {err:.1}");
+        // What the servo itself sees (and `pipe_depth_frames` shows) runs ~10 frames further off
+        // at this drift, because the 1 ms readings place each read only within a millisecond:
+        // measured 60-62 here, so the live check allows +-70.
+        let seen = o.max_seen_error_from(120);
+        assert!(
+            seen <= 70.0,
+            "{ppm} ppm: the measured depth is off by {seen:.1}"
+        );
         // The corrections are the drift itself: 50 ppm = 2.4 frames a second.
         let expected = 50e-6 * 48_000.0 * 3600.0;
         let net = o.drops as f64 - o.repeats as f64;
@@ -628,11 +707,17 @@ fn a_200_ppm_sink_is_held_for_an_hour_without_a_guard() {
         per_second.sort_unstable();
         let median = per_second[per_second.len() / 2];
         assert!((9..=11).contains(&median), "{ppm} ppm: median {median}/s");
-        // The bench's seconds are not the servo's windows: one second can take the tail of one
-        // window and the head of the next (each at most 11 here), never more than 15.
+        // At this drift the 1 s mean error rides just past the 128-frame knee (about 128..146),
+        // where the steep slope gives a second's budget of up to 15; the average stays the drift.
         let max = o.max_corrections_from(60);
         assert!(max <= 15, "{ppm} ppm: {max} corrections in one second");
         let err = o.max_depth_error_from(120);
         assert!(err <= 150.0, "{ppm} ppm: the true depth is off by {err:.1}");
+        // The servo's own view runs ~8 frames further off (measured 145-147).
+        let seen = o.max_seen_error_from(120);
+        assert!(
+            seen <= 160.0,
+            "{ppm} ppm: the measured depth is off by {seen:.1}"
+        );
     }
 }
