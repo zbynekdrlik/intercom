@@ -5,18 +5,20 @@
 //! a zero-padded block into the strih program mix (live: single underruns every 2-15 min on the
 //! FOH feed over a clean network).
 //!
-//! These tests pin the VBAN-leg policy through the public API: the prefill, one whole silent block
-//! per underrun and the re-prime, the overrun trim to the target, the stale / never-received rules,
-//! the mono cambox fan-out, the drift servo's single-frame corrections and their <= 1 ms/s bound,
-//! and the click-free spread of one frame across a block. The hours-long two-clock bench is
+//! These tests pin the VBAN-leg policy through the public API: the prefill (a cold start trims its
+//! overshoot back to the target), one whole silent block per underrun and the re-prime, the overrun
+//! trim to the target, the stale / never-received / muted-cambox rules (an underrun is counted only
+//! when the stream continues, a restarted stream never replays its stale tail), the mono cambox
+//! fan-out, the proportional drift servo's single-frame corrections and their <= 1 ms/s bound, and
+//! the click-free spread of one frame across a block. The hours-long two-clock bench is
 //! `vban_jitter_bench_1401.rs`.
 
 use std::time::{Duration, Instant};
 
 use intercom_hub::vban_io::{DecodedAudio, JitterBuffer, STALE_STREAM_MS};
 use intercom_hub::vban_jitter::{
-    stretch_block, NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES, SERVO_MIN_SPACING_FRAMES,
-    SERVO_WINDOW_FRAMES, VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS,
+    stretch_block, NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES, SERVO_GAIN_DIV,
+    SERVO_MIN_SPACING_FRAMES, SERVO_WINDOW_FRAMES, VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS,
 };
 
 const BLOCK: usize = 256;
@@ -59,9 +61,11 @@ fn the_target_is_three_hub_blocks_inside_the_cap() {
     const { assert!(SERVO_MIN_SPACING_FRAMES >= 1_000) };
     // A late burst has five blocks of headroom before anything is dropped.
     const { assert!(CAP >= TARGET + 5 * BLOCK) };
-    // One second of corrections (at most window / spacing frames) is smaller than the band's
-    // width, so the servo can never jump across the band and oscillate.
-    const { assert!(SERVO_WINDOW_FRAMES.div_ceil(SERVO_MIN_SPACING_FRAMES) < 2 * SERVO_DEADBAND_FRAMES) };
+    // Proportional: one corrected frame per second for every SERVO_GAIN_DIV frames of mean error
+    // beyond the band, never the whole error at once, so the servo cannot overshoot; the band is a
+    // small part of a block, so the leg settles close to its target.
+    const { assert!(SERVO_GAIN_DIV >= 2) };
+    const { assert!(SERVO_DEADBAND_FRAMES <= BLOCK / 8) };
 }
 
 // --- prefill, underrun, re-prime, overrun -------------------------------------------------------
@@ -91,6 +95,24 @@ fn a_vban_leg_prefills_to_the_target_before_the_first_pop() {
 }
 
 #[test]
+fn a_cold_start_trims_its_prime_overshoot_back_to_the_target() {
+    // The first packets arrive in a burst 300 frames past the target while silence goes out: the
+    // OLDEST 300 are dropped (inaudible, the leg is just starting), so the leg starts exactly at its
+    // target instead of the servo walking 300 frames off one at a time.
+    let t0 = Instant::now();
+    let mut jb = leg();
+    jb.push_at(&mono(ramp(0, TARGET + 300)), t0);
+    let b = jb.pop_block_at(BLOCK, t0);
+    assert_eq!(
+        b,
+        vec![ramp(300, BLOCK)],
+        "starts at the newest TARGET frames"
+    );
+    assert_eq!(jb.buffered_frames(), TARGET - BLOCK);
+    assert_eq!(jb.network_stats().unwrap().servo_drops, 0);
+}
+
+#[test]
 fn an_underrun_is_one_whole_silent_block_and_the_late_burst_resumes_seamlessly() {
     let t0 = Instant::now();
     let mut jb = leg();
@@ -105,11 +127,16 @@ fn an_underrun_is_one_whole_silent_block_and_the_late_burst_resumes_seamlessly()
     // The next packet is late: ONE whole silent block, never 100 samples + 156 zeros.
     let b = jb.pop_block_at(BLOCK, t0);
     assert!(is_silent(&b), "an underrun is a whole silent block");
-    assert_eq!(jb.underruns, 1);
     assert_eq!(jb.buffered_frames(), 100, "the partial tail is kept");
+    assert_eq!(
+        jb.underruns, 0,
+        "counted only once the stream continues (a mute is not a dropout)"
+    );
 
-    // The late packets arrive in one burst: the very next pop resumes, continuous, nothing lost.
+    // The late packets arrive in one burst: the underrun counts, the very next pop resumes,
+    // continuous, nothing lost (a re-prime after an underrun never trims).
     jb.push_at(&mono(ramp((TARGET + 100) as i16, 700)), t0);
+    assert_eq!(jb.underruns, 1);
     let b = jb.pop_block_at(BLOCK, t0);
     assert_eq!(
         b,
@@ -191,20 +218,43 @@ fn a_stale_vban_leg_counts_no_underrun_and_a_live_one_counts_one() {
     for _ in 0..3 {
         jb.pop_block_at(BLOCK, t0);
     }
-    // The stream stopped (a muted cambox): by the time it runs dry it is stale.
+    // The stream stopped: by the time it runs dry it is stale.
     let stale = t0 + Duration::from_millis(STALE_STREAM_MS + 1);
     jb.pop_block_at(BLOCK, stale);
     jb.pop_block_at(BLOCK, stale);
     assert_eq!(jb.underruns, 0, "a stale stream counts no underrun");
 
-    // It comes back, re-primes, plays, then runs dry while live: one underrun.
+    // It comes back, re-primes, plays, then runs dry while live and continues 10 ms later: one
+    // underrun.
     let back = stale + Duration::from_secs(1);
     jb.push_at(&mono(ramp(0, TARGET)), back);
     for _ in 0..3 {
         assert!(!is_silent(&jb.pop_block_at(BLOCK, back)));
     }
     assert!(is_silent(&jb.pop_block_at(BLOCK, back)));
+    jb.push_at(&mono(ramp(0, BLOCK)), back + Duration::from_millis(10));
     assert_eq!(jb.underruns, 1);
+}
+
+#[test]
+fn a_muted_cambox_counts_no_underrun_and_never_replays_its_stale_tail() {
+    // A cambox sends only while unmuted. It runs dry right after the mute, while its last packet
+    // is still fresh, and the next packet comes long after: no underrun (the status line would
+    // otherwise name the cambox and hide a real dropout), and the 100 frames left from before the
+    // mute are dropped, never played in front of the fresh audio.
+    let t0 = Instant::now();
+    let mut jb = leg().with_min_channels(2);
+    jb.push_at(&mono(ramp(0, TARGET + 100)), t0);
+    for _ in 0..3 {
+        jb.pop_block_at(BLOCK, t0);
+    }
+    assert!(is_silent(&jb.pop_block_at(BLOCK, t0)), "ran dry");
+    let unmute = t0 + Duration::from_secs(2);
+    jb.push_at(&mono(ramp(10_000, TARGET)), unmute);
+    assert_eq!(jb.underruns, 0, "a mute is not a dropout");
+    assert_eq!(jb.buffered_frames(), TARGET, "the stale tail is gone");
+    let b = jb.pop_block_at(BLOCK, unmute);
+    assert_eq!(b, vec![ramp(10_000, BLOCK), ramp(10_000, BLOCK)]);
 }
 
 #[test]
@@ -239,11 +289,14 @@ fn advances(prev: &mut u64, now: u64, pop: usize, at: &mut Vec<usize>) {
 fn a_high_fill_is_walked_down_by_single_frame_drops_at_most_1ms_per_s() {
     let t0 = Instant::now();
     let mut jb = leg();
-    // Primed 400 frames above the target, then a steady exact feed of one block per pop.
-    jb.push_at(&mono(vec![100; TARGET + 400]), t0);
+    // Primed at the target, then a mid-stream burst leaves 400 frames above it (a re-prime never
+    // trims), then a steady exact feed of one block per pop.
+    jb.push_at(&mono(vec![100; TARGET]), t0);
+    jb.pop_block_at(BLOCK, t0);
+    jb.push_at(&mono(vec![100; BLOCK + 400]), t0);
     let mut drops = 0u64;
     let mut at = Vec::new();
-    for pop in 0..(20 * 48_000 / BLOCK) {
+    for pop in 0..(40 * 48_000 / BLOCK) {
         let b = jb.pop_block_at(BLOCK, t0);
         assert_eq!(b[0].len(), BLOCK, "every pop is exactly one block");
         assert!(!is_silent(&b), "the servo never starves the leg");
@@ -264,8 +317,19 @@ fn a_high_fill_is_walked_down_by_single_frame_drops_at_most_1ms_per_s() {
         "the mean fill is back in the band: {s:?}"
     );
     assert!(s.depth_frames + SERVO_DEADBAND_FRAMES >= TARGET, "{s:?}");
+    assert!(
+        s.servo_drops <= 400,
+        "never more than the excess: no overshoot {s:?}"
+    );
     assert_eq!(jb.underruns, 0);
     assert_eq!(jb.overruns, 0);
+}
+
+/// The proportional servo's equilibrium distance from the target for a sender `ppm` off the hub:
+/// the band plus `SERVO_GAIN_DIV` frames per corrected frame per second, plus slack.
+fn equilibrium_offset(ppm: f64) -> usize {
+    let per_s = (ppm.abs() * 1e-6 * 48_000.0).ceil() as usize;
+    SERVO_DEADBAND_FRAMES + SERVO_GAIN_DIV * per_s + 16
 }
 
 /// A count-level feed at `ppm` against the exact pop clock: `(ran_dry, drops, repeats, final)`.
@@ -276,7 +340,7 @@ fn ppm_feed(ppm: f64, secs: usize) -> (u64, u64, u64, NetworkFill) {
     for _ in 0..(secs * 48_000 / BLOCK) {
         match f.plan_pop(fill, BLOCK) {
             PopPlan::Silent { ran_dry: d } => ran_dry += u64::from(d),
-            PopPlan::Audio { take } => fill -= take,
+            PopPlan::Audio { skip, take } => fill -= skip + take,
         }
         owed += per_pop;
         let arrive = owed.floor();
@@ -307,7 +371,7 @@ fn a_slow_sender_is_absorbed_by_single_frame_repeats_never_an_underrun() {
     );
     let s = f.stats();
     assert!(
-        s.depth_frames + SERVO_DEADBAND_FRAMES + 48 >= TARGET,
+        s.depth_frames + equilibrium_offset(-500.0) >= TARGET,
         "{s:?}"
     );
 }
@@ -326,7 +390,7 @@ fn a_fast_sender_is_absorbed_by_single_frame_drops_never_an_overrun() {
     );
     let s = f.stats();
     assert!(
-        s.depth_frames <= TARGET + SERVO_DEADBAND_FRAMES + 48,
+        s.depth_frames <= TARGET + equilibrium_offset(540.0),
         "{s:?}"
     );
 }
@@ -354,7 +418,7 @@ fn steady_feed_corrections(pattern: &[usize], phase: usize, secs: usize, settle_
         let before = f.stats();
         match f.plan_pop(fill, BLOCK) {
             PopPlan::Silent { ran_dry } => assert!(!ran_dry, "a steady feed never runs dry"),
-            PopPlan::Audio { take } => fill -= take,
+            PopPlan::Audio { skip, take } => fill -= skip + take,
         }
         let after = f.stats();
         let corrected =
@@ -369,11 +433,11 @@ fn steady_feed_corrections(pattern: &[usize], phase: usize, secs: usize, settle_
 #[test]
 fn the_servo_leaves_a_steady_exact_feed_alone_once_settled() {
     // The FOH feed (103 frames at 96 kHz = 51/52 at 48 kHz), a cambox (128) and a 256-frame
-    // sender, at many start phases: after the first 20 s the servo makes no correction at all.
+    // sender, at many start phases: after the first 30 s the servo makes no correction at all.
     for pattern in [&[51usize, 52][..], &[128], &[256]] {
         for phase in (0..BLOCK).step_by(16) {
             assert_eq!(
-                steady_feed_corrections(pattern, phase, 120, 20),
+                steady_feed_corrections(pattern, phase, 120, 30),
                 0,
                 "packets {pattern:?}, phase {phase}"
             );

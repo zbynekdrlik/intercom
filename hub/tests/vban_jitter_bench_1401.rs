@@ -29,6 +29,8 @@ const CAP: usize = VBAN_CAP_BLOCKS * BLOCK;
 const WINDOW_POPS: usize = 188;
 /// Fill and band statistics start after this (start-up prime + the servo's first settle).
 const SETTLE_S: f64 = 30.0;
+/// "Recovered" after a stall = every 1 s mean pre-pop fill is back within this of the target.
+const RECOVERED_BAND: usize = 64;
 /// The FOH program feed after the 96 -> 48 kHz decimation.
 const FOH: &[usize] = &[51, 52];
 /// A cambox's mono talkback packet.
@@ -125,6 +127,8 @@ struct Outcome {
     max_window_dev: usize,
     /// The fewest output frames between two corrections.
     min_correction_gap: usize,
+    /// The most corrections inside one 1 s window after the settle (the servo spreads them).
+    max_window_corrections: u64,
     /// After a stall: seconds from its end until the last time the leg was not primed or its 1 s
     /// mean fill was outside the servo band.
     recovered_s: f64,
@@ -208,6 +212,7 @@ fn run(sc: &Scenario) -> Outcome {
     let mut audio_frames = 0usize;
     let mut last_correction: Option<usize> = None;
     let mut window: VecDeque<usize> = VecDeque::with_capacity(WINDOW_POPS);
+    let mut window_corrections = 0u64;
     let mut last_bad_t = 0.0f64;
 
     for k in 1..=pops {
@@ -230,13 +235,15 @@ fn run(sc: &Scenario) -> Outcome {
                 out.ran_dry += u64::from(ran_dry);
                 out.silent_after_prime += u64::from(primed_once);
                 window.clear();
+                window_corrections = 0;
                 last_bad_t = t;
             }
-            PopPlan::Audio { take } => {
+            PopPlan::Audio { skip, take } => {
                 primed_once = true;
-                fill -= take;
+                fill -= skip + take;
                 audio_frames += BLOCK;
                 if take != BLOCK {
+                    window_corrections += 1;
                     if take > BLOCK {
                         out.drops += 1;
                     } else {
@@ -257,11 +264,14 @@ fn run(sc: &Scenario) -> Outcome {
                     let dev = mean.abs_diff(TARGET);
                     if settled {
                         out.max_window_dev = out.max_window_dev.max(dev);
+                        out.max_window_corrections =
+                            out.max_window_corrections.max(window_corrections);
                     }
-                    if dev > SERVO_DEADBAND_FRAMES {
+                    if dev > RECOVERED_BAND {
                         last_bad_t = t;
                     }
                     window.clear();
+                    window_corrections = 0;
                 }
             }
         }
@@ -293,9 +303,25 @@ fn assert_clean(sc: &Scenario, o: &Outcome, extra_net_drops: f64) {
     );
     let net = o.drops as f64 - o.repeats as f64;
     let expected = drift_frames(sc) + extra_net_drops;
+    let slack = (2 * BLOCK) as f64;
     assert!(
-        (net - expected).abs() <= (2 * BLOCK) as f64,
+        (net - expected).abs() <= slack,
         "the servo takes out exactly the drift: net {net} vs {expected}\n{ctx}"
+    );
+    // No hunting: the jitter does not make it correct back and forth.
+    let total = (o.drops + o.repeats) as f64;
+    assert!(
+        total <= expected.abs() * 1.05 + slack,
+        "corrections {total} vs the drift {expected}\n{ctx}"
+    );
+}
+
+/// The corrections a slow drift needs (0.5-20 ppm = up to about one frame per second) are spread
+/// out, never a second-long burst at the full 1 ms/s rate.
+fn assert_spread(o: &Outcome) {
+    assert!(
+        o.max_window_corrections <= 3,
+        "a slow drift is corrected a frame or two per second, not in bursts\n{o:?}"
     );
 }
 
@@ -306,6 +332,7 @@ fn program_feed_8h_at_plus_20ppm_never_underruns() {
     let sc = Scenario::new(FOH, 20.0, 1.0, 8.0 * 3600.0, 1);
     let o = run(&sc);
     assert_clean(&sc, &o, 0.0);
+    assert_spread(&o);
     assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
 }
 
@@ -314,7 +341,17 @@ fn program_feed_8h_at_minus_20ppm_never_underruns() {
     let sc = Scenario::new(FOH, -20.0, 1.0, 8.0 * 3600.0, 2);
     let o = run(&sc);
     assert_clean(&sc, &o, 0.0);
+    assert_spread(&o);
     assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
+}
+
+#[test]
+fn program_feed_at_the_measured_half_ppm_is_corrected_a_frame_at_a_time() {
+    // The live fohabl-strih rate (+0.50 ppm, 4.10.2026): about one frame of drift every 40 s.
+    let sc = Scenario::new(FOH, 0.5, 1.0, 2.0 * 3600.0, 11);
+    let o = run(&sc);
+    assert_clean(&sc, &o, 0.0);
+    assert_spread(&o);
 }
 
 #[test]
@@ -323,6 +360,7 @@ fn mono_cambox_leg_8h_at_plus_and_minus_20ppm_never_underruns() {
         let sc = Scenario::new(CAMBOX, ppm, 1.0, 8.0 * 3600.0, seed);
         let o = run(&sc);
         assert_clean(&sc, &o, 0.0);
+        assert_spread(&o);
         assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
     }
 }
@@ -344,6 +382,7 @@ fn a_bursty_program_sender_never_underruns() {
     sc.burst = 5;
     let o = run(&sc);
     assert_clean(&sc, &o, 0.0);
+    assert_spread(&o);
 }
 
 #[test]
@@ -355,6 +394,47 @@ fn missed_hub_ticks_are_walked_back_without_a_trim() {
     let o = run(&sc);
     let skipped = (sc.secs / 30.0).floor();
     assert_clean(&sc, &o, skipped * BLOCK as f64);
+}
+
+// --- the bench can tell the policies apart ---------------------------------------------------
+
+/// The pre-1401 network policy on the same arrivals: pop whatever is queued, zero-pad a short
+/// block (one underrun once the leg has received audio), drop down to the cap above it. Returns
+/// the zero-padded pops.
+fn run_old_policy(sc: &Scenario) -> u64 {
+    let mut sender = Sender::new(sc);
+    let mut rng = Rng(sc.seed ^ 0xA5A5_A5A5);
+    let period = BLOCK as f64 / RATE;
+    let pops = (sc.secs / period) as usize;
+    let (mut fill, mut received, mut short) = (0usize, false, 0u64);
+    let mut next = sender.next();
+    for k in 1..=pops {
+        let t = k as f64 * period + rng.unit() * sc.hub_late_ms * 1e-3;
+        while next.0 <= t {
+            fill = (fill + next.1).min(CAP);
+            received = true;
+            next = sender.next();
+        }
+        if fill < BLOCK {
+            short += u64::from(received);
+            fill = 0;
+        } else {
+            fill -= BLOCK;
+        }
+    }
+    short
+}
+
+#[test]
+fn the_bench_tells_the_old_policy_from_the_new_one() {
+    // The FOH feed at the measured +0.5 ppm with only 0.2 ms sd of jitter for 30 min: the old
+    // policy zero-pads blocks (the live pattern), the new one on the SAME arrivals never does.
+    let sc = Scenario::new(FOH, 0.5, 0.2, 1800.0, 10);
+    let old = run_old_policy(&sc);
+    assert!(old > 0, "the old policy zero-pads blocks: {old}");
+    let o = run(&sc);
+    assert_eq!(o.ran_dry, 0, "{o:?}");
+    assert_eq!(o.silent_after_prime, 0, "{o:?}");
 }
 
 // --- a real stall: one counted, bounded outcome ----------------------------------------------
