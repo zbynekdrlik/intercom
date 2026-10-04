@@ -33,6 +33,9 @@ pub const JANUS_ONLY_ROLE: &str = "phones";
 /// The role of the local PipeWire program sink OBS captures (`ASIO zvuk`) — issue 1344.
 pub const PROGRAM_OUT_ROLE: &str = "program_out";
 
+/// The role of a camera box (cam1..7): its VBAN talkback stream stops whenever it is muted.
+pub const CAMBOX_ROLE: &str = "cambox";
+
 /// Roles a participant plays (informational + validated at load; the engine never branches on it).
 const KNOWN_ROLES: &[&str] = &[
     "cambox",
@@ -341,7 +344,7 @@ impl Matrix {
         let cambox_streams: std::collections::HashSet<&str> = raw
             .participants
             .iter()
-            .filter(|p| p.role == "cambox")
+            .filter(|p| p.role == CAMBOX_ROLE)
             .filter_map(|p| p.in_stream.as_deref())
             .collect();
         let vban_in_streams: std::collections::HashSet<&str> = raw

@@ -28,6 +28,9 @@ pub struct JitterFacet {
     pub servo_drops: u64,
     /// Single frames repeated because the fill sat low (the sender runs slow).
     pub servo_repeats: u64,
+    /// Times the stream stopped for more than 500 ms and came back: a sender outage on a program
+    /// feed, simply a mute on a cambox (it sends only while unmuted).
+    pub stalls: u64,
     /// Audio is flowing (false while priming: before the first packet or after an underrun).
     pub primed: bool,
 }
@@ -40,6 +43,7 @@ impl From<NetworkFillStats> for JitterFacet {
             depth_min_frames: s.depth_min_frames,
             servo_drops: s.servo_drops,
             servo_repeats: s.servo_repeats,
+            stalls: s.stalls,
             primed: s.primed,
         }
     }
@@ -160,9 +164,12 @@ impl HubState {
     /// A one-line status summary for the periodic log (a dev1 watchdog greps it): the underruns and
     /// overruns summed over every participant, each naming the leg with the most (issue 1401:
     /// `underruns=220(fohabl)`), + the participant levels, so a dead/underrunning leg is visible
-    /// between E2E runs. The VBAN legs' drift-servo corrections show as `servo=<drops>/<repeats>`
-    /// and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue 1345) when there are any, so a
-    /// rejected stream (which reads as silent) stays explained after its one warn scrolls away.
+    /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
+    /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
+    /// stops on every mute, so it is left out), the VBAN legs' drift-servo corrections as
+    /// `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue
+    /// 1345), so a rejected stream (which reads as silent) stays explained after its one warn
+    /// scrolls away.
     pub fn status_line(&self) -> String {
         let total_rate_rejects: u64 = self
             .participants
@@ -192,11 +199,24 @@ impl HubState {
         } else {
             String::new()
         };
+        let program_stalls = |p: &ParticipantState| {
+            if p.role == crate::matrix::CAMBOX_ROLE {
+                0
+            } else {
+                p.jitter.map_or(0, |j| j.stalls)
+            }
+        };
+        let stalls = if self.participants.iter().map(program_stalls).sum::<u64>() > 0 {
+            format!(" stalls={}", self.total_naming_worst(program_stalls))
+        } else {
+            String::new()
+        };
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
+            stalls,
             servo,
             rejects,
             levels.join(" ")

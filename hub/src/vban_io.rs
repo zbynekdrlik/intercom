@@ -193,8 +193,8 @@ pub const STALE_STREAM_MS: u64 = 500;
 /// * [`JitterBuffer::vban_leg`] — the VBAN network legs (the FOH program feed, the camboxes'
 ///   talkback, issue 1401): a target fill with prefill, one whole silent block per underrun and a
 ///   bounded drift servo. The policy itself is [`crate::vban_jitter::NetworkFill`]. Its underrun
-///   counts only when the stream continues, and a stream back after going stale starts cold
-///   without its old tail (a muted cambox stops sending; that is not a dropout).
+///   counts only when the stream continues; a stream back after going stale counts one STALL and
+///   starts over without its old tail (a muted cambox stops sending; that is not a dropout).
 /// * [`JitterBuffer::local_capture`] — the local PipeWire capture (the MiniFuse talkback, issue 1345)
 ///   and the Janus ingress. `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum
 ///   1024) that the block loop pops as 256-frame blocks, so the buffer holds a TARGET fill (about 2x
@@ -222,7 +222,18 @@ pub struct JitterBuffer {
     last_peak: i16,
 }
 
-/// Which fill policy a [`JitterBuffer`] runs (see the type doc).
+/// Which fill policy a [`JitterBuffer`] runs (see the type doc), as [`JitterBuffer::kind`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferKind {
+    /// [`JitterBuffer::new`].
+    Plain,
+    /// [`JitterBuffer::local_capture`].
+    LocalCapture,
+    /// [`JitterBuffer::vban_leg`].
+    VbanLeg,
+}
+
+/// The fill policy a [`JitterBuffer`] runs, with its state (see the type doc).
 #[derive(Debug)]
 enum FillPolicy {
     /// [`JitterBuffer::new`]: pop whatever is queued, zero-pad, drop down to the cap.
@@ -278,12 +289,36 @@ impl JitterBuffer {
         }
     }
 
-    /// The VBAN leg's live fill numbers (target, depth, servo corrections) for `/api/state`;
+    /// The VBAN leg's live fill numbers (target, depth, servo corrections, stalls) for `/api/state`;
     /// `None` for the other policies.
     pub fn network_stats(&self) -> Option<NetworkFillStats> {
         match &self.policy {
             FillPolicy::Network(fill) => Some(fill.stats()),
             _ => None,
+        }
+    }
+
+    /// Which fill policy this buffer runs.
+    pub fn kind(&self) -> BufferKind {
+        match self.policy {
+            FillPolicy::Plain => BufferKind::Plain,
+            FillPolicy::LocalCapture { .. } => BufferKind::LocalCapture,
+            FillPolicy::Network(_) => BufferKind::VbanLeg,
+        }
+    }
+
+    /// The hub's block loop missed `missed` ticks before the next pop (`MissedTickBehavior::Skip`).
+    /// A VBAN leg drops as many blocks of its oldest audio, never going more than half a block under
+    /// its target (see [`NetworkFill::discard_for_missed_ticks`]); the other policies are unchanged.
+    pub fn skip_missed(&mut self, missed: u64, frames: usize) {
+        let buffered = self.buffered_frames();
+        if let FillPolicy::Network(fill) = &mut self.policy {
+            let drop = fill.discard_for_missed_ticks(buffered, frames, missed);
+            if drop > 0 {
+                for q in &mut self.channels {
+                    q.drain(0..drop);
+                }
+            }
         }
     }
 
@@ -318,24 +353,28 @@ impl JitterBuffer {
     /// local-capture and VBAN-leg policies drop them down to the target.
     ///
     /// VBAN-leg policy: a packet after more than [`STALE_STREAM_MS`] of silence (a muted cambox
-    /// unmuted, a restarted sender) starts the leg cold — the tail left from before is dropped,
-    /// never played ahead of the fresh audio, and a ran-dry pop before the silence is no underrun.
-    /// A packet that continues the stream counts that pending underrun.
+    /// unmuted, a restarted sender) counts one stall and starts the leg over — the tail left from
+    /// before is dropped, never played ahead of the fresh audio, and a ran-dry pop before the
+    /// silence is no underrun. A packet that continues the stream counts that pending underrun. A
+    /// packet with a different channel count (a sender reconfigured) also starts the leg over, so a
+    /// channel that stopped arriving can never hold every other one at an empty minimum.
     pub fn push_at(&mut self, audio: &DecodedAudio, now: Instant) {
         let stale = self.is_stale_at(now);
+        let fan_mono = audio.channels.len() == 1 && self.min_channels >= 2;
+        let n_ch = if fan_mono { 2 } else { audio.channels.len() };
+        let reshaped = !self.channels.is_empty() && self.channels.len() != n_ch;
         if let FillPolicy::Network(fill) = &mut self.policy {
             if stale {
-                for q in &mut self.channels {
-                    q.clear();
-                }
-                fill.restart_cold();
+                self.channels.clear();
+                fill.restart_after_stall();
+            } else if reshaped {
+                self.channels.clear();
+                fill.restart();
             } else if self.pending_underrun {
                 self.underruns += 1;
             }
             self.pending_underrun = false;
         }
-        let fan_mono = audio.channels.len() == 1 && self.min_channels >= 2;
-        let n_ch = if fan_mono { 2 } else { audio.channels.len() };
         self.ensure_channels(n_ch);
         for (c, q) in self.channels.iter_mut().enumerate().take(n_ch) {
             let src = if fan_mono { 0 } else { c };

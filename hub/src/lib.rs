@@ -18,6 +18,7 @@
 pub mod engine;
 pub mod fir;
 pub mod http;
+pub mod inputs;
 pub mod janus_codec;
 pub mod janus_pacing;
 pub mod janus_rtp;
