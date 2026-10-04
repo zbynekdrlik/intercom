@@ -11,7 +11,10 @@
 //! ([`crate::vban_io::JitterBuffer::vban_leg`]) delegates to:
 //!
 //! - **Prefill.** Nothing is consumed until the pre-pop fill reaches the target
-//!   ([`VBAN_TARGET_BLOCKS`]); silence goes out meanwhile. The same after an underrun.
+//!   ([`VBAN_TARGET_BLOCKS`]); silence goes out meanwhile. A COLD start (the first packets, or a
+//!   stream back after going stale, [`NetworkFill::restart_cold`]) drops whatever piled up past the
+//!   target, the oldest audio, received while silence went out; a re-prime after an underrun does
+//!   not.
 //! - **Underrun = one whole silent block.** A pop that finds less than a block outputs ONE whole
 //!   silent block, keeps the partial tail and re-primes to the target. A late burst that refills the
 //!   buffer at once resumes after that single block with nothing thrown away. Never a zero-spliced
@@ -19,10 +22,12 @@
 //! - **Drift servo.** The sender's clock (a Dante-ticked FOH desk, a cambox headset ADC) and the
 //!   hub's disciplined monotonic clock differ by a few ppm (a cambox ADC by hundreds), which would
 //!   walk any fixed depth to an edge over an 8 h program. Every second the mean pre-pop fill is
-//!   compared with the target; outside a [`SERVO_DEADBAND_FRAMES`] band the next second drops (fill
-//!   high) or repeats (fill low) ONE frame at a time, at most one per
-//!   [`SERVO_MIN_SPACING_FRAMES`] output frames (<= 1 ms/s, the `janus_pacing` precedent). The
-//!   frame is spread across the block by [`stretch_block`], so a correction never clicks.
+//!   compared with the target. Outside a [`SERVO_DEADBAND_FRAMES`] band the next second drops (fill
+//!   high) or repeats (fill low) one frame for every [`SERVO_GAIN_DIV`] frames of error beyond the
+//!   band, spread evenly over that second and never closer than [`SERVO_MIN_SPACING_FRAMES`]
+//!   (<= 1 ms/s, the `janus_pacing` precedent). A slow drift is thus taken out a frame at a time
+//!   as it builds up, never in a second-long burst, and the servo never overshoots. Each frame is
+//!   spread across its block by [`stretch_block`], so a correction never clicks.
 //! - **Overrun.** Above the cap the OLDEST audio is dropped back down to the target (not just to the
 //!   cap, where the next packet would overrun again).
 //!
@@ -40,9 +45,11 @@
 ///   against the mean. The live underrun pattern (one every 2-15 min with well under one block of
 ///   margin) puts the real arrival jitter far below that.
 ///
-/// The hub's own tick only ever wakes LATE (tokio rounds a deadline up to the next ms), which
-/// adds fill, so it needs no budget. 16 ms is inside the issue-1345 latency budget for a
-/// target-fill ring on the intercom (about 10-20 ms).
+/// The hub's own tick only ever wakes LATE (tokio rounds a deadline up to the next ms). A late pop
+/// sees more fill; the servo holds the MEAN, which includes that lateness, so an on-time pop sits
+/// up to about 0.5 ms below it, small next to the margin. The issue-1345 design accepted "about
+/// 10-20 ms" of talkback latency for a target-fill ring (design comment 5813703805); 16 ms is
+/// inside that.
 pub const VBAN_TARGET_BLOCKS: usize = 3;
 
 /// The cap of a VBAN network leg, in hub blocks (43 ms at 256 frames / 48 kHz): five blocks of
@@ -53,16 +60,24 @@ pub const VBAN_CAP_BLOCKS: usize = 8;
 /// packet ripple and the arrival jitter average out of the mean pre-pop fill.
 pub const SERVO_WINDOW_FRAMES: usize = 48_000;
 
-/// The servo leaves the mean pre-pop fill alone within this many frames of the target (1.33 ms).
-/// A steady feed's mean sits at a fixed offset from where priming ended, so a band keeps the
-/// servo quiet once it has settled; one second of corrections (about 47 frames) is smaller than
-/// the band's width, so the servo never jumps across it.
-pub const SERVO_DEADBAND_FRAMES: usize = 64;
+/// The servo leaves the mean pre-pop fill alone within this many frames of the target (0.33 ms):
+/// wider than the 1 s mean's wobble under arrival jitter, so the jitter alone never triggers a
+/// correction, and a small part of a block, so the leg settles close to its target.
+pub const SERVO_DEADBAND_FRAMES: usize = 16;
+
+/// The servo's proportional gain: beyond the band, ONE corrected frame in the next second for every
+/// this many frames of mean error. A sender `r` frames/s off the hub settles `r x 4` frames past
+/// the band (+20 ppm: about 4 frames; the +540 ppm cambox ADC: about 104 frames, 2.2 ms). Never the
+/// whole error at once, so the half-window lag of the mean can never make it overshoot.
+pub const SERVO_GAIN_DIV: usize = 4;
 
 /// At most one single-frame correction per this many output frames: 1000 ppm = 1 ms/s at any
 /// rate (one per four 256-frame blocks = 977 ppm). Covers a few-ppm program sender and a cambox
 /// headset ADC measured at +540 ppm (issue 1345, cam1).
 pub const SERVO_MIN_SPACING_FRAMES: usize = 1_000;
+
+/// The most corrections one second can hold at that spacing.
+const SERVO_MAX_PER_WINDOW: usize = SERVO_WINDOW_FRAMES / SERVO_MIN_SPACING_FRAMES;
 
 /// What one pop of a VBAN network leg does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,9 +86,10 @@ pub enum PopPlan {
     /// `ran_dry` = this pop found a primed stream short of one block: ONE underrun (the buffer
     /// counts it only for a live, not-stale stream).
     Silent { ran_dry: bool },
-    /// Consume `take` frames and output one block: `take` is the block size, one more for a servo
-    /// drop, one fewer for a servo repeat (the block is then [`stretch_block`]ed to size).
-    Audio { take: usize },
+    /// Drop the `skip` OLDEST frames (a cold start's prime overshoot, else 0), then consume `take`
+    /// frames and output one block: `take` is the block size, one more for a servo drop, one fewer
+    /// for a servo repeat (the block is then [`stretch_block`]ed to size).
+    Audio { skip: usize, take: usize },
 }
 
 /// The VBAN leg's live fill numbers for `/api/state` (issue 1401).
@@ -108,11 +124,16 @@ pub struct NetworkFill {
     target: usize,
     cap: usize,
     primed: bool,
+    /// The next prime is a cold start: trim the overshoot back to the target.
+    cold: bool,
     win_sum: u64,
     win_min: usize,
     win_pops: u64,
     win_frames: usize,
+    /// This second's correction direction, how many are left, and their spacing in output frames.
     correction: Correction,
+    budget: usize,
+    interval: usize,
     since_correction: usize,
     last_mean: usize,
     last_min: usize,
@@ -129,11 +150,14 @@ impl NetworkFill {
             target: target_frames.clamp(1, cap),
             cap,
             primed: false,
+            cold: true,
             win_sum: 0,
             win_min: usize::MAX,
             win_pops: 0,
             win_frames: 0,
             correction: Correction::None,
+            budget: 0,
+            interval: SERVO_MIN_SPACING_FRAMES,
             since_correction: 0,
             last_mean: 0,
             last_min: 0,
@@ -158,20 +182,37 @@ impl NetworkFill {
         Some(self.target)
     }
 
+    /// The stream went stale and its buffer was emptied (a muted cambox, a restarted sender): the
+    /// next prime is a cold start again, and nothing from before carries over.
+    pub fn restart_cold(&mut self) {
+        self.primed = false;
+        self.cold = true;
+        self.restart_window();
+    }
+
     /// Plan one pop of `frames` frames with `fill` frames queued.
     pub fn plan_pop(&mut self, fill: usize, frames: usize) -> PopPlan {
         if frames == 0 {
-            return PopPlan::Audio { take: 0 };
+            return PopPlan::Audio { skip: 0, take: 0 };
         }
+        let mut skip = 0;
         if !self.primed {
             // Prefill to the target, and to at least one block, so a target below the block size
             // can never flap between "refilled" and "ran dry" on the same pop.
-            if fill < self.target.max(frames) {
+            let prime = self.target.max(frames);
+            if fill < prime {
                 return PopPlan::Silent { ran_dry: false };
             }
             self.primed = true;
             self.restart_window();
+            if self.cold {
+                // A cold start begins exactly at the target: what piled up past it is the oldest
+                // audio, received while silence went out.
+                self.cold = false;
+                skip = fill - prime;
+            }
         }
+        let fill = fill - skip;
         if fill < frames {
             // Ran dry: ONE silent block, the partial tail kept, then re-prime to the target.
             self.primed = false;
@@ -180,26 +221,29 @@ impl NetworkFill {
         }
         self.observe(fill, frames);
         self.since_correction = self.since_correction.saturating_add(frames);
-        if self.since_correction >= SERVO_MIN_SPACING_FRAMES {
-            match self.correction {
+        if self.budget > 0 && self.since_correction >= self.interval {
+            let take = match self.correction {
                 Correction::Drop if fill > frames => {
-                    self.since_correction = 0;
                     self.servo_drops += 1;
-                    return PopPlan::Audio { take: frames + 1 };
+                    frames + 1
                 }
                 Correction::Repeat if frames > 1 => {
-                    self.since_correction = 0;
                     self.servo_repeats += 1;
-                    return PopPlan::Audio { take: frames - 1 };
+                    frames - 1
                 }
-                _ => {}
+                _ => frames,
+            };
+            if take != frames {
+                self.budget -= 1;
+                self.since_correction = 0;
             }
+            return PopPlan::Audio { skip, take };
         }
-        PopPlan::Audio { take: frames }
+        PopPlan::Audio { skip, take: frames }
     }
 
-    /// Add one primed pre-pop fill to the window; at the window's end decide the next second's
-    /// correction from the mean.
+    /// Add one primed pre-pop fill to the window; at the window's end plan the next second's
+    /// corrections from the mean.
     fn observe(&mut self, fill: usize, frames: usize) {
         self.win_sum = self.win_sum.saturating_add(fill as u64);
         self.win_min = self.win_min.min(fill);
@@ -211,13 +255,23 @@ impl NetworkFill {
         let mean = usize::try_from(self.win_sum / self.win_pops).unwrap_or(usize::MAX);
         self.last_mean = mean;
         self.last_min = self.win_min;
-        self.correction = if mean > self.target + SERVO_DEADBAND_FRAMES {
-            Correction::Drop
-        } else if mean + SERVO_DEADBAND_FRAMES < self.target {
-            Correction::Repeat
+        let error = mean.abs_diff(self.target);
+        if error > SERVO_DEADBAND_FRAMES {
+            // Proportional, and spread evenly over the next second.
+            let n = (error - SERVO_DEADBAND_FRAMES)
+                .div_ceil(SERVO_GAIN_DIV)
+                .min(SERVO_MAX_PER_WINDOW);
+            self.correction = if mean > self.target {
+                Correction::Drop
+            } else {
+                Correction::Repeat
+            };
+            self.budget = n;
+            self.interval = (SERVO_WINDOW_FRAMES / n).max(SERVO_MIN_SPACING_FRAMES);
         } else {
-            Correction::None
-        };
+            self.correction = Correction::None;
+            self.budget = 0;
+        }
         self.win_sum = 0;
         self.win_min = usize::MAX;
         self.win_pops = 0;
@@ -231,6 +285,7 @@ impl NetworkFill {
         self.win_pops = 0;
         self.win_frames = 0;
         self.correction = Correction::None;
+        self.budget = 0;
     }
 
     /// The live numbers for `/api/state`.

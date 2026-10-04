@@ -192,7 +192,9 @@ pub const STALE_STREAM_MS: u64 = 500;
 ///
 /// * [`JitterBuffer::vban_leg`] — the VBAN network legs (the FOH program feed, the camboxes'
 ///   talkback, issue 1401): a target fill with prefill, one whole silent block per underrun and a
-///   bounded drift servo. The policy itself is [`crate::vban_jitter::NetworkFill`].
+///   bounded drift servo. The policy itself is [`crate::vban_jitter::NetworkFill`]. Its underrun
+///   counts only when the stream continues, and a stream back after going stale starts cold
+///   without its old tail (a muted cambox stops sending; that is not a dropout).
 /// * [`JitterBuffer::local_capture`] — the local PipeWire capture (the MiniFuse talkback, issue 1345)
 ///   and the Janus ingress. `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum
 ///   1024) that the block loop pops as 256-frame blocks, so the buffer holds a TARGET fill (about 2x
@@ -213,6 +215,9 @@ pub struct JitterBuffer {
     pub rx_packets: u64,
     pub underruns: u64,
     pub overruns: u64,
+    /// VBAN-leg policy: a ran-dry pop waiting to be judged by the next packet — counted when the
+    /// stream continues within [`STALE_STREAM_MS`], dropped when it had stopped.
+    pending_underrun: bool,
     last_rx: Option<Instant>,
     last_peak: i16,
 }
@@ -240,6 +245,7 @@ impl JitterBuffer {
             rx_packets: 0,
             underruns: 0,
             overruns: 0,
+            pending_underrun: false,
             last_rx: None,
             last_peak: 0,
         }
@@ -310,7 +316,24 @@ impl JitterBuffer {
     /// Push a decoded packet's planar audio received at `now`, counting one packet and at most one
     /// overrun. On overrun the plain policy drops the oldest samples down to the cap; the
     /// local-capture and VBAN-leg policies drop them down to the target.
+    ///
+    /// VBAN-leg policy: a packet after more than [`STALE_STREAM_MS`] of silence (a muted cambox
+    /// unmuted, a restarted sender) starts the leg cold — the tail left from before is dropped,
+    /// never played ahead of the fresh audio, and a ran-dry pop before the silence is no underrun.
+    /// A packet that continues the stream counts that pending underrun.
     pub fn push_at(&mut self, audio: &DecodedAudio, now: Instant) {
+        let stale = self.is_stale_at(now);
+        if let FillPolicy::Network(fill) = &mut self.policy {
+            if stale {
+                for q in &mut self.channels {
+                    q.clear();
+                }
+                fill.restart_cold();
+            } else if self.pending_underrun {
+                self.underruns += 1;
+            }
+            self.pending_underrun = false;
+        }
         let fan_mono = audio.channels.len() == 1 && self.min_channels >= 2;
         let n_ch = if fan_mono { 2 } else { audio.channels.len() };
         self.ensure_channels(n_ch);
@@ -376,7 +399,8 @@ impl JitterBuffer {
     ///
     /// ONE underrun is counted when a stream runs short — only a PREVIOUSLY-LIVE (at least one packet)
     /// and NOT STALE ([`STALE_STREAM_MS`]) stream; a local-capture or VBAN-leg buffer counts it once
-    /// on entering the refill wait, not once per silent block.
+    /// on entering the refill wait, not once per silent block. A VBAN leg counts it at its next
+    /// packet, and only if that packet continues the stream (see [`JitterBuffer::push_at`]).
     pub fn pop_block_at(&mut self, frames: usize, now: Instant) -> Vec<Vec<i16>> {
         let n_ch = self.channels.len().max(1);
         let countable = self.last_rx.is_some() && !self.is_stale_at(now);
@@ -386,14 +410,15 @@ impl JitterBuffer {
             return match fill.plan_pop(buffered, frames) {
                 PopPlan::Silent { ran_dry } => {
                     if ran_dry && countable {
-                        self.underruns += 1;
+                        self.pending_underrun = true;
                     }
                     vec![vec![0i16; frames]; n_ch]
                 }
-                PopPlan::Audio { take } => self
+                PopPlan::Audio { skip, take } => self
                     .channels
                     .iter_mut()
                     .map(|q| {
+                        q.drain(0..skip);
                         let block: Vec<i16> = q.drain(0..take).collect();
                         if take == frames {
                             block
