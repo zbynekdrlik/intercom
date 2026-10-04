@@ -2,7 +2,10 @@
 //! target, measured depth, servo corrections and stalls; the periodic status line names the leg
 //! with the most underruns and overruns (the live line only said `underruns=220`, summed over every
 //! participant, and never showed overruns at all) and the program feeds' stalls; and the hub really
-//! gives every VBAN participant the target-fill buffer and gives up a missed tick's block.
+//! gives every VBAN participant the target-fill buffer. Since design 5980775411 the block loop runs
+//! missed ticks late (`caught_up_ticks`) and gives up only the part beyond four blocks
+//! (`lost_ticks`, `lost=N` on the line); a program feed's facet also shows the largest gap of the
+//! last 10 min its adaptive target follows.
 
 use std::path::PathBuf;
 
@@ -10,6 +13,7 @@ use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_JANUS, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 use intercom_hub::state::{HubState, JitterFacet, RuntimeStats};
 use intercom_hub::vban_io::BufferKind;
+use intercom_hub::vban_jitter::NetworkFillStats;
 
 fn matrix() -> Matrix {
     Matrix::from_toml(
@@ -59,6 +63,7 @@ fn facet(servo_drops: u64, servo_repeats: u64, stalls: u64) -> JitterFacet {
         servo_repeats,
         stalls,
         primed: true,
+        max_gap_ms_10min: None,
     }
 }
 
@@ -153,22 +158,67 @@ fn the_status_line_shows_program_feed_stalls_but_not_cambox_mutes() {
 }
 
 #[test]
-fn missed_hub_ticks_show_on_api_state_and_the_status_line() {
-    // A missed tick is a lost block on EVERY output, the program sink included: the daemon counts
-    // them for the whole run and they must be visible, not only in a debug log.
+fn lost_and_caught_up_hub_ticks_show_on_api_state_and_only_the_lost_on_the_status_line() {
+    // A tick run late (caught up) is no loss; a LOST tick is a block lost on EVERY output, the
+    // program sink included. The daemon counts both for the whole run; the line names only the
+    // loss, after the leading `underruns=`.
     let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
     let mut hs = HubState::snapshot(&matrix(), "v", &stats);
-    assert_eq!(hs.missed_ticks, 0);
-    assert!(
-        !hs.status_line().contains("missed="),
-        "{}",
-        hs.status_line()
-    );
-    hs.missed_ticks = 3;
+    assert_eq!((hs.caught_up_ticks, hs.lost_ticks), (0, 0));
+    hs.caught_up_ticks = 12;
     let line = hs.status_line();
-    assert!(line.contains("missed=3"), "got: {line}");
+    assert!(
+        !line.contains("lost="),
+        "a caught-up tick is no loss: {line}"
+    );
+    assert!(!line.contains("missed="), "{line}");
+    hs.lost_ticks = 3;
+    let line = hs.status_line();
+    assert!(line.contains(" lost=3"), "got: {line}");
+    assert!(
+        line.starts_with("intercom-hub: status participants=2 underruns=0 overruns=0"),
+        "got: {line}"
+    );
     let v = serde_json::to_value(&hs).unwrap();
-    assert_eq!(v["missed_ticks"], 3);
+    assert_eq!(v["caught_up_ticks"], 12);
+    assert_eq!(v["lost_ticks"], 3);
+    assert!(v.get("missed_ticks").is_none(), "{v}");
+}
+
+#[test]
+fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
+    let program = JitterFacet::from(NetworkFillStats {
+        target_frames: 1792,
+        max_gap_us_10min: Some(27_641),
+        ..Default::default()
+    });
+    assert_eq!(program.max_gap_ms_10min, Some(27.6), "0.1 ms resolution");
+    assert_eq!(program.target_frames, 1792, "the live target");
+    let cambox = JitterFacet::from(NetworkFillStats {
+        target_frames: 768,
+        ..Default::default()
+    });
+    assert_eq!(cambox.max_gap_ms_10min, None);
+    let stats = vec![
+        RuntimeStats {
+            jitter: Some(cambox),
+            ..Default::default()
+        },
+        RuntimeStats::default(),
+        RuntimeStats {
+            jitter: Some(program),
+            ..Default::default()
+        },
+    ];
+    let v = serde_json::to_value(HubState::snapshot(&matrix(), "v", &stats)).unwrap();
+    assert!(
+        v["participants"][0]["jitter"]
+            .get("max_gap_ms_10min")
+            .is_none(),
+        "{v}"
+    );
+    assert_eq!(v["participants"][2]["jitter"]["max_gap_ms_10min"], 27.6);
+    assert_eq!(v["participants"][2]["jitter"]["target_frames"], 1792);
 }
 
 #[test]
