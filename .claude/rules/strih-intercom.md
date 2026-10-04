@@ -356,10 +356,11 @@ are on issue 1401 (comment 5977982465).
     `Skip` resumes on the same grid) via `missed_ticks`. Each VBAN leg's `skip_missed` then drops
     that block of its oldest audio at once (the outputs already lost it), never more than half a
     block under its target. The floor is half a block, not the target, so a jitter dip of up to
-    half a block leaves no residue; a deeper dip leaves a few frames that the servo takes out
-    gently (or that offset a slow sender's drift). The discard keeps the servo's window and budget (review 3: resetting
-    them starved the drift correction when the hub missed ticks often, 13 overruns in 10 min at a
-    tick missed every 0.5 s with the +540 ppm cambox). The run's total is `missed_ticks` in
+    half a block leaves no residue; a deeper dip leaves exactly the part beyond half a block, which
+    the servo takes out gently (or which offsets a slow sender's drift). The discard keeps the
+    servo's window and budget (review 3: resetting them starved the drift correction when the hub
+    missed ticks often, 13 overruns in 10 min at a tick missed every 0.5 s with the +540 ppm
+    cambox). The run's total is `missed_ticks` in
     `/api/state` and `missed=N` on the status line: each one is a block lost on EVERY output;
   - above the cap: drop the oldest down to the TARGET and restart the servo window.
 - **Underruns, mutes, stalls (`vban_io::JitterBuffer`).**
@@ -429,10 +430,10 @@ are on issue 1401 (comment 5977982465).
     them: the steady-feed settle 30 -> 60 s (run 120 -> 150 s), the walk-down's final in-band
     check 40 -> 120 s (its steep part still checked at 20 s).
 - **Not covered (follow-up candidate, outside this design; not filed yet, the lane hands it to
-  the supervisor):** the `local_capture` rings (the
-  MiniFuse talkback and the Janus phones' ingress) still have no drift servo and no missed-tick
-  discard. A USB or phone clock tens of ppm off eventually trims from the 32-block cap down to the
-  target (a ~128 ms cut). `NetworkFill` could back that policy too.
+  the supervisor):** the `local_capture` rings (the MiniFuse talkback and the Janus phones'
+  ingress) still have no drift servo and no missed-tick discard. A USB or phone clock tens of ppm
+  off eventually trims from the 32-block cap down to the target (a ~128 ms cut). `NetworkFill`
+  could back that policy too.
 - **Tier-0 verify without cargo.**
   - A rustc `--test` replica: `vban_jitter.rs` + the `JitterBuffer` section of `vban_io.rs` + the
     test files with `intercom_hub::` -> `crate::`, then `clippy-driver --test -D warnings` on it.
