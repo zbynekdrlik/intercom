@@ -29,6 +29,12 @@ fn the_mix_thread_asks_for_fifo_10_above_sched_other_and_below_dantesync() {
 }
 
 #[test]
+fn the_class_reads_the_way_ps_and_chrt_name_it() {
+    assert_eq!(SchedClass::Fifo(10).label(), "SCHED_FIFO 10");
+    assert_eq!(SchedClass::Other.label(), "SCHED_OTHER");
+}
+
+#[test]
 fn a_refused_priority_falls_back_to_sched_other_with_one_loud_warning() {
     let mut asked = None;
     let (class, warning) = apply_realtime(|p| {
@@ -177,4 +183,28 @@ fn the_block_loop_runs_on_the_mix_thread_with_absolute_deadlines() {
         .find("std::process::exit(1)")
         .expect("and its end exits");
     assert!(join < exit);
+    // It publishes its own class to /api/state, so a refused grant is visible without ssh.
+    assert!(
+        src.contains("snapshot.mix_thread_sched = "),
+        "the class on /api/state"
+    );
+}
+
+#[test]
+fn the_real_time_thread_publishes_the_status_and_tokio_writes_it_to_the_journal() {
+    // A journal write can block; the real-time thread only hands the snapshot to the watch
+    // channel, and a tokio task logs the status line from there.
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let src = std::fs::read_to_string(&p).expect("read main.rs");
+    let start = src.find("fn run_block_loop(").expect("the block loop");
+    let body = &src[start..start + src[start..].find("\n}\n").expect("its end")];
+    assert!(
+        !body.contains("status_line()"),
+        "the real-time thread never writes the status line itself"
+    );
+    assert!(body.contains("live_tx.send("), "it publishes the snapshot");
+    assert!(
+        src.contains("status_rx.borrow_and_update().status_line()"),
+        "a tokio task logs every published snapshot's status line"
+    );
 }

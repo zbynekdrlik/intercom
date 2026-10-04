@@ -186,6 +186,20 @@ fn lost_and_caught_up_hub_ticks_show_on_api_state_and_only_the_lost_on_the_statu
 }
 
 #[test]
+fn the_mix_threads_class_shows_on_api_state_once_the_daemon_sets_it() {
+    let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
+    let mut hs = HubState::snapshot(&matrix(), "v", &stats);
+    let v = serde_json::to_value(&hs).unwrap();
+    assert!(
+        v.get("mix_thread_sched").is_none(),
+        "the pure snapshot has no thread: {v}"
+    );
+    hs.mix_thread_sched = Some("SCHED_FIFO 10".into());
+    let v = serde_json::to_value(&hs).unwrap();
+    assert_eq!(v["mix_thread_sched"], "SCHED_FIFO 10");
+}
+
+#[test]
 fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
     let program = JitterFacet::from(NetworkFillStats {
         target_frames: 1792,

@@ -17,7 +17,7 @@ use intercom_hub::adaptive_target::{
 };
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_VBAN, CAMBOX_ROLE};
-use intercom_hub::vban_io::{DecodedAudio, JitterBuffer};
+use intercom_hub::vban_io::{DecodedAudio, JitterBuffer, TargetChange, STALE_STREAM_MS};
 use intercom_hub::vban_jitter::{
     NetworkFill, SERVO_MIN_SPACING_FRAMES, SERVO_WINDOW_FRAMES, VBAN_PROGRAM_CAP_BLOCKS,
     VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
@@ -187,6 +187,78 @@ fn a_new_setpoint_moves_the_cap_with_it_and_drops_nothing() {
         ramp(BLOCK as i16, BLOCK),
         "the audio continues where it was"
     );
+}
+
+#[test]
+fn a_gap_across_a_stall_never_reaches_the_adaptive_target() {
+    // A FOH outage longer than the stale limit is a stall: the leg starts over, and the silence
+    // before the stream came back is no inter-arrival gap. Counted as one, a 2 s outage would put
+    // the program feed at the 64 ms cap for half an hour.
+    let t0 = Instant::now();
+    let mut jb = JitterBuffer::vban_leg(VBAN_PROGRAM_CAP_BLOCKS * BLOCK, FLOOR)
+        .with_adaptive_target("fohabl", BLOCK, RATE);
+    jb.push_at(&mono(0, 288), t0);
+    let back = t0 + Duration::from_millis(STALE_STREAM_MS + 100);
+    jb.push_at(&mono(288, 288), back);
+    let s = jb.network_stats().unwrap();
+    assert_eq!(s.stalls, 1, "the outage is a stall");
+    assert_eq!(
+        s.target_frames, FLOOR,
+        "and never a gap that raises the target"
+    );
+    assert_eq!(s.max_gap_us_10min, Some(0));
+    assert_eq!(jb.take_target_change(), None);
+    // The next packet inside the running stream is a gap again.
+    jb.push_at(&mono(576, 288), back + us(6_000));
+    assert_eq!(jb.network_stats().unwrap().max_gap_us_10min, Some(6_000));
+}
+
+#[test]
+fn a_target_change_is_handed_out_once_for_the_caller_to_log_off_the_lock() {
+    // The receive task holds the jitter lock while it pushes, and the real-time hub-mix thread
+    // takes the same lock every block: the buffer only records the change, the caller logs it once
+    // the lock is released.
+    let t0 = Instant::now();
+    let mut jb = JitterBuffer::vban_leg(VBAN_PROGRAM_CAP_BLOCKS * BLOCK, FLOOR)
+        .with_adaptive_target("fohabl", BLOCK, RATE);
+    jb.push_at(&mono(0, 288), t0);
+    jb.push_at(&mono(288, 288), t0 + us(6_000));
+    assert_eq!(jb.take_target_change(), None, "a 6 ms gap changes nothing");
+    jb.push_at(&mono(576, 1680), t0 + us(41_000));
+    assert_eq!(
+        jb.take_target_change(),
+        Some(TargetChange {
+            leg: "fohabl".into(),
+            from_frames: FLOOR,
+            to_frames: 9 * BLOCK,
+            max_gap_10min: us(35_000),
+        })
+    );
+    assert_eq!(jb.take_target_change(), None, "handed out once");
+    // A cambox leg never has one.
+    let mut cam = JitterBuffer::vban_leg(8 * BLOCK, 3 * BLOCK);
+    cam.push_at(&mono(0, 128), t0);
+    cam.push_at(&mono(128, 128), t0 + us(35_000));
+    assert_eq!(cam.take_target_change(), None);
+}
+
+#[test]
+fn the_receive_task_logs_a_target_change_after_releasing_the_lock() {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let src = std::fs::read_to_string(&p).expect("read main.rs");
+    let start = src
+        .find("let change = jitter.lock()")
+        .expect("the receive task takes the change under the lock");
+    let end = start + src[start..].find("});").expect("the lock closure ends");
+    let take = src
+        .find("b.take_target_change()")
+        .expect("the change is taken");
+    let log = src.find("change.log()").expect("and logged");
+    assert!(
+        start < take && take < end,
+        "taken while the buffer is locked"
+    );
+    assert!(end < log, "logged after the lock is released");
 }
 
 fn ramp(start: i16, n: usize) -> Vec<i16> {
@@ -368,10 +440,15 @@ fn a_gap_that_jumps_from_19_to_35ms_underruns_once_and_never_again() {
     // The worst case: no warning, 35 ms gaps from the 60th second on, every 402 ms.
     let r = replay(300, |t_us| if t_us >= 60_000_000 { 35_000 } else { 19_000 });
     let ctx = format!("{r:?}");
-    assert!(r.underruns <= 1, "{ctx}");
-    if let Some(&at) = r.underrun_at.first() {
-        assert_eq!(Some(at), r.changes.first().map(|c| c.0), "{ctx}");
-    }
+    assert_eq!(
+        r.underruns, 1,
+        "the first 35 ms gap at the 32 ms floor runs dry\n{ctx}"
+    );
+    assert_eq!(
+        r.underrun_at.first().copied(),
+        r.changes.first().map(|c| c.0),
+        "the underrun is the gap that raises the target\n{ctx}"
+    );
     assert_eq!(r.max_target, 9, "{ctx}");
     assert_no_correction_burst(&r);
 }
