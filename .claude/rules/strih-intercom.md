@@ -397,13 +397,13 @@ are on issue 1401 (comment 5977982465).
     [servo=<drops>/<repeats>]`. The total still leads, so a `underruns=(\d+)` parser keeps
     working; a leg is named only when its sum > 0.
   - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
-- **The program audio is later, now steady.** fohabl/lv1 feed `program_out` (the strih OBS
-  `ASIO zvuk`). The old depth was 0-5 ms and changed with every restart; now it is the 32 ms
-  program-feed target, plus the pw-cat pipe depth below (at least the ~43 ms target, more by
-  whatever pw-cat's connect left, and that part still varies per restart). Re-check any sync
-  offset on that OBS input once after a hub deploy. The issue-1345 "10-20 ms" acceptance (design
-  comment 5813703805) was about the talkback ring, not the program feed; the 1401 designs accepted
-  these delays knowingly.
+- **The program audio is later: fixed within a run (clock drift aside), varying per restart.**
+  fohabl/lv1 feed `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed
+  with every restart; now it is the 32 ms program-feed target, plus the pw-cat pipe depth below
+  (at least the ~43 ms target, more by whatever pw-cat's connect left, and that part still varies
+  per restart). Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345
+  "10-20 ms" acceptance (design comment 5813703805) was about the talkback ring, not the program
+  feed; the 1401 designs accepted these delays knowingly.
 - **Supervisor live check after a hub deploy:**
   - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
     `target_frames` 1536 (a cambox: 768), `depth_frames` within +-16 of it, `depth_min_frames`
@@ -439,15 +439,17 @@ are on issue 1401 (comment 5977982465).
     above 4096, so that backlog stays: the steady fill (and the program audio delay) is the target
     (riding ~1024..2304 as pw-cat takes its 1024-frame quanta) plus the connect backlog, up to the
     trim mark, and it can differ after every hub or pw-cat restart (review round 1 measured
-    ~3000..4096 frames, 64-90 ms). A read well above ~2304 is this, not a fault. Holding the
+    ~3000..4096 frames, 62-85 ms). A read well above ~2304 is this, not a fault. Holding the
     pipe at the target until pw-cat first consumes would make it the same every restart; that is
     a design change, raised to the main session on the ticket.
   - **Clock drift is not corrected on the pipe.** The hub ticks on the system clock and each
     pw-cat sink is pulled by its PipeWire driver (the MiniFuse crystal for the cans). Any rate
-    offset walks the fill: at 50 ppm a fast hub reaches the trim mark in ~14 min and then trims a
-    5.3 ms block every ~107 s; a slow hub drains to one block in ~12 min and then refills
-    (one up-to-43 ms silent gap). The guard bounds both, it does not remove them. A one-frame
-    drop/repeat servo on the pipe fill (the VBAN legs' drift-servo idea) is the follow-up.
+    offset walks the fill, 2.4 frames/s at 50 ppm. From the 2048 target a fast hub reaches the trim
+    mark in ~14 min and then trims a 5.3 ms block every ~107 s; a slow hub drains to one block in
+    ~12 min and then refills, a gap of up to 43 ms every ~14 min (2304 -> 256). From the measured
+    start depth (~3000..4096) a fast hub trims almost at once and a slow hub takes ~19-27 min to
+    its first refill. The guard bounds both, it does not remove them. A one-frame drop/repeat
+    servo on the pipe fill (the VBAN legs' drift-servo idea) is the follow-up.
   - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims` and the last
     `pipe_fill_frames` (measured before the last write). `tx_blocks` counts written blocks only.
   - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
@@ -455,8 +457,9 @@ are on issue 1401 (comment 5977982465).
     With ONE shared socket the queues of several off camboxes together filled its send buffer and
     the blocking `send_to` stalled the whole block loop. The kernel caps each neighbour's queue at
     `unres_qlen_bytes` (212992, oldest discarded, `unresolved_discards` in
-    `/proc/net/stat/arp_cache`), which is below one socket's buffer, so a per-slot socket never
-    fills on an off cambox. Reproduced on dev1 (review round 1, comment 5979378075): one dead
+    `/proc/net/stat/arp_cache`), no more than one socket's default send buffer (also 212992), so
+    a per-slot socket never fills on an off cambox (while `unres_qlen_bytes` stays at or below the
+    socket's buffer; the sockets are non-blocking either way, so the loop cannot stall). Reproduced on dev1 (review round 1, comment 5979378075): one dead
     neighbour per non-blocking socket 0 EAGAIN in 6 s, two dead neighbours on one socket ~1030
     EAGAIN each.
   - `send_block` returns `SendOutcome::Sent | Dropped` (`classify_send`: `WouldBlock` = Dropped,

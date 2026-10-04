@@ -8,9 +8,10 @@
 //!   the strih program sink and on the cutters' MiniFuse cans) until a hub restart. Each pipe is
 //!   now measured before every write (`FIONREAD` on the write end) and kept at a fill target.
 //! - **One blocking UDP socket sent every cambox's VBAN.** Packets to a cambox that is off wait in
-//!   its unresolved ARP neighbour queue, charged to the socket; once the buffer was full, `send_to`
-//!   blocked the block loop (16929 missed ticks = blocks lost on every output). Every destination
-//!   now gets its own non-blocking socket: a full one drops and counts that one packet.
+//!   its unresolved ARP neighbour queue, charged to the socket; the queues of several off camboxes
+//!   together filled it and `send_to` blocked the block loop (16929 missed ticks = blocks lost on
+//!   every output). Every destination now gets its own non-blocking socket, which one neighbour's
+//!   capped queue cannot fill; a socket that does back up drops and counts that one packet.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
