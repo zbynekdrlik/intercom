@@ -6,6 +6,9 @@ paths:
   - "intercom/hub/src/main.rs"
   - "intercom/hub/src/vban_io.rs"
   - "intercom/hub/src/inputs.rs"
+  - "intercom/hub/src/state.rs"
+  - "intercom/hub/src/vban_jitter.rs"
+  - "intercom/hub/tests/vban_jitter_state_1401.rs"
   - "intercom/hub/tests/hub_catchup_1401.rs"
   - "intercom/hub/tests/mix_thread_1401.rs"
   - "intercom/hub/tests/adaptive_target_1401.rs"
@@ -59,8 +62,9 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   - The grid moves past every due tick, so a lost tick never runs later.
   - `/api/state`: `caught_up_ticks` (no loss) and `lost_ticks` (a block lost on every output).
     The status line shows `lost=N` only; a caught-up tick stays off it.
-- **What the real-time thread does NOT do.** It never writes the status line (a tokio task logs it
-  from the watch channel) and never logs a program target change (the receive task logs it after
+- **What the real-time thread does NOT do.** It never writes the status line (a tokio task clones
+  each snapshot's Arc from the watch channel and formats + logs it after the borrow) and never logs
+  a program target change (the receive task logs it after
   releasing the jitter lock, `JitterBuffer::take_target_change` / `TargetChange::log`). It still
   logs a lost-tick warning at most once a second and an unresolved-output warning once a second.
 - A mix thread that ends (a panic) stops the daemon (the `hub-mix-watch` thread exits 1,
@@ -83,7 +87,9 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   main, on the ticket).
 - **Residual: locks shared with SCHED_OTHER threads.** Std mutexes have no priority inheritance.
   The mix thread takes the jitter buffers' mutex (the VBAN receive task, the local capture threads
-  and the Janus adapter push into it), the Janus ring's and the `out_addrs` mutex. A SCHED_OTHER
+  and the Janus adapter push into it), the Janus ring's and the `out_addrs` mutex, and the watch
+  channel's write lock on every publish (its readers, the status task and the HTTP handlers, only
+  clone the snapshot's Arc under the read lock). A SCHED_OTHER
   holder preempted mid-section (each holds it for a few µs) holds the real-time thread until it
   runs again; a late wake from that shows as `caught_up_ticks`. The cycle's own cost was not
   measured on the box.

@@ -249,7 +249,10 @@ async fn main() -> Result<()> {
         let mut status_rx = live_rx.clone();
         tokio::spawn(async move {
             while status_rx.changed().await.is_ok() {
-                let line = status_rx.borrow_and_update().status_line();
+                // Only the Arc is cloned under the channel's read lock; the real-time thread's
+                // send takes the write lock, so the formatting happens after the borrow.
+                let snap = status_rx.borrow_and_update().clone();
+                let line = snap.status_line();
                 tracing::info!("{line}");
             }
         });
@@ -392,8 +395,8 @@ struct BlockLoop {
 
 /// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
 /// mix N-1, feed the Janus ring and the local PipeWire sinks, send each cambox its stream, and once
-/// a second publish `/api/state` and the status line. `janus_ring` + `janus_report` are fed and
-/// read only here.
+/// a second publish the `/api/state` snapshot on the watch channel (a tokio task logs its status
+/// line). `janus_ring` + `janus_report` are fed and read only here.
 ///
 /// It sleeps to the absolute deadline of the next tick on the exact block grid. A wake that finds
 /// missed ticks runs up to four of them at once, in order, before the current one; only the part
