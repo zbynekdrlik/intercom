@@ -58,3 +58,7 @@ jpeg-encoder = "0.7"
 opus = "0.4"
 tokio-stream = "0.1"
 libloading = { version = "0.8", optional = true }
+# The FIONREAD ioctl that measures a pw-cat playback pipe's fill before every write (issue 1401).
+# std has no pipe-fill query; libc is already in the dependency graph through tokio, so nothing
+# new is downloaded (rustix was rejected: a new crate for one call).
+libc = "0.2"

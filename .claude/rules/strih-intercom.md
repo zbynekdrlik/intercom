@@ -202,7 +202,8 @@ original migrated collection had it in all 7 program scenes).
   `fohabl-strih` + `lv1-strih`). The engine SUMS those streams into the participant's output via the
   matrix points (no new mixing code — the existing `program_ref` → `program_out` points do it); the
   block loop feeds `output.interleaved(program_out)` to a supervised `pw-cat --playback --target
-  strih-program` child (`PwCatSink`).
+  strih-program` child (`PwCatSink`), through the pipe fill guard of issue 1401 (every write
+  measures the stdin pipe and keeps it at 2 graph quanta; see "VBAN legs", the egress bullet).
 - **INGRESS — the talkback (`cutters` becomes a `pipewire` participant with `pipewire_source`):** a
   supervised `pw-cat --record --target <MiniFuse pro-input node>` child (`PwCatSource`) frames its
   stdout into blocks pushed into the `cutters` `JitterBuffer` the engine already pops — so the
@@ -325,7 +326,10 @@ against the 5.33 ms hub block wrote a zero-padded block into the mix (single und
 are on issue 1401 (comment 5977982465).
 
 - **Who gets which buffer (`inputs::input_buffers`, tested on the deployed TOML).**
-  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg` (cap 8 blocks, target `VBAN_TARGET_BLOCKS` = 3 = 16 ms).
+  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: cap 8 blocks, target
+    `VBAN_TARGET_BLOCKS` = 3 = 16 ms. Every other VBAN leg (the program feeds fohabl / lv1 / mbc):
+    cap 11, target `VBAN_PROGRAM_TARGET_BLOCKS` = 6 = 32 ms, because the FOH desk sends in bursts
+    with gaps up to 19.4 ms (design comment 5979008527, `tests/vban_program_target_1401.rs`).
   - Local captures + Janus -> `local_capture` (unchanged).
   - Everything else (no ingress) -> the plain `new`.
   - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
@@ -389,25 +393,121 @@ are on issue 1401 (comment 5977982465).
     servo_repeats, stalls, primed}`.
   - The hub-level `missed_ticks` (the block loop's missed ticks since start).
   - The status line is `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>)
-    [stalls=<sum>(<worst program leg>)] [missed=<n>] [servo=<drops>/<repeats>]`. The total still
-    leads, so a `underruns=(\d+)` parser keeps working; a leg is named only when its sum > 0.
+    [stalls=<sum>(<worst program leg>)] [missed=<n>] [tx_dropped=<sum>(<worst leg>)]
+    [servo=<drops>/<repeats>]`. The total still leads, so a `underruns=(\d+)` parser keeps
+    working; a leg is named only when its sum > 0.
   - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
-- **The program audio is ~13 ms later, now steady.** fohabl/lv1 feed `program_out` (the strih OBS
-  `ASIO zvuk`). The old depth was 0-5 ms and changed with every restart; now it is the 16 ms target.
-  Re-check any sync offset on that OBS input once after the hub deploy. The issue-1345 "10-20 ms"
-  acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
-  1401 design accepted ~16 ms knowingly.
+- **The program audio is later: fixed within a run (clock drift aside), varying per restart.**
+  fohabl/lv1 feed `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed
+  with every restart; now it is the 32 ms program-feed target, plus the pw-cat pipe depth below
+  (at least the ~43 ms target, more by whatever pw-cat's connect left, and that part still varies
+  per restart). Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345
+  "10-20 ms" acceptance (design comment 5813703805) was about the talkback ring, not the program
+  feed; the 1401 designs accepted these delays knowingly.
 - **Supervisor live check after a hub deploy:**
   - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
-    `depth_frames` ~752..784 (target 768 +-16), `depth_min_frames` well above 256,
-    `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
-    40 s).
+    `target_frames` 1536 (a cambox: 768), `depth_frames` within +-16 of it, `depth_min_frames`
+    well above 256, `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about
+    one frame per 40 s).
   - The journal status line: `underruns=` flat across a whole program (one count per gap under
     500 ms inside a running stream, naming the leg), no `stalls=` unless a program sender really
     stopped, no `missed=` (a missed tick is a lost block on every output: look for CPU or
     scheduling stalls on strih-lx), `overruns=0`.
   - A cambox far off 48 kHz shows `servo_*` growing at its own rate and its depth sitting that far
     off the target. Past ~1000 ppm it also shows underruns or overruns (the ASRC escalation).
+- **The egress: a fill target on every pw-cat pipe, one non-blocking socket per VBAN destination
+  (design comment 5979128757, live findings 5979008527 + 5979112926, 4.10.2026).** The "extreme"
+  chopping after a production was the egress, not the ingress.
+  - **pw-cat pipes ran EMPTY.** pw-cat raw playback `fread`s a whole graph quantum (1024 frames)
+    from stdin inside its process callback. The hub wrote exactly one block per tick, at exactly
+    the consumer's rate, so a pipe only ever held its start-up backlog. Every block the hub did not
+    write (16929 missed ticks, a full egress queue) drained it for good; below one quantum every
+    cycle blocked and xrunned (ERR ~50/s on the program sink AND the cutters' MiniFuse cans, the
+    pipe 0 bytes in 9 of 10 reads) until a hub restart.
+  - **The fill guard (`local_audio::PipeFillWriter`, the one `PwCatSink` for both sinks).** Before
+    each block it reads the pipe fill with `FIONREAD` on the write end (`pipe_fill_bytes`, the
+    hub's direct `libc` dependency; bytes per frame = channels x 2). `pipe_fill_plan(fill, block)`:
+    below one hub block -> top up with silence to `PIPE_TARGET_FRAMES` (2 quanta = 2048 frames,
+    42.7 ms), then write the block; above `PIPE_HIGH_FRAMES` (target + 2 quanta = 4096) -> drop the
+    block; otherwise write it. A drained pipe now costs ONE short silent gap, not continuous
+    chopping.
+  - The first write after a spawn reads 0 and gets the same top-up, but it is the PRIME: logged at
+    info, not counted as a refill. A refill (a pipe that drained under a running pw-cat) logs one
+    warn line `pipe ran low — topped up with silence`; a trim is debug only.
+  - **The start depth is the prime plus pw-cat's connect time.** pw-cat reads nothing until its
+    stream is streaming, and the hub keeps writing one block per tick meanwhile. The trim only drops
+    above 4096, so that backlog stays: the steady fill (and the program audio delay) is the target
+    (riding ~1024..2304 as pw-cat takes its 1024-frame quanta) plus the connect backlog, up to the
+    trim mark, and it can differ after every hub or pw-cat restart (review round 1 measured
+    ~3000..4096 frames, 62-85 ms). A read well above ~2304 is this, not a fault. Holding the
+    pipe at the target until pw-cat first consumes would make it the same every restart; that is
+    a design change, raised to the main session on the ticket.
+  - **Clock drift is not corrected on the pipe.** The hub ticks on the system clock and each
+    pw-cat sink is pulled by its PipeWire driver (the MiniFuse crystal for the cans). Any rate
+    offset walks the fill, 2.4 frames/s at 50 ppm. From the 2048 target a fast hub reaches the trim
+    mark in ~14 min and then trims a 5.3 ms block every ~107 s; a slow hub drains to one block in
+    ~12 min and then refills, a gap of up to 43 ms every ~14 min (2304 -> 256). From the measured
+    start depth (~3000..4096) a fast hub trims almost at once and a slow hub takes ~19-27 min to
+    its first refill. The guard bounds both, it does not remove them. A one-frame drop/repeat
+    servo on the pipe fill (the VBAN legs' drift-servo idea) is the follow-up.
+  - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims` and the last
+    `pipe_fill_frames` (measured before the last write). `tx_blocks` counts written blocks only.
+  - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
+    that is off wait in its unresolved ARP neighbour queue, charged to the socket that sent them.
+    With ONE shared socket the queues of several off camboxes together filled its send buffer and
+    the blocking `send_to` stalled the whole block loop. The kernel caps each neighbour's queue at
+    `unres_qlen_bytes` (212992, oldest discarded, `unresolved_discards` in
+    `/proc/net/stat/arp_cache`), no more than one socket's default send buffer (also 212992), so
+    a per-slot socket never fills on an off cambox (while `unres_qlen_bytes` stays at or below the
+    socket's buffer; the sockets are non-blocking either way, so the loop cannot stall). Reproduced on dev1 (review round 1, comment 5979378075): one dead
+    neighbour per non-blocking socket 0 EAGAIN in 6 s, two dead neighbours on one socket ~1030
+    EAGAIN each.
+  - `send_block` returns `SendOutcome::Sent | Dropped` (`classify_send`: `WouldBlock` = Dropped,
+    any other error stays an error). A Dropped packet means a socket really backed up (a NIC or
+    queue stall); it is counted in `tx_dropped` per participant on `/api/state` and as
+    `tx_dropped=N(<worst leg>)` on the status line only when > 0, and the block loop never waits.
+    An off cambox is NOT a `tx_dropped`: its `tx_packets` keeps rising at ~187/s while the kernel
+    discards the packets. One shared non-blocking socket was rejected: a buffer full of dead
+    neighbours' packets would drop the LIVE camboxes' packets too.
+  - The live `sysctl -w net.ipv4.neigh.<rig nic>.unres_qlen_bytes=16384` mitigation is no longer
+    needed and was never persisted (it lapses at the next reboot, harmlessly).
+  - **Supervisor live check after the deploy (no FIONREAD needed):**
+    - `pw-top -b` on strih-lx: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
+      row's driver (the MiniFuse for the cans);
+    - `/api/state` -> `program_out` and `cutters` `local_audio`: `pipe_fill_frames` between one
+      block and 4096 (target ~1024..2304 plus the connect backlog, see above), `pipe_refills` 0
+      and `pipe_trims` flat; watch the `pipe_fill_frames` trend for at least 1 h, a steady walk is
+      clock drift (see above);
+    - the status line shows no `missed=` while camboxes are off, and `tx_dropped` stays 0 on every
+      leg; an off cambox shows as `unresolved_discards` rising (or `ip -s neigh show <ip>`
+      INCOMPLETE/FAILED), not in the hub.
+  - Tests: `tests/egress_fill_1401.rs` (the plan table, FIONREAD on a real `std::io::pipe`, the
+    sink writer priming an empty pipe and then the block, the 4-channel byte math, the facet
+    counters, `classify_send`, `tx_dropped` on the facet + status line, the `main.rs` anchor of one
+    sender per output, the sink-thread anchor feeding `record_write`) and `vban_io`'s in-file
+    `a_sender_socket_never_blocks` (a `recv_from` with a 2 s timeout must return `WouldBlock` at
+    once).
+  - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
+    same change, which had grown past the ~300-line budget); `main()` only builds the
+    `BlockLoop` and spawns it.
+  - Tier-0 verify: the "VBAN rate" rlib recipe plus a `libc` rlib from
+    `~/.cargo/registry/src/*/libc-0.2.*/src/lib.rs` (`--cfg 'feature="std"'`, no build-script cfg
+    is needed on x86_64 gnu). A root that `#[path]`-includes the real vban_io + its deps,
+    `local_audio.rs` with its serde derive stripped and the test file as a module
+    (`intercom_hub::` -> `crate::`) runs the real-pipe FIONREAD test under plain `rustc --test`,
+    and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
+    copy its changed send-loop lines into the replica to type-check them against the real
+    `vban_io`.
+  - **Gotcha: a code move out of `main()` leaves bindings only CI's clippy sees.** Moving the
+    block loop into `run_block_loop` left `let block_frames` in `main()` unread, which is
+    `unused_variables` under the job's `-D warnings` (caught by review round 2, not by any
+    replica). After any move in `main.rs`, check every `let` left in each fn still has a read
+    that is not a `.field` access or a `key:` in a struct literal.
+  - **Probing socket/neighbour behaviour locally (no rig):** a non-blocking python UDP socket
+    sending 1052-byte packets at 187.5/s to unused addresses on an empty, no-carrier docker bridge
+    on dev1 (`ip -br addr` shows a `br-*` DOWN with 172.18.0.1/16) never leaves the box. One
+    destination per socket vs two on one socket reproduces the per-slot vs shared-socket
+    behaviour (review round 1 script: `dead_neigh.py`, comment 5979378075).
 - **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy), `tests/vban_jitter_state_1401.rs`
   (facet, status line, `input_buffers` on the deployed TOML, the block-loop wiring anchor), and
   `tests/vban_jitter_bench_1401.rs`:
@@ -683,9 +783,13 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   (they shared only the 62.5 ppm period error above, now fixed):
   - VBAN to the camboxes sends one 256-frame packet per 5.33 ms block (packet = tick, sd 0.6);
   - the `program_out` / cutters `pw-cat --playback` sinks are PULLED by the PipeWire driver.
-    pw-cat raw mode `fread`s the requested quantum from stdin (pw-cat.c `stdin_play`), so our
-    write cadence only sets the pipe fill. Live `pw-top` showed ERR 0 on the program sink after
-    40430 s.
+    pw-cat raw mode `fread`s the requested quantum from stdin (pw-cat.c `stdin_play`). **CORRECTED
+    4.10.2026 (issue 1401):** "our write cadence only sets the pipe fill" was wrong. Writing at
+    exactly the consumer's rate means nothing ever refills the pipe, so every block the hub does
+    not write drains it for good, and once it holds less than a quantum every cycle blocks and
+    xruns (ERR ~50/s live). The 40430 s ERR-0 reading was a run with no lost blocks. Since issue
+    1401 every write measures the pipe and tops it up to 2 quanta (see "VBAN legs" above, the
+    egress bullet).
 - **Opus.** `[janus].codec = "opus"` (default) | `"pcmu"`. Unknown values fail the load.
   - The join sends a top-level `codec`, `rtp.payload_type` 111 and `rtp.fec: true`. The receiver
     filters on the payload type Janus echoes in `joined` (fallback: ours).

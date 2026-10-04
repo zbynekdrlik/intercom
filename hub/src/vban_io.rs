@@ -552,10 +552,42 @@ pub fn peak_dbfs(peak_abs: i16) -> f32 {
     }
 }
 
-/// A UDP sender for the per-participant VBAN outputs. One socket sends every cambox's stream to its
-/// own `host:6980`.
+/// A UDP sender for ONE VBAN output destination (issue 1401): the block loop binds one per output
+/// slot, and every socket is NON-BLOCKING.
+///
+/// Packets to a cambox that is off wait in its unresolved ARP neighbour queue, charged to the
+/// socket that sent them. With one shared blocking socket the queues of several off camboxes
+/// together filled its buffer, and `send_to` blocked the whole block loop (16929 missed ticks
+/// live, 4.10.2026). The kernel caps each neighbour's queue (`unres_qlen_bytes`, oldest discarded)
+/// at no more than one socket's default send buffer (both 212992 by default), so a per-slot socket
+/// never fills on an off cambox: its packets are discarded by the kernel (`unresolved_discards` in
+/// `/proc/net/stat/arp_cache`) and its `tx_packets` keeps counting. A socket that really backs up
+/// (a NIC or queue stall) drops and counts the packet ([`SendOutcome::Dropped`]) instead of
+/// blocking. One shared non-blocking socket was rejected: a buffer full of dead neighbours'
+/// packets would drop the LIVE camboxes' packets too (reproduced on dev1: one dead neighbour per
+/// socket 0 EAGAIN, two on one socket ~90 %).
 pub struct VbanSender {
     socket: UdpSocket,
+}
+
+/// What one [`VbanSender::send_block`] did with the packet.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// Handed to the kernel.
+    Sent,
+    /// The destination's socket was full (`WouldBlock`): this one packet is dropped.
+    Dropped,
+}
+
+/// Classify a non-blocking `send_to` result: `WouldBlock` (a full send buffer) is a dropped packet,
+/// any other error stays an error.
+pub fn classify_send(sent: io::Result<usize>) -> io::Result<SendOutcome> {
+    match sent {
+        Ok(_) => Ok(SendOutcome::Sent),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(SendOutcome::Dropped),
+        Err(e) => Err(e),
+    }
 }
 
 /// Resolve one VBAN destination (`host`, `port`) to its first address — a ONE-SHOT lookup the send
@@ -575,20 +607,23 @@ pub fn resolve_vban_addr(host: &str, port: u16) -> Option<SocketAddr> {
 }
 
 impl VbanSender {
-    /// Bind an ephemeral local UDP socket to send from.
+    /// Bind an ephemeral, non-blocking local UDP socket to send from.
     pub fn bind_ephemeral() -> io::Result<Self> {
-        Ok(VbanSender {
-            socket: UdpSocket::bind("0.0.0.0:0")?,
-        })
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_nonblocking(true)?;
+        Ok(VbanSender { socket })
     }
 
-    /// Send one interleaved PCM16 [`OutBlock`] as a VBAN packet to `addr`. Pass a RESOLVED
-    /// [`SocketAddr`] on the block hot path (see [`resolve_vban_addr`]); a host string here is a
-    /// per-block DNS lookup.
-    pub fn send_block<A: ToSocketAddrs>(&self, addr: A, block: &OutBlock<'_>) -> Result<()> {
+    /// Send one interleaved PCM16 [`OutBlock`] as a VBAN packet to `addr`, never waiting: a full
+    /// socket drops the packet ([`SendOutcome::Dropped`]). Pass a RESOLVED [`SocketAddr`] on the
+    /// block hot path (see [`resolve_vban_addr`]); a host string here is a per-block DNS lookup.
+    pub fn send_block<A: ToSocketAddrs>(
+        &self,
+        addr: A,
+        block: &OutBlock<'_>,
+    ) -> Result<SendOutcome> {
         let packet = encode_packet(block)?;
-        self.socket.send_to(&packet, addr)?;
-        Ok(())
+        Ok(classify_send(self.socket.send_to(&packet, addr))?)
     }
 }
 
@@ -705,6 +740,32 @@ mod tests {
     }
 
     #[test]
+    fn a_sender_socket_never_blocks() {
+        // Issue 1401 (4.10.2026): one blocking socket for every cambox stalled the block loop once
+        // the unresolved-neighbour queues of several off camboxes together filled its send buffer
+        // (16929 missed ticks).
+        // Every sender socket is non-blocking: with nothing to read, recv_from returns WouldBlock
+        // at once. A blocking socket would wait out the 2 s timeout first.
+        let sender = VbanSender::bind_ephemeral().unwrap();
+        sender
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        let started = Instant::now();
+        let err = sender
+            .socket
+            .recv_from(&mut buf)
+            .expect_err("nothing was sent to it");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "returned at once, not after the timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn vban_loopback_demux_and_foreign_ignored() {
         // Our sender → the receiver socket on a RANDOM UDP port → stream-name demux; a foreign
         // name is ignored (returns None), exactly like the cambox receiver.
@@ -726,16 +787,22 @@ mod tests {
             interleaved: &interleaved,
             frames: 256,
         };
-        sender.send_block(addr, &known_block).unwrap();
-        sender
-            .send_block(
-                addr,
-                &OutBlock {
-                    stream_name: "cam9",
-                    ..known_block
-                },
-            )
-            .unwrap();
+        assert_eq!(
+            sender.send_block(addr, &known_block).unwrap(),
+            SendOutcome::Sent
+        );
+        assert_eq!(
+            sender
+                .send_block(
+                    addr,
+                    &OutBlock {
+                        stream_name: "cam9",
+                        ..known_block
+                    },
+                )
+                .unwrap(),
+            SendOutcome::Sent
+        );
 
         let mut buf = [0u8; 8192];
         let mut got_known = false;
