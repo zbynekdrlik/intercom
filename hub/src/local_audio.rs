@@ -101,7 +101,12 @@ pub enum PipeFillPlan {
 /// - below one block: top up with silence to [`PIPE_TARGET_FRAMES`], then write the block. A
 ///   fresh pipe (the first write after a spawn) reads 0 and gets the same top-up;
 /// - above [`PIPE_HIGH_FRAMES`]: drop the block;
-/// - otherwise: write it. The healthy steady state (1024..2048 frames) never triggers either guard.
+/// - otherwise: write it. A healthy steady state never triggers either guard.
+///
+/// The prime does not cap the start depth: pw-cat reads nothing until its stream runs, the hub
+/// keeps writing meanwhile, and only the trim mark bounds that backlog. So the steady fill is the
+/// target (riding ~1024..2304 with pw-cat's quantum reads) plus whatever pw-cat's connect left, up
+/// to [`PIPE_HIGH_FRAMES`], and it can differ after every spawn.
 pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize) -> PipeFillPlan {
     if fill_frames < block_frames {
         PipeFillPlan::TopUp {
@@ -328,7 +333,8 @@ pub struct LocalAudioFacet {
     pub pipe_refill_frames: u64,
     /// Blocks dropped because the playback pipe held more than the trim mark (4096 frames).
     pub pipe_trims: u64,
-    /// The playback pipe's fill measured before the last write, in frames (healthy: ~1024..2048).
+    /// The playback pipe's fill measured before the last write, in frames: between one hub block
+    /// and the trim mark (4096) when healthy; see [`pipe_fill_plan`] for why it varies per spawn.
     pub pipe_fill_frames: u64,
 }
 

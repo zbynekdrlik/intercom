@@ -556,11 +556,15 @@ pub fn peak_dbfs(peak_abs: i16) -> f32 {
 /// slot, and every socket is NON-BLOCKING.
 ///
 /// Packets to a cambox that is off wait in its unresolved ARP neighbour queue, charged to the
-/// socket that sent them. With one shared blocking socket a full buffer blocked `send_to` and the
-/// whole block loop (16929 missed ticks live, 4.10.2026). Now a dead cambox only fills its own
-/// socket: its packets are dropped and counted ([`SendOutcome::Dropped`]), the block loop never
-/// waits, and the live camboxes keep sending. One shared non-blocking socket was rejected: a buffer
-/// full of a dead neighbour's packets would drop the LIVE camboxes' packets too.
+/// socket that sent them. With one shared blocking socket the queues of several off camboxes
+/// together filled its buffer, and `send_to` blocked the whole block loop (16929 missed ticks
+/// live, 4.10.2026). The kernel caps each neighbour's queue (`unres_qlen_bytes`, oldest discarded)
+/// below one socket's send buffer, so a per-slot socket never fills on an off cambox: its packets
+/// are discarded by the kernel (`unresolved_discards` in `/proc/net/stat/arp_cache`) and its
+/// `tx_packets` keeps counting. A socket that really backs up (a NIC or queue stall) drops and
+/// counts the packet ([`SendOutcome::Dropped`]) instead of blocking. One shared non-blocking socket
+/// was rejected: a buffer full of dead neighbours' packets would drop the LIVE camboxes' packets
+/// too (reproduced on dev1: one dead neighbour per socket 0 EAGAIN, two on one socket ~90 %).
 pub struct VbanSender {
     socket: UdpSocket,
 }

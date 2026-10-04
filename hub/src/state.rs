@@ -54,8 +54,8 @@ impl From<NetworkFillStats> for JitterFacet {
 pub struct RuntimeStats {
     pub rx_packets: u64,
     pub tx_packets: u64,
-    /// VBAN packets to this participant dropped because its own send socket was full (issue 1401:
-    /// a cambox that is off), instead of blocking the block loop.
+    /// VBAN packets to this participant dropped because its own send socket was backed up (issue
+    /// 1401: a NIC or queue stall), instead of blocking the block loop.
     pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
@@ -84,8 +84,9 @@ pub struct ParticipantState {
     pub host: Option<String>,
     pub rx_packets: u64,
     pub tx_packets: u64,
-    /// VBAN packets to this participant dropped on a full send socket (issue 1401) — a cambox that
-    /// is off drops its whole stream here; a live one stays 0.
+    /// VBAN packets to this participant dropped on a backed-up send socket (issue 1401). 0 in a
+    /// healthy run; a cambox that is off stays 0 too (the kernel discards its packets, and its
+    /// `tx_packets` keeps counting).
     pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
@@ -179,12 +180,11 @@ impl HubState {
     /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
     /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
     /// stops on every mute, so it is left out), the block loop's missed ticks as `missed=N` (a block
-    /// lost on every output), the VBAN packets dropped on a full send socket as
-    /// `tx_dropped=N(<worst leg>)` (issue 1401: a cambox that is off), the VBAN legs' drift-servo
-    /// corrections as
-    /// `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue
-    /// 1345), so a rejected stream (which reads as silent) stays explained after its one warn
-    /// scrolls away.
+    /// lost on every output), the VBAN packets dropped on a backed-up send socket as
+    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
+    /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
+    /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
+    /// after its one warn scrolls away.
     pub fn status_line(&self) -> String {
         let total_rate_rejects: u64 = self
             .participants
