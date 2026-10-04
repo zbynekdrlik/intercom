@@ -272,6 +272,10 @@ fn a_guard_forgets_the_servos_pending_corrections() {
             t += step;
         }
         assert!(drops > 5, "the servo was correcting ({drops})");
+        // The guard fill is read for longer than a hub period: a starved pipe needs that (design
+        // 5981457044), the trim acts on any reading.
+        c.sample(t, guard_fill);
+        t += 6 * MS;
         let guard = c.plan_block(t, guard_fill, BLOCK).plan;
         assert!(
             matches!(guard, PipeFillPlan::Drop | PipeFillPlan::TopUp { .. }),
