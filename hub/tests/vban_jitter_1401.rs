@@ -79,12 +79,14 @@ fn the_target_is_three_hub_blocks_inside_the_cap() {
     assert_eq!(VBAN_TARGET_BLOCKS, 3, "the design's ~16 ms target");
     assert_eq!(TARGET, 768);
     assert_eq!(TARGET * 1000 / 48_000, 16, "16 ms at the 48 kHz hub rate");
-    assert_eq!(VBAN_CAP_BLOCKS, 8, "the cap stays 8 blocks (43 ms)");
+    // Design 5981457044: the cap is the target + the four ticks the block loop runs late + the
+    // current tick + one block of headroom (48 ms), so a covered stall's arrivals never trim it.
+    assert_eq!(VBAN_CAP_BLOCKS, 9, "the cap is 9 blocks (48 ms)");
     assert_eq!(SERVO_WINDOW_FRAMES, 48_000, "the servo averages over 1 s");
     // At most one corrected frame per 1000 output frames = 1 ms/s at any rate.
     const { assert!(SERVO_MIN_SPACING_FRAMES >= 1_000) };
-    // A late burst has five blocks of headroom before anything is dropped.
-    const { assert!(CAP >= TARGET + 5 * BLOCK) };
+    // A late burst has six blocks of headroom before anything is dropped.
+    const { assert!(CAP >= TARGET + 6 * BLOCK) };
     // The band is a small part of a block, so the leg settles close to its target.
     const { assert!(SERVO_DEADBAND_FRAMES <= BLOCK / 8) };
     const { assert!(SERVO_KNEE_FRAMES > SERVO_DEADBAND_FRAMES) };
