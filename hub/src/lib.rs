@@ -27,6 +27,7 @@ pub mod local_audio;
 pub mod matrix;
 pub mod mulaw;
 pub mod ndi_video;
+pub mod pipe_fill;
 pub mod state;
 pub mod vban_io;
 pub mod vban_jitter;
