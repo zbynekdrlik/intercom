@@ -252,7 +252,8 @@ impl PipeFillControl {
         }
     }
 
-    /// The servo's depth and setpoint, once it runs (after pw-cat's first read).
+    /// The servo's depth and setpoint, once it runs (after pw-cat's first read). The depth is the
+    /// mean of the servo's last complete 1 s window: 0 until the first one completes.
     pub fn servo_depth(&self) -> Option<PipeServoDepth> {
         self.servo.as_ref().map(|servo| PipeServoDepth {
             depth_frames: servo.stats().depth_frames,

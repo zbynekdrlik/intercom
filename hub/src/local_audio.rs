@@ -364,8 +364,9 @@ pub struct LocalAudioFacet {
     /// so read the servo's `pipe_depth_frames` for the held depth.
     pub pipe_fill_frames: u64,
     /// Blocks dropped by the start hold: written while pw-cat had not read since its spawn, so
-    /// every spawn starts at the same depth (issue 1401). It grows only around a spawn, by pw-cat's
-    /// connect time / one hub block; a count that keeps climbing means pw-cat is not reading.
+    /// every spawn starts at the same depth (issue 1401). It grows only around a spawn: by pw-cat's
+    /// connect time / one hub block, plus, after a respawn, up to the 63 blocks the egress queue
+    /// filled during the restart backoff. A count that keeps climbing means pw-cat is not reading.
     pub pipe_start_holds: u64,
     /// Single frames the pipe's drift servo dropped (the hub's clock runs ahead of the sink's).
     pub pipe_servo_drops: u64,
@@ -374,7 +375,8 @@ pub struct LocalAudioFacet {
     /// The servo's mean time-weighted pipe fill over its last complete 1 s window, in frames:
     /// within a few tens of frames of `pipe_setpoint_frames` once settled (up to ~70 off at a
     /// 50 ppm sink). 0 until the first window after pw-cat's first read completes; after a
-    /// respawn it keeps the previous child's value until the new child's first read.
+    /// respawn it keeps the previous child's value until the new child's first read, then reads 0
+    /// until that child's first 1 s window completes.
     pub pipe_depth_frames: u64,
     /// The depth the servo holds: the time-average the start hold leaves, 1792 frames at the
     /// 256-frame block. 0 until pw-cat's first read after the hub start.

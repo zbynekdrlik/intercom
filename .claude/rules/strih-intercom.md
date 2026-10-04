@@ -406,7 +406,7 @@ are on issue 1401 (comment 5977982465).
   - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below.
     A spawn starts within +-2.7 ms of it and is walked in within ~60 s; after that every restart
     sits within about 1 ms of the same depth, whatever pw-cat's connect time.
-  
+
   Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345 "10-20 ms"
   acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
   1401 designs accepted these delays knowingly.
@@ -526,8 +526,10 @@ are on issue 1401 (comment 5977982465).
       on the program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
       reading) anywhere in depth - 640 .. depth + 384, ~1000..2350 (it rides pw-cat's 1024-frame
       reads); `pipe_refills` 0 and `pipe_trims` flat;
-      `pipe_start_holds` grows only at a pw-cat (re)spawn (pw-cat's connect time / 5.33 ms
-      blocks each), together with `spawns`;
+      `pipe_start_holds` grows only at a pw-cat (re)spawn, together with `spawns`: pw-cat's
+      connect time / 5.33 ms blocks, plus after a respawn up to the 63 stale blocks the 64-block
+      egress queue filled during the 1 s restart backoff (the first queued block is the prime);
+      `pipe_depth_frames` reads 0 for the first second after each spawn's first read;
     - over >= 1 h: `pipe_servo_drops - pipe_servo_repeats` grows at the sink's drift and no
       faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0). The first minute
       after each pw-cat (re)spawn adds the walk-in, up to ~120 corrections (see the setpoint
@@ -554,7 +556,7 @@ are on issue 1401 (comment 5977982465).
     - the two-clock bench (the 16 spawns, 0 / +-50 / +-200 ppm for 1 h; < 1 s in a debug build).
       It bounds the TRUE depth (from exact event times) and, separately, the depth the servo
       itself measures (the trapezoids of the hub's own readings).
-    
+
     Its per-second correction counts are bench seconds, not the servo's windows. At 200 ppm the
     peak of 15 is the servo's own budget past the knee, not a straddle.
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
