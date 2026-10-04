@@ -16,9 +16,9 @@ use crate::vban_jitter::NetworkFillStats;
 /// A VBAN leg's jitter buffer as `/api/state` shows it (issue 1401): the target and the measured
 /// depth in frames (the hub `sample_rate` turns them into ms), and how often the drift servo
 /// dropped or repeated a single frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct JitterFacet {
-    /// The target pre-pop fill.
+    /// The target pre-pop fill: live, a program feed's follows its sender's gaps.
     pub target_frames: usize,
     /// The mean pre-pop fill over the last 1 s window (0 before the first window).
     pub depth_frames: usize,
@@ -33,6 +33,11 @@ pub struct JitterFacet {
     pub stalls: u64,
     /// Audio is flowing (false while priming: before the first packet or after an underrun).
     pub primed: bool,
+    /// A program feed's largest gap between two packets in the last 10 min, in ms (0.1 ms
+    /// resolution): what its adaptive target follows. Omitted for a leg with a fixed target (the
+    /// camboxes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_gap_ms_10min: Option<f64>,
 }
 
 impl From<NetworkFillStats> for JitterFacet {
@@ -45,6 +50,9 @@ impl From<NetworkFillStats> for JitterFacet {
             servo_repeats: s.servo_repeats,
             stalls: s.stalls,
             primed: s.primed,
+            max_gap_ms_10min: s
+                .max_gap_us_10min
+                .map(|us| (us as f64 / 100.0).round() / 10.0),
         }
     }
 }
@@ -125,10 +133,19 @@ pub struct HubState {
     /// last_error), present only when the hub has a `[video]` config (M3c) — omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoStats>,
-    /// Hub block-loop ticks missed since the daemon started (issue 1401): each one is a block lost
-    /// on EVERY output, the program sink included (the VBAN legs give the same block up). Set by the
-    /// daemon after the snapshot; the pure snapshot has no tick history of its own.
-    pub missed_ticks: u64,
+    /// Hub block-loop ticks run late since the daemon started (issue 1401, design 5980775411): the
+    /// loop woke more than a period late and ran the missed cycles at once, so no output lost a
+    /// block. Set by the daemon after the snapshot; the pure snapshot has no tick history.
+    pub caught_up_ticks: u64,
+    /// Hub block-loop ticks given up since the daemon started: the part of a late wake beyond the
+    /// four it runs late. Each one is a block lost on EVERY output, the program sink included (the
+    /// VBAN legs give the same block up). Set by the daemon after the snapshot.
+    pub lost_ticks: u64,
+    /// The hub-mix block loop thread's scheduling class as it read it at start (`SCHED_FIFO 10`,
+    /// or `SCHED_OTHER` when the unit's realtime grant is missing): a refused grant is visible
+    /// here without ssh. Set by the daemon; omitted from the pure snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix_thread_sched: Option<String>,
 }
 
 impl HubState {
@@ -170,7 +187,9 @@ impl HubState {
             // The video facet is attached by the daemon (main.rs) after the snapshot when a `[video]`
             // config is present; the pure snapshot has no picture state of its own.
             video: None,
-            missed_ticks: 0,
+            caught_up_ticks: 0,
+            lost_ticks: 0,
+            mix_thread_sched: None,
         }
     }
 
@@ -179,8 +198,9 @@ impl HubState {
     /// `underruns=220(fohabl)`), + the participant levels, so a dead/underrunning leg is visible
     /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
     /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
-    /// stops on every mute, so it is left out), the block loop's missed ticks as `missed=N` (a block
-    /// lost on every output), the VBAN packets dropped on a backed-up send socket as
+    /// stops on every mute, so it is left out), the block loop's lost ticks as `lost=N` (a block
+    /// lost on every output; a tick it caught up is no loss and stays off the line), the VBAN
+    /// packets dropped on a backed-up send socket as
     /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
     /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
     /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
@@ -226,8 +246,8 @@ impl HubState {
         } else {
             String::new()
         };
-        let missed = if self.missed_ticks > 0 {
-            format!(" missed={}", self.missed_ticks)
+        let lost = if self.lost_ticks > 0 {
+            format!(" lost={}", self.lost_ticks)
         } else {
             String::new()
         };
@@ -242,7 +262,7 @@ impl HubState {
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
             stalls,
-            missed,
+            lost,
             tx_dropped,
             servo,
             rejects,

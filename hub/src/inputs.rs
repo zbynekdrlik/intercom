@@ -21,8 +21,10 @@ use crate::vban_jitter::{
 /// - every VBAN leg (the FOH program feed, the camboxes' talkback) gets the VBAN-leg buffer with
 ///   its target fill and drift servo (issue 1401: the no-target buffer zero-padded a block whenever
 ///   a packet was a little late, dropouts in the strih program audio). A cambox leg (Linux, even
-///   pacing) targets [`VBAN_TARGET_BLOCKS`]; every other VBAN leg is a program feed from a Windows
-///   sender that bursts, and targets [`VBAN_PROGRAM_TARGET_BLOCKS`];
+///   pacing) keeps the fixed [`VBAN_TARGET_BLOCKS`]; every other VBAN leg is a program feed from a
+///   Windows sender that bursts, and its target follows the sender's largest gap of the last
+///   10 min from the floor [`VBAN_PROGRAM_TARGET_BLOCKS`] up ([`crate::adaptive_target`], design
+///   5980775411);
 /// - a participant with no ingress (`adapter = "none"`, the `program_out` sink) gets the plain
 ///   buffer.
 ///
@@ -52,6 +54,11 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
                 JitterBuffer::vban_leg(
                     block_frames * VBAN_PROGRAM_CAP_BLOCKS,
                     block_frames * VBAN_PROGRAM_TARGET_BLOCKS,
+                )
+                .with_adaptive_target(
+                    &p.name,
+                    block_frames,
+                    matrix.hub.sample_rate,
                 )
             } else {
                 JitterBuffer::new(cap)

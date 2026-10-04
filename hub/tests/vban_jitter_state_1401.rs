@@ -2,7 +2,10 @@
 //! target, measured depth, servo corrections and stalls; the periodic status line names the leg
 //! with the most underruns and overruns (the live line only said `underruns=220`, summed over every
 //! participant, and never showed overruns at all) and the program feeds' stalls; and the hub really
-//! gives every VBAN participant the target-fill buffer and gives up a missed tick's block.
+//! gives every VBAN participant the target-fill buffer. Since design 5980775411 the block loop runs
+//! missed ticks late (`caught_up_ticks`) and gives up only the part beyond four blocks
+//! (`lost_ticks`, `lost=N` on the line); a program feed's facet also shows the largest gap of the
+//! last 10 min its adaptive target follows.
 
 use std::path::PathBuf;
 
@@ -10,6 +13,7 @@ use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_JANUS, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 use intercom_hub::state::{HubState, JitterFacet, RuntimeStats};
 use intercom_hub::vban_io::BufferKind;
+use intercom_hub::vban_jitter::NetworkFillStats;
 
 fn matrix() -> Matrix {
     Matrix::from_toml(
@@ -59,6 +63,7 @@ fn facet(servo_drops: u64, servo_repeats: u64, stalls: u64) -> JitterFacet {
         servo_repeats,
         stalls,
         primed: true,
+        max_gap_ms_10min: None,
     }
 }
 
@@ -153,22 +158,81 @@ fn the_status_line_shows_program_feed_stalls_but_not_cambox_mutes() {
 }
 
 #[test]
-fn missed_hub_ticks_show_on_api_state_and_the_status_line() {
-    // A missed tick is a lost block on EVERY output, the program sink included: the daemon counts
-    // them for the whole run and they must be visible, not only in a debug log.
+fn lost_and_caught_up_hub_ticks_show_on_api_state_and_only_the_lost_on_the_status_line() {
+    // A tick run late (caught up) is no loss; a LOST tick is a block lost on EVERY output, the
+    // program sink included. The daemon counts both for the whole run; the line names only the
+    // loss, after the leading `underruns=`.
     let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
     let mut hs = HubState::snapshot(&matrix(), "v", &stats);
-    assert_eq!(hs.missed_ticks, 0);
-    assert!(
-        !hs.status_line().contains("missed="),
-        "{}",
-        hs.status_line()
-    );
-    hs.missed_ticks = 3;
+    assert_eq!((hs.caught_up_ticks, hs.lost_ticks), (0, 0));
+    hs.caught_up_ticks = 12;
     let line = hs.status_line();
-    assert!(line.contains("missed=3"), "got: {line}");
+    assert!(
+        !line.contains("lost="),
+        "a caught-up tick is no loss: {line}"
+    );
+    assert!(!line.contains("missed="), "{line}");
+    hs.lost_ticks = 3;
+    let line = hs.status_line();
+    assert!(line.contains(" lost=3"), "got: {line}");
+    assert!(
+        line.starts_with("intercom-hub: status participants=3 underruns=0 overruns=0"),
+        "got: {line}"
+    );
     let v = serde_json::to_value(&hs).unwrap();
-    assert_eq!(v["missed_ticks"], 3);
+    assert_eq!(v["caught_up_ticks"], 12);
+    assert_eq!(v["lost_ticks"], 3);
+    assert!(v.get("missed_ticks").is_none(), "{v}");
+}
+
+#[test]
+fn the_mix_threads_class_shows_on_api_state_once_the_daemon_sets_it() {
+    let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
+    let mut hs = HubState::snapshot(&matrix(), "v", &stats);
+    let v = serde_json::to_value(&hs).unwrap();
+    assert!(
+        v.get("mix_thread_sched").is_none(),
+        "the pure snapshot has no thread: {v}"
+    );
+    hs.mix_thread_sched = Some("SCHED_FIFO 10".into());
+    let v = serde_json::to_value(&hs).unwrap();
+    assert_eq!(v["mix_thread_sched"], "SCHED_FIFO 10");
+}
+
+#[test]
+fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
+    let program = JitterFacet::from(NetworkFillStats {
+        target_frames: 1792,
+        max_gap_us_10min: Some(27_641),
+        ..Default::default()
+    });
+    assert_eq!(program.max_gap_ms_10min, Some(27.6), "0.1 ms resolution");
+    assert_eq!(program.target_frames, 1792, "the live target");
+    let cambox = JitterFacet::from(NetworkFillStats {
+        target_frames: 768,
+        ..Default::default()
+    });
+    assert_eq!(cambox.max_gap_ms_10min, None);
+    let stats = vec![
+        RuntimeStats {
+            jitter: Some(cambox),
+            ..Default::default()
+        },
+        RuntimeStats::default(),
+        RuntimeStats {
+            jitter: Some(program),
+            ..Default::default()
+        },
+    ];
+    let v = serde_json::to_value(HubState::snapshot(&matrix(), "v", &stats)).unwrap();
+    assert!(
+        v["participants"][0]["jitter"]
+            .get("max_gap_ms_10min")
+            .is_none(),
+        "{v}"
+    );
+    assert_eq!(v["participants"][2]["jitter"]["max_gap_ms_10min"], 27.6);
+    assert_eq!(v["participants"][2]["jitter"]["target_frames"], 1792);
 }
 
 #[test]
@@ -204,26 +268,36 @@ fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
 }
 
 #[test]
-fn the_block_loop_gives_up_a_missed_tick_and_publishes_the_fill_numbers() {
-    // The daemon's tokio loop is not unit-testable; anchor the two calls that wire the pure pieces
-    // (missed_ticks / skip_missed / network_stats, all tested on their own) into it.
+fn the_block_loop_catches_up_gives_up_only_the_lost_part_and_publishes_the_fill_numbers() {
+    // The daemon's block loop is not unit-testable; anchor the calls that wire the pure pieces
+    // (BlockGrid / run_batch / skip_missed / network_stats, all tested on their own) into it.
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     let src = std::fs::read_to_string(&p).expect("read main.rs");
+    let batch = src
+        .find("run_batch(batch, |lost|")
+        .expect("every due tick runs through the catch-up dispatch");
     let skip = src
-        .find("b.skip_missed(missed, block_frames)")
-        .expect("skip wired");
+        .find("b.skip_missed(lost, block_frames)")
+        .expect("only the lost part is given up");
     let pop = src.find("b.pop_block(block_frames)").expect("pop");
-    assert!(skip < pop, "the missed block is given up before the pop");
     assert!(
-        src.contains("missed_ticks(tick - prev, period)"),
-        "the gap between SCHEDULED ticks"
+        batch < skip && skip < pop,
+        "inside each cycle, the lost blocks go before the pop"
+    );
+    assert!(
+        !src.contains("missed_ticks("),
+        "the grid counts the due ticks itself"
     );
     assert!(
         src.contains(".jitter = b.network_stats()"),
         "the block loop publishes each VBAN leg's fill numbers to /api/state"
     );
     assert!(
-        src.contains("snapshot.missed_ticks = missed_total"),
-        "the block loop publishes the run's missed ticks"
+        src.contains("snapshot.caught_up_ticks = caught_up_total"),
+        "the block loop publishes the run's caught-up ticks"
+    );
+    assert!(
+        src.contains("snapshot.lost_ticks = lost_total"),
+        "the block loop publishes the run's lost ticks"
     );
 }

@@ -17,23 +17,22 @@ use clap::Parser;
 
 use std::sync::mpsc::SyncSender;
 
+use intercom_hub::block_clock::{run_batch, BlockGrid};
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
-use intercom_hub::janus_pacing::{
-    hub_block_period, PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES,
-};
+use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
 };
 use intercom_hub::matrix::Matrix;
+use intercom_hub::mix_thread::{current_sched_class, spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
     resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
 };
-use intercom_hub::vban_jitter::missed_ticks;
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -243,6 +242,21 @@ async fn main() -> Result<()> {
         &vec![RuntimeStats::default(); n],
     ));
     let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+    // The periodic status line is written here, on tokio, from every snapshot the block loop
+    // publishes: a journal write can block, and the block loop runs on the real-time hub-mix
+    // thread (issue 1401).
+    {
+        let mut status_rx = live_rx.clone();
+        tokio::spawn(async move {
+            while status_rx.changed().await.is_ok() {
+                // Only the Arc is cloned under the channel's read lock; the real-time thread's
+                // send takes the write lock, so the formatting happens after the borrow.
+                let snap = status_rx.borrow_and_update().clone();
+                let line = snap.status_line();
+                tracing::info!("{line}");
+            }
+        });
+    }
 
     // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
     // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
@@ -270,10 +284,17 @@ async fn main() -> Result<()> {
                                 slot.publish(conv);
                             }
                             if let Some(audio) = converted {
-                                if let Ok(mut jb) = jitter.lock() {
-                                    if let Some(b) = jb.get_mut(id) {
+                                // A program feed's target change is logged after the lock is
+                                // released: the real-time hub-mix thread takes the same lock
+                                // every block (issue 1401).
+                                let change = jitter.lock().ok().and_then(|mut jb| {
+                                    jb.get_mut(id).and_then(|b| {
                                         b.push(&audio);
-                                    }
+                                        b.take_target_change()
+                                    })
+                                });
+                                if let Some(change) = change {
+                                    change.log();
                                 }
                             }
                         }
@@ -286,7 +307,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- block/mix task: pop a block from every buffer, mix N-1, send each cambox's stream ----
+    // --- block/mix thread: pop a block from every buffer, mix N-1, send each cambox's stream --
     // One NON-BLOCKING send socket per output slot (issue 1401): one shared blocking socket let the
     // unresolved-neighbour queues of the camboxes that are off fill its send buffer together and
     // stall the block loop. The kernel caps each neighbour's queue at no more than one socket's
@@ -297,7 +318,10 @@ async fn main() -> Result<()> {
         .map(|_| VbanSender::bind_ephemeral())
         .collect::<std::io::Result<Vec<_>>>()
         .context("bind the VBAN send sockets")?;
-    tokio::spawn(run_block_loop(BlockLoop {
+    // The block loop runs on its own real-time OS thread, "hub-mix" (issue 1401, design
+    // 5980775411): SCHED_FIFO 10 + absolute-deadline sleeps, so contention on the box no longer
+    // makes it miss ticks; tokio keeps HTTP, the Janus session and the VBAN receive.
+    let block_loop = BlockLoop {
         matrix: matrix.clone(),
         engine,
         jitter,
@@ -310,7 +334,22 @@ async fn main() -> Result<()> {
         local_audio,
         video_for_loop: video_state.clone(),
         live_tx,
-    }));
+    };
+    let mix = spawn_mix_thread(move || run_block_loop(block_loop))
+        .context("spawn the hub-mix block loop thread")?;
+    // The loop never returns. Should the thread end anyway (a panic), every output would go silent
+    // behind a frozen /api/state: stop the daemon instead, so systemd restarts it.
+    std::thread::Builder::new()
+        .name("hub-mix-watch".into())
+        .spawn(move || {
+            let panicked = mix.join().is_err();
+            tracing::error!(
+                panicked,
+                "intercom-hub: the {MIX_THREAD_NAME} block loop ended -- exiting so systemd restarts the hub"
+            );
+            std::process::exit(1);
+        })
+        .context("spawn the hub-mix watch thread")?;
 
     tracing::info!(
         version = VERSION,
@@ -334,7 +373,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Everything the block loop owns; `main` builds it once and moves it into the loop's task.
+/// Everything the block loop owns; `main` builds it once and moves it onto the loop's thread.
 struct BlockLoop {
     matrix: Matrix,
     engine: Arc<Engine>,
@@ -354,10 +393,16 @@ struct BlockLoop {
     live_tx: tokio::sync::watch::Sender<Arc<HubState>>,
 }
 
-/// The block/mix loop: every hub tick, pop one block from every buffer, mix N-1, feed the Janus
-/// ring and the local PipeWire sinks, send each cambox its stream, and once a second publish
-/// `/api/state` and the status line. `janus_ring` + `janus_report` are fed and read only here.
-async fn run_block_loop(bl: BlockLoop) {
+/// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
+/// mix N-1, feed the Janus ring and the local PipeWire sinks, send each cambox its stream, and once
+/// a second publish the `/api/state` snapshot on the watch channel (a tokio task logs its status
+/// line). `janus_ring` + `janus_report` are fed and read only here.
+///
+/// It sleeps to the absolute deadline of the next tick on the exact block grid. A wake that finds
+/// missed ticks runs up to four of them at once, in order, before the current one; only the part
+/// beyond that is lost, and the VBAN legs give that part up right before the current pop (issue
+/// 1401, design 5980775411).
+fn run_block_loop(bl: BlockLoop) {
     let BlockLoop {
         matrix,
         engine,
@@ -383,155 +428,177 @@ async fn run_block_loop(bl: BlockLoop) {
     let block_frames = matrix.hub.block_frames;
     // Status push cadence: ~1 s worth of blocks.
     let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
-    // Exact to the ns (issue 1345, 25.9.2026): the old whole-µs period (5333 instead of
-    // 5333.33) ran the loop 62.5 ppm fast, so every egress drifted against its consumer.
-    let period = hub_block_period(block_frames, sample_rate.max(1));
-    let mut ticker = tokio::time::interval(period);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Every deadline exact to the ns and never summed up (issue 1345, 25.9.2026: a whole-µs period
+    // ran the loop 62.5 ppm fast, so every egress drifted against its consumer).
+    let clock = MonoClock::start();
+    let mut grid = BlockGrid::new(block_frames, sample_rate);
     let mut tx_packets = vec![0u64; n];
     let mut tx_dropped = vec![0u64; n];
     let mut frame_counter = vec![0u32; n];
     let mut cycle: u64 = 0;
-    let mut last_tick: Option<tokio::time::Instant> = None;
-    let mut missed_total: u64 = 0;
+    let mut caught_up_total: u64 = 0;
+    let mut lost_total: u64 = 0;
+    let mut last_lost_warn: Option<u64> = None;
+    // This thread's class as the start-up asked for it, for /api/state (a refused grant shows).
+    let mix_thread_sched =
+        current_sched_class().map_or_else(|e| format!("unknown ({e})"), |class| class.label());
     loop {
-        let tick = ticker.tick().await;
-        cycle = cycle.wrapping_add(1);
-        // `tick` is the SCHEDULED instant, and Skip resumes on the same grid: a gap of more
-        // than one period means the loop missed ticks, and every output lost those blocks.
-        // The VBAN legs give up as many blocks of their oldest audio (issue 1401), so their
-        // depth stays at its target instead of the servo walking a block off for seconds.
-        let missed = last_tick.map_or(0, |prev| missed_ticks(tick - prev, period));
-        last_tick = Some(tick);
-        if missed > 0 {
-            missed_total = missed_total.saturating_add(missed);
-            tracing::debug!(missed, "intercom-hub: block loop missed ticks");
+        clock.sleep_until(grid.next_deadline());
+        let Some(batch) = grid.take_due(clock.elapsed()) else {
+            continue;
+        };
+        caught_up_total = caught_up_total.saturating_add(batch.catch_up);
+        lost_total = lost_total.saturating_add(batch.lost);
+        if batch.lost > 0 {
+            // A lost tick is a block gone from EVERY output: say so, at most once a second (the
+            // status line keeps the total).
+            if last_lost_warn.is_none_or(|c| cycle.wrapping_sub(c) >= status_every as u64) {
+                last_lost_warn = Some(cycle);
+                tracing::warn!(
+                    caught_up = batch.catch_up,
+                    lost = batch.lost,
+                    lost_total,
+                    "intercom-hub: the block loop woke too late to catch up -- blocks lost on every output"
+                );
+            }
+        } else if batch.catch_up > 0 {
+            tracing::debug!(
+                caught_up = batch.catch_up,
+                "intercom-hub: the block loop caught up late ticks"
+            );
         }
+        // Every catch-up cycle, then the current one, which first gives up the lost part.
+        run_batch(batch, |lost| {
+            cycle = cycle.wrapping_add(1);
 
-        // Pop one block per participant + gather rx stats under the lock.
-        let mut input = InputBlock::silent(n);
-        let mut rx_stats = vec![RuntimeStats::default(); n];
-        if let Ok(mut jb) = jitter.lock() {
-            for (id, b) in jb.iter_mut().enumerate() {
-                b.skip_missed(missed, block_frames);
-                input.set(id, b.pop_block(block_frames));
-                rx_stats[id].rx_packets = b.rx_packets;
-                rx_stats[id].underruns = b.underruns;
-                rx_stats[id].overruns = b.overruns;
-                rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
-                rx_stats[id].level_dbfs = b.last_level_dbfs();
-                // The VBAN leg's target / depth / servo corrections (issue 1401).
-                rx_stats[id].jitter = b.network_stats().map(Into::into);
-                if let Some(slot) = rate_stats.get(id) {
-                    rx_stats[id].sample_rate = slot.sample_rate();
-                    rx_stats[id].rate_rejects = slot.rate_rejects();
+            // Pop one block per participant + gather rx stats under the lock.
+            let mut input = InputBlock::silent(n);
+            let mut rx_stats = vec![RuntimeStats::default(); n];
+            if let Ok(mut jb) = jitter.lock() {
+                for (id, b) in jb.iter_mut().enumerate() {
+                    b.skip_missed(lost, block_frames);
+                    input.set(id, b.pop_block(block_frames));
+                    rx_stats[id].rx_packets = b.rx_packets;
+                    rx_stats[id].underruns = b.underruns;
+                    rx_stats[id].overruns = b.overruns;
+                    rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
+                    rx_stats[id].level_dbfs = b.last_level_dbfs();
+                    // The VBAN leg's target / depth / servo corrections (issue 1401).
+                    rx_stats[id].jitter = b.network_stats().map(Into::into);
+                    if let Some(slot) = rate_stats.get(id) {
+                        rx_stats[id].sample_rate = slot.sample_rate();
+                        rx_stats[id].rate_rejects = slot.rate_rejects();
+                    }
                 }
             }
-        }
 
-        let output = engine.mix_block(&input, block_frames);
+            let output = engine.mix_block(&input, block_frames);
 
-        // Feed the phones participant's mixed output (down-mixed to mono) into the Janus
-        // ring. The paced sender thread pops it on its own 20 ms clock (issue 1345); the
-        // lock is held only for the append, never across a send.
-        if let (Some(ring), Some((pid, _))) = (&janus_ring, &janus_report) {
-            let interleaved = output.interleaved(*pid, block_frames);
-            if !interleaved.is_empty() {
-                let mono = stereo_to_mono(&interleaved);
-                // A poisoned lock still holds a valid ring: keep feeding it, exactly as
-                // the sender thread keeps popping it.
-                ring.lock().unwrap_or_else(|e| e.into_inner()).push(&mono);
-            }
-        }
-
-        // Feed the program_out participant's mixed output into the PipeWire sink (issue 1344).
-        // Best-effort try_send: a full queue drops the block (talkback/program jitter is
-        // tolerable), never blocking the mix loop.
-        if let (Some(tx), Some((pid, _))) = (&program_sink_tx, &program_out_report) {
-            let interleaved = output.interleaved(*pid, block_frames);
-            if !interleaved.is_empty() {
-                let _ = tx.try_send(interleaved);
-            }
-        }
-
-        // Feed every local playback sink its participant's OWN N-1 output bus (issue 1345: the
-        // cutters -> the operator's MiniFuse headphones). Best-effort try_send, like above.
-        for (pid, tx) in &local_sinks {
-            let interleaved = output.interleaved(*pid, block_frames);
-            if !interleaved.is_empty() {
-                let _ = tx.try_send(interleaved);
-            }
-        }
-
-        // Send each cambox its mixed stereo stream — to the CACHED resolved address only,
-        // through the slot's own non-blocking socket.
-        let addrs: Vec<Option<SocketAddr>> =
-            out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
-        for (slot, ((id, stream, host), sender)) in outputs.iter().zip(&senders).enumerate() {
-            let Some(addr) = addrs.get(slot).copied().flatten() else {
-                if cycle.is_multiple_of(status_every as u64) {
-                    tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
-                }
-                continue;
-            };
-            let chans = matrix.participants[*id].out_channels.max(1) as u8;
-            let interleaved = output.interleaved(*id, block_frames);
-            frame_counter[*id] = frame_counter[*id].wrapping_add(1);
-            let block = OutBlock {
-                stream_name: stream,
-                sample_rate,
-                channels: chans,
-                frame_counter: frame_counter[*id],
-                interleaved: &interleaved,
-                frames: block_frames,
-            };
-            match sender.send_block(addr, &block) {
-                Ok(SendOutcome::Sent) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
-                // The slot's socket is backed up (a NIC or queue stall): this one packet is
-                // dropped and counted; the block loop never waits on the network.
-                Ok(SendOutcome::Dropped) => tx_dropped[*id] = tx_dropped[*id].wrapping_add(1),
-                Err(e) => {
-                    tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
+            // Feed the phones participant's mixed output (down-mixed to mono) into the Janus
+            // ring. The paced sender thread pops it on its own 20 ms clock (issue 1345); the
+            // lock is held only for the append, never across a send.
+            if let (Some(ring), Some((pid, _))) = (&janus_ring, &janus_report) {
+                let interleaved = output.interleaved(*pid, block_frames);
+                if !interleaved.is_empty() {
+                    let mono = stereo_to_mono(&interleaved);
+                    // A poisoned lock still holds a valid ring: keep feeding it, exactly as
+                    // the sender thread keeps popping it.
+                    ring.lock().unwrap_or_else(|e| e.into_inner()).push(&mono);
                 }
             }
-        }
 
-        if cycle.is_multiple_of(status_every as u64) {
-            for (id, s) in rx_stats.iter_mut().enumerate() {
-                s.tx_packets = tx_packets[id];
-                s.tx_dropped = tx_dropped[id];
-            }
-            // Attach the Janus facet to the phones participant's stats (M3a).
-            if let Some((pid, jstats)) = &janus_report {
-                if let Some(s) = rx_stats.get_mut(*pid) {
-                    s.janus = Some(jstats.snapshot());
+            // Feed the program_out participant's mixed output into the PipeWire sink (issue
+            // 1344). Best-effort try_send: a full queue drops the block (talkback/program jitter
+            // is tolerable), never blocking the mix loop.
+            if let (Some(tx), Some((pid, _))) = (&program_sink_tx, &program_out_report) {
+                let interleaved = output.interleaved(*pid, block_frames);
+                if !interleaved.is_empty() {
+                    let _ = tx.try_send(interleaved);
                 }
             }
-            // Attach the local-audio facet to the program_out + talkback capture stats (1344).
-            if let Some((pid, lstats)) = &program_out_report {
-                if let Some(s) = rx_stats.get_mut(*pid) {
-                    s.local_audio = Some(lstats.snapshot());
+
+            // Feed every local playback sink its participant's OWN N-1 output bus (issue 1345:
+            // the cutters -> the operator's MiniFuse headphones). Best-effort try_send, like above.
+            for (pid, tx) in &local_sinks {
+                let interleaved = output.interleaved(*pid, block_frames);
+                if !interleaved.is_empty() {
+                    let _ = tx.try_send(interleaved);
                 }
             }
-            for (pid, lstats) in &local_audio_reports {
-                if let Some(s) = rx_stats.get_mut(*pid) {
-                    s.local_audio = Some(lstats.snapshot());
+
+            // Send each cambox its mixed stereo stream — to the CACHED resolved address only,
+            // through the slot's own non-blocking socket.
+            let addrs: Vec<Option<SocketAddr>> =
+                out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
+            for (slot, ((id, stream, host), sender)) in outputs.iter().zip(&senders).enumerate() {
+                let Some(addr) = addrs.get(slot).copied().flatten() else {
+                    if cycle.is_multiple_of(status_every as u64) {
+                        tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
+                    }
+                    continue;
+                };
+                let chans = matrix.participants[*id].out_channels.max(1) as u8;
+                let interleaved = output.interleaved(*id, block_frames);
+                frame_counter[*id] = frame_counter[*id].wrapping_add(1);
+                let block = OutBlock {
+                    stream_name: stream,
+                    sample_rate,
+                    channels: chans,
+                    frame_counter: frame_counter[*id],
+                    interleaved: &interleaved,
+                    frames: block_frames,
+                };
+                match sender.send_block(addr, &block) {
+                    Ok(SendOutcome::Sent) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
+                    // The slot's socket is backed up (a NIC or queue stall): this one packet is
+                    // dropped and counted; the block loop never waits on the network.
+                    Ok(SendOutcome::Dropped) => tx_dropped[*id] = tx_dropped[*id].wrapping_add(1),
+                    Err(e) => {
+                        tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
+                    }
                 }
             }
-            let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
-            // The run's missed block-loop ticks (issue 1401): a lost block on every output.
-            snapshot.missed_ticks = missed_total;
-            // Attach the Interkom picture facet (M3c) when the video leg is running.
-            if let Some(vs) = &video_for_loop {
-                let now_wall = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                snapshot.video = Some(vs.snapshot(now_wall));
+
+            if cycle.is_multiple_of(status_every as u64) {
+                for (id, s) in rx_stats.iter_mut().enumerate() {
+                    s.tx_packets = tx_packets[id];
+                    s.tx_dropped = tx_dropped[id];
+                }
+                // Attach the Janus facet to the phones participant's stats (M3a).
+                if let Some((pid, jstats)) = &janus_report {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.janus = Some(jstats.snapshot());
+                    }
+                }
+                // Attach the local-audio facet to the program_out + talkback capture stats (1344).
+                if let Some((pid, lstats)) = &program_out_report {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.local_audio = Some(lstats.snapshot());
+                    }
+                }
+                for (pid, lstats) in &local_audio_reports {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.local_audio = Some(lstats.snapshot());
+                    }
+                }
+                let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                // The run's late ticks (issue 1401): a caught-up one is no loss, a lost one is a
+                // block lost on every output.
+                snapshot.caught_up_ticks = caught_up_total;
+                snapshot.lost_ticks = lost_total;
+                snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
+                // Attach the Interkom picture facet (M3c) when the video leg is running.
+                if let Some(vs) = &video_for_loop {
+                    let now_wall = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    snapshot.video = Some(vs.snapshot(now_wall));
+                }
+                // The status line is logged by the tokio task that watches this channel.
+                let _ = live_tx.send(Arc::new(snapshot));
             }
-            tracing::info!("{}", snapshot.status_line());
-            let _ = live_tx.send(Arc::new(snapshot));
-        }
+        });
     }
 }
 

@@ -110,6 +110,35 @@ fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
     );
 }
 
+/// Issue 1401 (design 5980775411): the hub's block loop runs on one thread, "hub-mix", at
+/// SCHED_FIFO 10. The unit that strih-lx runs (the base unit plus the step-12 local-audio drop-in)
+/// must let it: `LimitRTPRIO=10` in the base unit's `[Service]`, and the drop-in neither lowers nor
+/// forbids it.
+#[test]
+fn the_real_hub_unit_lets_the_hub_mix_thread_run_sched_fifo_10() {
+    let unit = read("systemd/intercom-hub.service");
+    let service = unit
+        .split("[Service]")
+        .nth(1)
+        .and_then(|s| s.split("[Install]").next())
+        .expect("the unit has a [Service] section");
+    assert!(
+        service.lines().any(|l| l.trim() == "LimitRTPRIO=10"),
+        "the base unit's [Service] must grant LimitRTPRIO=10"
+    );
+    assert!(!unit.contains("RestrictRealtime=yes"));
+    let lib = read("scripts/lib/strih-provision.sh");
+    let start = lib
+        .find("strih_intercom_audio_dropin() {")
+        .expect("the step-12 drop-in renderer");
+    let body = &lib[start..];
+    let dropin = &body[..body.find("\nDROPIN\n").expect("its heredoc end")];
+    assert!(
+        !dropin.contains("LimitRTPRIO") && !dropin.contains("RestrictRealtime"),
+        "the local-audio drop-in must leave the realtime grant alone"
+    );
+}
+
 #[test]
 fn verify_strih_reports_janus_as_a_note_only() {
     let v = read("scripts/verify-strih.sh");

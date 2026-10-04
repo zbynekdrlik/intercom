@@ -324,14 +324,18 @@ Owner: short dropouts in the strih program audio. The old VBAN buffer (`JitterBu
 target: it popped whatever was queued and zero-padded a short block, so a packet a little late
 against the 5.33 ms hub block wrote a zero-padded block into the mix (single underruns every
 2-15 min on `fohabl`, a clean network). Read this before touching `vban_jitter`, `vban_io`'s
-`JitterBuffer`, `inputs`, the block loop's missed-tick handling, or the status line. The decisions
-are on issue 1401 (comment 5977982465).
+`JitterBuffer`, `inputs`, `adaptive_target`, `block_clock`, `mix_thread`, the block loop's late-tick
+handling, or the status line. The decisions are on issue 1401 (comments 5977982465 and, for the
+catch-up, the real-time thread and the adaptive program target, design 5980775411).
 
 - **Who gets which buffer (`inputs::input_buffers`, tested on the deployed TOML).**
-  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: cap 8 blocks, target
-    `VBAN_TARGET_BLOCKS` = 3 = 16 ms. Every other VBAN leg (the program feeds fohabl / lv1 / mbc):
-    cap 11, target `VBAN_PROGRAM_TARGET_BLOCKS` = 6 = 32 ms, because the FOH desk sends in bursts
-    with gaps up to 19.4 ms (design comment 5979008527, `tests/vban_program_target_1401.rs`).
+  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: cap 8 blocks, the FIXED target
+    `VBAN_TARGET_BLOCKS` = 3 = 16 ms. Every other VBAN leg (the program feeds fohabl / lv1 / mbc)
+    also gets `.with_adaptive_target(..)`: its target starts at the floor
+    `VBAN_PROGRAM_TARGET_BLOCKS` = 6 = 32 ms (cap 11) and follows the sender's largest gap of the
+    last 10 min up to 12 blocks = 64 ms, the cap 5 blocks above it
+    (`.claude/rules/strih-intercom-hub-mix.md`; the fixed 32 ms of design comment 5979008527
+    covered the morning's 19.4 ms gaps, not the afternoon's 27.6 ms).
   - Local captures + Janus -> `local_capture` (unchanged).
   - Everything else (no ingress) -> the plain `new`.
   - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
@@ -358,16 +362,17 @@ are on issue 1401 (comment 5977982465).
     time stretch for 5.33 ms, no click (a plain one-sample cut on a loud 10 kHz tone is a ~1.6x
     step; the test pins both). The linear interpolation dips the highs about 2 dB inside that one
     block, so corrections must stay rare, which is why the bursts above were findings;
-  - a MISSED HUB TICK: `main.rs` compares the SCHEDULED instants `Interval::tick` returns (tokio
-    `Skip` resumes on the same grid) via `missed_ticks`. Each VBAN leg's `skip_missed` then drops
-    that block of its oldest audio at once (the outputs already lost it), never more than half a
-    block under its target. The floor is half a block, not the target, so a jitter dip of up to
-    half a block leaves no residue; a deeper dip leaves exactly the part beyond half a block, which
-    the servo takes out gently (or which offsets a slow sender's drift). The discard keeps the
-    servo's window and budget (review 3: resetting them starved the drift correction when the hub
-    missed ticks often, 13 overruns in 10 min at a tick missed every 0.5 s with the +540 ppm
-    cambox). The run's total is `missed_ticks` in
-    `/api/state` and `missed=N` on the status line: each one is a block lost on EVERY output;
+  - a LOST HUB TICK (since design 5980775411 only the part of a late wake beyond the four ticks
+    the block loop runs late, `.claude/rules/strih-intercom-hub-mix.md`): each VBAN leg's
+    `skip_missed` drops that block of its oldest audio at once (the outputs already lost it),
+    never more than half a block under its target, right before the current cycle's pop. The
+    floor is half a block, not the target, so a jitter dip of up to half a block leaves no
+    residue; a deeper dip leaves exactly the part beyond half a block, which the servo takes out
+    gently (or which offsets a slow sender's drift). The discard keeps the servo's window and
+    budget (review 3: resetting them starved the drift correction when the hub missed ticks
+    often, 13 overruns in 10 min at a tick missed every 0.5 s with the +540 ppm cambox). The
+    run's total is `lost_ticks` in `/api/state` and `lost=N` on the status line: each one is a
+    block lost on EVERY output;
   - above the cap: drop the oldest down to the TARGET and restart the servo window.
 - **Underruns, mutes, stalls (`vban_io::JitterBuffer`).**
   - A VBAN leg's ran-dry pop is PENDING. It is counted as an underrun at the next packet only if
@@ -390,19 +395,25 @@ are on issue 1401 (comment 5977982465).
     unbiased alternative, priming to the target + half a packet, needs the packet size in the
     controller and was not taken.
 - **Observability.**
-  - `/api/state` VBAN participants carry `jitter: {target_frames, depth_frames (1 s mean pre-pop
-    fill), depth_min_frames (the 1 s low-water mark; margin = this minus one block), servo_drops,
-    servo_repeats, stalls, primed}`.
-  - The hub-level `missed_ticks` (the block loop's missed ticks since start).
+  - `/api/state` VBAN participants carry `jitter: {target_frames (live: a program feed's follows
+    its sender), depth_frames (1 s mean pre-pop fill), depth_min_frames (the 1 s low-water mark;
+    margin = this minus one block), servo_drops, servo_repeats, stalls, primed}`, and a program
+    feed also `max_gap_ms_10min` (the largest gap its target follows, 0.1 ms resolution; omitted
+    on a cambox).
+  - The hub-level `caught_up_ticks` (ticks run late: no loss) and `lost_ticks` (given up: a block
+    lost on every output) since start, and `mix_thread_sched` (the block loop thread's class).
+    `missed_ticks` is gone.
   - The status line is `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>)
-    [stalls=<sum>(<worst program leg>)] [missed=<n>] [tx_dropped=<sum>(<worst leg>)]
+    [stalls=<sum>(<worst program leg>)] [lost=<n>] [tx_dropped=<sum>(<worst leg>)]
     [servo=<drops>/<repeats>]`. The total still leads, so a `underruns=(\d+)` parser keeps
-    working; a leg is named only when its sum > 0.
+    working; a leg is named only when its sum > 0. A caught-up tick is no loss and stays off the
+    line.
   - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
-- **The program audio is later, by the same amount after every restart.** fohabl/lv1 feed
+- **The program audio is later: the program-feed target plus a fixed pipe depth.** fohabl/lv1 feed
   `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed with every
   restart. Now it is:
-  - the 32 ms program-feed target;
+  - the program-feed target: 32 ms, or up to 64 ms while the FOH sender's gaps of the last
+    10 min need it (each step walked by the servo; `.claude/rules/strih-intercom-hub-mix.md`);
   - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below.
     A spawn starts within +-2.7 ms of it and is walked in within ~60 s; after that every restart
     sits within about 1 ms of the same depth, whatever pw-cat's connect time.
@@ -412,13 +423,15 @@ are on issue 1401 (comment 5977982465).
   1401 designs accepted these delays knowingly.
 - **Supervisor live check after a hub deploy:**
   - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
-    `target_frames` 1536 (a cambox: 768), `depth_frames` within +-16 of it, `depth_min_frames`
-    well above 256, `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about
-    one frame per 40 s).
+    `target_frames` 1536..3072 (a cambox: 768) matching `max_gap_ms_10min` by the adaptive rule,
+    `depth_frames` within +-16 of it once walked in, `depth_min_frames` well above 256,
+    `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
+    40 s) plus the walks after a target change.
   - The journal status line: `underruns=` flat across a whole program (one count per gap under
     500 ms inside a running stream, naming the leg), no `stalls=` unless a program sender really
-    stopped, no `missed=` (a missed tick is a lost block on every output: look for CPU or
-    scheduling stalls on strih-lx), `overruns=0`.
+    stopped, no `lost=` (a lost tick is a block lost on every output: the hub-mix thread woke
+    more than four blocks late), `overruns=0`. `caught_up_ticks` on `/api/state` may grow: those
+    are hiccups that cost nothing.
   - A cambox far off 48 kHz shows `servo_*` growing at its own rate and its depth sitting that far
     off the target. Past ~1000 ppm it also shows underruns or overruns (the ASRC escalation).
 - **The egress: a fill target on every pw-cat pipe, one non-blocking socket per VBAN destination
@@ -538,7 +551,7 @@ are on issue 1401 (comment 5977982465).
     - a `pipe_start_holds` that keeps climbing between spawns means pw-cat is not reading; the
       journal then shows `local-audio: ... pw-cat exited — respawning` once it dies (the hold
       notices a dead child, see above);
-    - the status line shows no `missed=` while camboxes are off, and `tx_dropped` stays 0 on every
+    - the status line shows no `lost=` while camboxes are off, and `tx_dropped` stays 0 on every
       leg; an off cambox shows as `unresolved_discards` rising (or `ip -s neigh show <ip>`
       INCOMPLETE/FAILED), not in the hub.
   - Tests: `tests/egress_fill_1401.rs` (the plan table, FIONREAD on a real `std::io::pipe`, the
@@ -586,6 +599,11 @@ are on issue 1401 (comment 5977982465).
     on dev1 (`ip -br addr` shows a `br-*` DOWN with 172.18.0.1/16) never leaves the box. One
     destination per socket vs two on one socket reproduces the per-slot vs shared-socket
     behaviour (review round 1 script: `dead_neigh.py`, comment 5979378075).
+- **The real-time block loop and the adaptive program target (design 5980775411)** live in their
+  own rule, `.claude/rules/strih-intercom-hub-mix.md` (auto-loads on `block_clock`, `mix_thread`,
+  `adaptive_target`, `main.rs`, `vban_io`, `inputs`, their tests and the unit): the `hub-mix`
+  SCHED_FIFO 10 thread, the catch-up of up to four late ticks, the measured stall-length table and
+  its residuals, the 32-64 ms program target, the live check and the three Tier-0 replicas.
 - **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy), `tests/vban_jitter_state_1401.rs`
   (facet, status line, `input_buffers` on the deployed TOML, the block-loop wiring anchor), and
   `tests/vban_jitter_bench_1401.rs`:
@@ -596,8 +614,9 @@ are on issue 1401 (comment 5977982465).
     it can tell them apart;
   - with 1 ms sd over 8 h the worst pre-pop fill still kept >= 4 ms of margin (measured: 4.1 ms on
     a mono cambox at -20 ppm, 5.1 ms on the FOH feed);
-  - the bench models the block loop's missed-tick discard (one every 30 s, and one every 0.5 s
-    with the +540 ppm cambox), a 60 ms stall (burst / lost) and a cambox muted every 20 s;
+  - the bench models the block loop's lost-tick discard (one every 30 s, and one every 0.5 s
+    with the +540 ppm cambox; since design 5980775411 a tick is lost only beyond the four the loop
+    runs late), a 60 ms stall (burst / lost) and a cambox muted every 20 s;
   - it measures for itself (its own 1 s means, correction gaps and per-second counts, after the
     settle) and never trusts the controller's numbers;
   - its 1 s windows are not aligned with the servo's, so a per-second bound must allow a second
@@ -834,8 +853,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   `256*1_000_000/48_000` = 5333 instead of 5333.33, so the loop ran 62.5 ppm fast. Every egress
   (the Janus ring, VBAN to the camboxes, the program/cutters pw-cat pipes) gained about 3 samples/s
   against its 48 kHz consumer. Never compute a period in truncated µs again.
-- **The ring's fill servo.** A missed mix tick (`MissedTickBehavior::Skip` loses a block) or a rate
-  offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
+- **The ring's fill servo.** A lost mix tick (once `MissedTickBehavior::Skip`; since issue 1401
+  only a tick beyond the four the hub-mix thread runs late) or a rate offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
   ring drops 1 ms; after 50 below target-FRAME/4 it plays 1 ms twice (both mid-frame, crossfaded).
   - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
     triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent

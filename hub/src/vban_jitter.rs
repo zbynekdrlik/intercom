@@ -17,10 +17,11 @@
 //!   there, the `janus_pacing::PacedRing` precedent. The depth never has to be walked back later.
 //! - **Underrun = one whole silent block.** A pop that finds less than a block outputs ONE whole
 //!   silent block and re-primes to the target. Never a zero-spliced partial block.
-//! - **A missed hub tick** (`MissedTickBehavior::Skip`) is answered in kind
-//!   ([`NetworkFill::discard_for_missed_ticks`]): the outputs lost those blocks, so the leg gives up
-//!   as many blocks of its oldest audio at once (never going more than half a block under its
-//!   target), instead of the servo walking them off for seconds.
+//! - **A lost hub tick** is answered in kind ([`NetworkFill::discard_for_missed_ticks`]). The block
+//!   loop runs up to four missed ticks late ([`crate::block_clock`]); only a tick beyond that is
+//!   lost, every output loses its block, and the leg gives up as many blocks of its oldest audio at
+//!   once (never going more than half a block under its target), instead of the servo walking them
+//!   off for seconds.
 //! - **Drift servo.** The sender's clock (a Dante-ticked FOH desk, a cambox headset ADC) and the
 //!   hub's disciplined monotonic clock differ by a few ppm (a cambox ADC by hundreds), which would
 //!   walk any fixed depth to an edge over an 8 h program. Every second the mean pre-pop fill is
@@ -32,6 +33,9 @@
 //!   the steep slope. Each frame is spread across its block by [`stretch_block`], so it never clicks.
 //! - **Overrun.** Above the cap the OLDEST audio is dropped back down to the target (not just to the
 //!   cap, where the next packet would overrun again).
+//! - **A live setpoint.** A program feed's target follows its sender's gaps
+//!   ([`crate::adaptive_target`]); [`NetworkFill::set_target`] moves the target and the cap with
+//!   it, and the servo walks the fill there.
 //!
 //! The same drift servo ([`NetworkFill::servo_step`]) also keeps the `pw-cat` egress pipes at their
 //! depth: there the fill is measured outside the controller ([`crate::pipe_fill`], issue 1401), so
@@ -39,8 +43,6 @@
 //!
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557), and
 //! the hours-long two-clock bench runs on frame counts alone.
-
-use std::time::Duration;
 
 /// The target pre-pop fill of a VBAN network leg, in hub blocks: 3 x 256 frames = 16 ms at the
 /// 48 kHz hub rate. The budget, at the 256-frame block:
@@ -76,10 +78,15 @@ pub const VBAN_CAP_BLOCKS: usize = 8;
 /// without one missed hub tick. 32 ms covers the 19.4 ms gap plus one block plus the burst's own
 /// sawtooth below the mean. The cost is a steady 16 ms more delay on the strih program audio (the
 /// OBS `ASIO zvuk` input); the cambox talkback is unchanged (issue 1401, design comment 5979008527).
+///
+/// Since design 5980775411 this is the FLOOR of the program feeds' adaptive target
+/// ([`crate::adaptive_target`]): the sender's gaps grew to 27.6 ms in the afternoon, and the
+/// target now follows the largest gap of the last 10 min between this and 64 ms.
 pub const VBAN_PROGRAM_TARGET_BLOCKS: usize = 6;
 
-/// The cap of a program-feed leg, in hub blocks: the same five blocks of headroom above its target
-/// as [`VBAN_CAP_BLOCKS`] gives a cambox leg.
+/// The cap of a program-feed leg at its floor target, in hub blocks: the same five blocks of
+/// headroom above its target as [`VBAN_CAP_BLOCKS`] gives a cambox leg. The cap moves with the
+/// adaptive target ([`NetworkFill::set_target`]), so the headroom stays five blocks.
 pub const VBAN_PROGRAM_CAP_BLOCKS: usize = 11;
 
 /// The servo's averaging window in output frames: 1 s at the 48 kHz hub rate. Long enough that the
@@ -129,19 +136,6 @@ pub fn servo_corrections(error: usize) -> usize {
     (gentle + steep).min(SERVO_MAX_PER_WINDOW)
 }
 
-/// How many ticks the hub's block loop skipped between two ticks scheduled `elapsed` apart (tokio's
-/// `Interval::tick` returns the scheduled instant, and `MissedTickBehavior::Skip` resumes on the
-/// same grid, so `elapsed` is a whole number of periods). Rounded to the nearest period; zero for
-/// consecutive ticks, the first tick, or a zero period.
-pub fn missed_ticks(elapsed: Duration, period: Duration) -> u64 {
-    let p = period.as_nanos();
-    if p == 0 {
-        return 0;
-    }
-    let periods = (elapsed.as_nanos() + p / 2) / p;
-    u64::try_from(periods.saturating_sub(1)).unwrap_or(u64::MAX)
-}
-
 /// What one pop of a VBAN network leg does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopPlan {
@@ -187,6 +181,10 @@ pub struct NetworkFillStats {
     pub stalls: u64,
     /// Whether audio is flowing (false while priming, before the first packet or after an underrun).
     pub primed: bool,
+    /// A program feed's largest inter-arrival gap of the last 10 min in µs, which its adaptive
+    /// target follows ([`crate::adaptive_target`]); `None` for a leg with a fixed target. Filled in
+    /// by the buffer: the controller itself never sees the arrival times.
+    pub max_gap_us_10min: Option<u64>,
 }
 
 /// The servo's decision for the current window.
@@ -249,6 +247,17 @@ impl NetworkFill {
         self.target
     }
 
+    /// Move the target to `target_frames` (at least 1), and the cap with it: the headroom above the
+    /// target stays what it was. Nothing is dropped or padded; the servo walks the fill to the new
+    /// target from its next full window (the current window and any pending corrections are
+    /// forgotten, they were measured against the old target). A leg that is priming primes to it.
+    pub fn set_target(&mut self, target_frames: usize) {
+        let headroom = self.cap - self.target;
+        self.target = target_frames.max(1);
+        self.cap = self.target.saturating_add(headroom);
+        self.restart_window();
+    }
+
     /// Called after a packet was appended, with the fill it left: `Some(keep)` = above the cap, drop
     /// the OLDEST audio down to `keep` frames (one overrun, counted by the caller). The servo
     /// window restarts, so the high fill before the trim does not steer the next second.
@@ -273,16 +282,18 @@ impl NetworkFill {
         self.restart();
     }
 
-    /// The hub's block loop missed `missed` ticks before this pop: the outputs lost those blocks, so
-    /// the leg gives up as many `frames`-frame blocks of its OLDEST audio, which leaves it where
-    /// those pops would have. The floor is half a block under the target: a single missed block is
+    /// The hub's block loop LOST `missed` ticks before this pop (the part of a late wake beyond the
+    /// four it runs late, [`crate::block_clock::CATCHUP_MAX_BLOCKS`]): the outputs lost those
+    /// blocks, so the leg gives up as many `frames`-frame blocks of its OLDEST audio, which leaves
+    /// it where those pops would have. The block loop calls it right before the pop that follows
+    /// the catch-up cycles. The floor is half a block under the target: a single lost block is
     /// given up whole even when the jitter has the fill a little under its mean at that moment,
     /// and after a hub stall long enough to overrun (already trimmed to the target) the leg keeps
     /// at least the target minus half a block. Returns how many frames to drop now. Nothing while
     /// priming (the prime trims anyway). The servo keeps its window and this second's budget: the
     /// discard leaves the depth where the lost pops would have, and no fill from before it was ever
     /// measured, so cancelling the budget would only starve the drift correction when the hub
-    /// misses ticks often.
+    /// loses ticks often.
     pub fn discard_for_missed_ticks(&self, fill: usize, frames: usize, missed: u64) -> usize {
         if !self.primed || missed == 0 {
             return 0;
@@ -412,6 +423,7 @@ impl NetworkFill {
             servo_repeats: self.servo_repeats,
             stalls: self.stalls,
             primed: self.primed,
+            max_gap_us_10min: None,
         }
     }
 }
