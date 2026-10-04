@@ -317,11 +317,17 @@ fn assert_clean(sc: &Scenario, o: &Outcome, extra_net_drops: f64) {
 }
 
 /// The corrections a slow drift needs (0.5-20 ppm = up to about one frame per second) are spread
-/// out, never a second-long burst at the full 1 ms/s rate.
+/// out, never a second-long burst at the full 1 ms/s rate (47 corrections in one second): a frame
+/// or two per servo second, so a measured second that straddles two servo seconds, plus the
+/// jitter's wobble, sees a handful at most, and no two land within 2000 output frames.
 fn assert_spread(o: &Outcome) {
     assert!(
-        o.max_window_corrections <= 3,
+        o.max_window_corrections <= 6,
         "a slow drift is corrected a frame or two per second, not in bursts\n{o:?}"
+    );
+    assert!(
+        o.min_correction_gap >= 2 * SERVO_MIN_SPACING_FRAMES,
+        "the corrections are spread, not back to back\n{o:?}"
     );
 }
 

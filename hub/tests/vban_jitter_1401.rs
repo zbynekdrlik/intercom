@@ -116,11 +116,15 @@ fn a_cold_start_trims_its_prime_overshoot_back_to_the_target() {
 fn an_underrun_is_one_whole_silent_block_and_the_late_burst_resumes_seamlessly() {
     let t0 = Instant::now();
     let mut jb = leg();
-    // 868 samples, 0..=867: three blocks play, 100 are left.
-    jb.push_at(&mono(ramp(0, TARGET + 100)), t0);
+    // 868 samples, 0..=867: three blocks play, 100 are left. The cold start primes at exactly the
+    // target; the last 100 arrive after the first pop.
+    jb.push_at(&mono(ramp(0, TARGET)), t0);
     for i in 0..3 {
         let b = jb.pop_block_at(BLOCK, t0);
         assert_eq!(b, vec![ramp((i * BLOCK) as i16, BLOCK)]);
+        if i == 0 {
+            jb.push_at(&mono(ramp(TARGET as i16, 100)), t0);
+        }
     }
     assert_eq!(jb.buffered_frames(), 100);
 
@@ -150,8 +154,10 @@ fn an_underrun_is_one_whole_silent_block_and_the_late_burst_resumes_seamlessly()
 fn after_an_underrun_it_reprimes_to_the_target_counting_one_underrun() {
     let t0 = Instant::now();
     let mut jb = leg();
-    jb.push_at(&mono(ramp(0, TARGET + 100)), t0);
-    for _ in 0..3 {
+    jb.push_at(&mono(ramp(0, TARGET)), t0);
+    jb.pop_block_at(BLOCK, t0);
+    jb.push_at(&mono(ramp(TARGET as i16, 100)), t0);
+    for _ in 0..2 {
         jb.pop_block_at(BLOCK, t0);
     }
     // The stream ran dry, then refills at the normal rate of one block per pop.
@@ -244,10 +250,13 @@ fn a_muted_cambox_counts_no_underrun_and_never_replays_its_stale_tail() {
     // mute are dropped, never played in front of the fresh audio.
     let t0 = Instant::now();
     let mut jb = leg().with_min_channels(2);
-    jb.push_at(&mono(ramp(0, TARGET + 100)), t0);
-    for _ in 0..3 {
+    jb.push_at(&mono(ramp(0, TARGET)), t0);
+    jb.pop_block_at(BLOCK, t0);
+    jb.push_at(&mono(ramp(TARGET as i16, 100)), t0);
+    for _ in 0..2 {
         jb.pop_block_at(BLOCK, t0);
     }
+    assert_eq!(jb.buffered_frames(), 100);
     assert!(is_silent(&jb.pop_block_at(BLOCK, t0)), "ran dry");
     let unmute = t0 + Duration::from_secs(2);
     jb.push_at(&mono(ramp(10_000, TARGET)), unmute);
