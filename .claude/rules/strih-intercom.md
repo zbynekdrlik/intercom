@@ -498,6 +498,16 @@ are on issue 1401 (comment 5977982465).
     and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
     copy its changed send-loop lines into the replica to type-check them against the real
     `vban_io`.
+  - **Gotcha: a code move out of `main()` leaves bindings only CI's clippy sees.** Moving the
+    block loop into `run_block_loop` left `let block_frames` in `main()` unread, which is
+    `unused_variables` under the job's `-D warnings` (caught by review round 2, not by any
+    replica). After any move in `main.rs`, check every `let` left in each fn still has a read
+    that is not a `.field` access or a `key:` in a struct literal.
+  - **Probing socket/neighbour behaviour locally (no rig):** a non-blocking python UDP socket
+    sending 1052-byte packets at 187.5/s to unused addresses on an empty, no-carrier docker bridge
+    on dev1 (`ip -br addr` shows a `br-*` DOWN with 172.18.0.1/16) never leaves the box. One
+    destination per socket vs two on one socket reproduces the per-slot vs shared-socket
+    behaviour (review round 1 script: `dead_neigh.py`, comment 5979378075).
 - **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy), `tests/vban_jitter_state_1401.rs`
   (facet, status line, `input_buffers` on the deployed TOML, the block-loop wiring anchor), and
   `tests/vban_jitter_bench_1401.rs`:
