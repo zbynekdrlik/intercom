@@ -153,6 +153,25 @@ fn the_status_line_shows_program_feed_stalls_but_not_cambox_mutes() {
 }
 
 #[test]
+fn missed_hub_ticks_show_on_api_state_and_the_status_line() {
+    // A missed tick is a lost block on EVERY output, the program sink included: the daemon counts
+    // them for the whole run and they must be visible, not only in a debug log.
+    let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
+    let mut hs = HubState::snapshot(&matrix(), "v", &stats);
+    assert_eq!(hs.missed_ticks, 0);
+    assert!(
+        !hs.status_line().contains("missed="),
+        "{}",
+        hs.status_line()
+    );
+    hs.missed_ticks = 3;
+    let line = hs.status_line();
+    assert!(line.contains("missed=3"), "got: {line}");
+    let v = serde_json::to_value(&hs).unwrap();
+    assert_eq!(v["missed_ticks"], 3);
+}
+
+#[test]
 fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
     // The checked-in strih-lx routing, through the real loader: every VBAN participant (the
     // camboxes and the program feeds) gets the VBAN-leg buffer; the Janus phones and the local
@@ -202,5 +221,9 @@ fn the_block_loop_gives_up_a_missed_tick_and_publishes_the_fill_numbers() {
     assert!(
         src.contains(".jitter = b.network_stats()"),
         "the block loop publishes each VBAN leg's fill numbers to /api/state"
+    );
+    assert!(
+        src.contains("snapshot.missed_ticks = missed_total"),
+        "the block loop publishes the run's missed ticks"
     );
 }

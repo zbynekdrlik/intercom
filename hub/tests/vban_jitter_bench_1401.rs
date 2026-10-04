@@ -451,6 +451,25 @@ fn missed_hub_ticks_are_given_up_at_once_never_walked_back() {
 }
 
 #[test]
+fn frequent_missed_ticks_never_starve_the_servo() {
+    // A hub that misses a tick every 0.5 s while a cambox ADC runs +540 ppm fast (issue 1345,
+    // cam1): giving up the missed blocks must not cancel the servo's budget for the second, or the
+    // drift piles up into overruns.
+    let mut sc = Scenario::new(CAMBOX, 540.0, 1.0, 600.0, 13);
+    sc.hub_skip_every_s = Some(0.5);
+    let o = run(&sc);
+    let ctx = format!("{o:?}");
+    assert_eq!(o.overruns, 0, "{ctx}");
+    assert_eq!(o.ran_dry, 0, "{ctx}");
+    let net = o.drops as f64 - o.repeats as f64;
+    let drift = drift_frames(&sc);
+    assert!(
+        (net - drift).abs() <= (2 * BLOCK) as f64,
+        "the servo still takes out the drift: {net} vs {drift}\n{ctx}"
+    );
+}
+
+#[test]
 fn a_cambox_muted_and_unmuted_every_20s_restarts_gently() {
     // A cambox stops sending for 2 s every 20 s (muted, then unmuted) for an hour at +20 ppm and
     // 1 ms jitter: every unmute primes again. Each mute is one ran-dry pop, nothing overruns, and
@@ -544,6 +563,7 @@ fn a_60ms_stall_with_a_catch_up_burst_is_one_counted_underrun() {
     );
     // The re-prime and the overrun trim both land on the target: nothing to walk back.
     assert!(o.recovered_s <= 3.0, "back in the band within 3 s\n{ctx}");
+    assert!(o.min_correction_gap >= SERVO_MIN_SPACING_FRAMES, "{ctx}");
     assert_spread_start_up(&o);
 }
 
