@@ -118,6 +118,10 @@ pub struct HubState {
     /// last_error), present only when the hub has a `[video]` config (M3c) — omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoStats>,
+    /// Hub block-loop ticks missed since the daemon started (issue 1401): each one is a block lost
+    /// on EVERY output, the program sink included (the VBAN legs give the same block up). Set by the
+    /// daemon after the snapshot; the pure snapshot has no tick history of its own.
+    pub missed_ticks: u64,
 }
 
 impl HubState {
@@ -158,6 +162,7 @@ impl HubState {
             // The video facet is attached by the daemon (main.rs) after the snapshot when a `[video]`
             // config is present; the pure snapshot has no picture state of its own.
             video: None,
+            missed_ticks: 0,
         }
     }
 
@@ -166,7 +171,8 @@ impl HubState {
     /// `underruns=220(fohabl)`), + the participant levels, so a dead/underrunning leg is visible
     /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
     /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
-    /// stops on every mute, so it is left out), the VBAN legs' drift-servo corrections as
+    /// stops on every mute, so it is left out), the block loop's missed ticks as `missed=N` (a block
+    /// lost on every output), the VBAN legs' drift-servo corrections as
     /// `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue
     /// 1345), so a rejected stream (which reads as silent) stays explained after its one warn
     /// scrolls away.
@@ -211,12 +217,18 @@ impl HubState {
         } else {
             String::new()
         };
+        let missed = if self.missed_ticks > 0 {
+            format!(" missed={}", self.missed_ticks)
+        } else {
+            String::new()
+        };
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
             stalls,
+            missed,
             servo,
             rejects,
             levels.join(" ")

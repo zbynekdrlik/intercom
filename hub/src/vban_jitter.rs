@@ -247,7 +247,10 @@ impl NetworkFill {
     /// given up whole even when the jitter has the fill a little under its mean at that moment,
     /// and after a hub stall long enough to overrun (already trimmed to the target) the leg keeps
     /// at least the target minus half a block. Returns how many frames to drop now. Nothing while
-    /// priming (the prime trims anyway).
+    /// priming (the prime trims anyway). The servo keeps its window and this second's budget: the
+    /// discard leaves the depth where the lost pops would have, and no fill from before it was ever
+    /// measured, so cancelling the budget would only starve the drift correction when the hub
+    /// misses ticks often.
     pub fn discard_for_missed_ticks(&mut self, fill: usize, frames: usize, missed: u64) -> usize {
         if !self.primed || missed == 0 {
             return 0;
@@ -256,11 +259,7 @@ impl NetworkFill {
             .unwrap_or(usize::MAX)
             .saturating_mul(frames);
         let floor = self.target.saturating_sub(frames / 2).max(frames);
-        let drop = lost.min(fill.saturating_sub(floor));
-        if drop > 0 {
-            self.restart_window();
-        }
-        drop
+        lost.min(fill.saturating_sub(floor))
     }
 
     /// Plan one pop of `frames` frames with `fill` frames queued.
@@ -344,8 +343,7 @@ impl NetworkFill {
         self.win_frames = 0;
     }
 
-    /// Forget the current window and any pending correction (priming, an underrun, an overrun trim,
-    /// a missed-tick discard).
+    /// Forget the current window and any pending correction (priming, an underrun, an overrun trim).
     fn restart_window(&mut self) {
         self.win_sum = 0;
         self.win_min = usize::MAX;

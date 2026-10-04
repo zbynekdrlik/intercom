@@ -314,6 +314,7 @@ async fn main() -> Result<()> {
             let mut frame_counter = vec![0u32; n];
             let mut cycle: u64 = 0;
             let mut last_tick: Option<tokio::time::Instant> = None;
+            let mut missed_total: u64 = 0;
             loop {
                 let tick = ticker.tick().await;
                 cycle = cycle.wrapping_add(1);
@@ -324,6 +325,7 @@ async fn main() -> Result<()> {
                 let missed = last_tick.map_or(0, |prev| missed_ticks(tick - prev, period));
                 last_tick = Some(tick);
                 if missed > 0 {
+                    missed_total = missed_total.saturating_add(missed);
                     tracing::debug!(missed, "intercom-hub: block loop missed ticks");
                 }
 
@@ -433,6 +435,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                    // The run's missed block-loop ticks (issue 1401): a lost block on every output.
+                    snapshot.missed_ticks = missed_total;
                     // Attach the Interkom picture facet (M3c) when the video leg is running.
                     if let Some(vs) = &video_for_loop {
                         let now_wall = std::time::SystemTime::now()
