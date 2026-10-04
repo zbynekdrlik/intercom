@@ -81,7 +81,6 @@ async fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid http bind '{http_bind}'"))?;
     let sample_rate = matrix.hub.sample_rate;
-    let block_frames = matrix.hub.block_frames;
     let n = matrix.participants.len();
 
     // The VBAN receive socket — fail loud on a bind failure (port already in use, bad address).
@@ -290,8 +289,9 @@ async fn main() -> Result<()> {
     // --- block/mix task: pop a block from every buffer, mix N-1, send each cambox's stream ----
     // One NON-BLOCKING send socket per output slot (issue 1401): one shared blocking socket let the
     // unresolved-neighbour queues of the camboxes that are off fill its send buffer together and
-    // stall the block loop. The kernel caps each neighbour's queue below one socket's buffer, so a
-    // per-slot socket never waits on an off cambox (its packets are discarded by the kernel).
+    // stall the block loop. The kernel caps each neighbour's queue at no more than one socket's
+    // default send buffer (both 212992 by default), so a per-slot socket never waits on an off
+    // cambox (its packets are discarded by the kernel).
     let senders: Vec<VbanSender> = outputs
         .iter()
         .map(|_| VbanSender::bind_ephemeral())
