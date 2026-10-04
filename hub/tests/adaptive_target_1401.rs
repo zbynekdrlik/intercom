@@ -19,8 +19,8 @@ use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_VBAN, CAMBOX_ROLE};
 use intercom_hub::vban_io::{DecodedAudio, JitterBuffer, TargetChange, STALE_STREAM_MS};
 use intercom_hub::vban_jitter::{
-    NetworkFill, SERVO_MIN_SPACING_FRAMES, SERVO_WINDOW_FRAMES, VBAN_PROGRAM_CAP_BLOCKS,
-    VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
+    NetworkFill, SERVO_MIN_SPACING_FRAMES, SERVO_WINDOW_FRAMES, VBAN_CAP_BLOCKS,
+    VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
 };
 
 const BLOCK: usize = 256;
@@ -236,7 +236,7 @@ fn a_target_change_is_handed_out_once_for_the_caller_to_log_off_the_lock() {
     );
     assert_eq!(jb.take_target_change(), None, "handed out once");
     // A cambox leg never has one.
-    let mut cam = JitterBuffer::vban_leg(8 * BLOCK, 3 * BLOCK);
+    let mut cam = JitterBuffer::vban_leg(VBAN_CAP_BLOCKS * BLOCK, VBAN_TARGET_BLOCKS * BLOCK);
     cam.push_at(&mono(0, 128), t0);
     cam.push_at(&mono(128, 128), t0 + us(35_000));
     assert_eq!(cam.take_target_change(), None);
