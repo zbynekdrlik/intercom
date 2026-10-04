@@ -7,9 +7,11 @@
 use std::collections::HashSet;
 
 use crate::local_audio::{LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES};
-use crate::matrix::{Matrix, ADAPTER_JANUS, ADAPTER_VBAN};
+use crate::matrix::{Matrix, ADAPTER_JANUS, ADAPTER_VBAN, CAMBOX_ROLE};
 use crate::vban_io::JitterBuffer;
-use crate::vban_jitter::{VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS};
+use crate::vban_jitter::{
+    VBAN_CAP_BLOCKS, VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
+};
 
 /// One input buffer per participant, id-indexed like `matrix.participants`:
 ///
@@ -18,7 +20,9 @@ use crate::vban_jitter::{VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS};
 ///   generic no-prefill buffer spliced ~8x/s, and the phones leg overran ~60x/s);
 /// - every VBAN leg (the FOH program feed, the camboxes' talkback) gets the VBAN-leg buffer with
 ///   its target fill and drift servo (issue 1401: the no-target buffer zero-padded a block whenever
-///   a packet was a little late, dropouts in the strih program audio);
+///   a packet was a little late, dropouts in the strih program audio). A cambox leg (Linux, even
+///   pacing) targets [`VBAN_TARGET_BLOCKS`]; every other VBAN leg is a program feed from a Windows
+///   sender that bursts, and targets [`VBAN_PROGRAM_TARGET_BLOCKS`];
 /// - a participant with no ingress (`adapter = "none"`, the `program_out` sink) gets the plain
 ///   buffer.
 ///
@@ -42,8 +46,13 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
                     block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
                     LOCAL_CAPTURE_TARGET_FRAMES,
                 )
-            } else if p.adapter == ADAPTER_VBAN {
+            } else if p.adapter == ADAPTER_VBAN && p.role == CAMBOX_ROLE {
                 JitterBuffer::vban_leg(cap, block_frames * VBAN_TARGET_BLOCKS)
+            } else if p.adapter == ADAPTER_VBAN {
+                JitterBuffer::vban_leg(
+                    block_frames * VBAN_PROGRAM_CAP_BLOCKS,
+                    block_frames * VBAN_PROGRAM_TARGET_BLOCKS,
+                )
             } else {
                 JitterBuffer::new(cap)
             };

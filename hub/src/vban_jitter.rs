@@ -54,14 +54,29 @@ use std::time::Duration;
 /// up to about 0.5 ms below it, small next to the margin.
 ///
 /// The design (issue 1401) chose ~16 ms knowingly; for the cambox talkback the issue-1345 design
-/// accepted about 10-20 ms for a target-fill ring (design comment 5813703805). On the FOH program
-/// feed it is a fixed delay of the strih program audio (the OBS `ASIO zvuk` input): about 13 ms more
-/// than before on average, but steady, where the old depth varied 0-5 ms with every restart.
+/// accepted about 10-20 ms for a target-fill ring (design comment 5813703805). The program feeds
+/// (the FOH `fohabl` and the other non-cambox legs) first had it too, but their Windows sender
+/// bursts past it, so since 4.10.2026 they target [`VBAN_PROGRAM_TARGET_BLOCKS`] instead.
 pub const VBAN_TARGET_BLOCKS: usize = 3;
 
 /// The cap of a VBAN network leg, in hub blocks (43 ms at 256 frames / 48 kHz): five blocks of
 /// headroom above the target for a late burst before anything is dropped.
 pub const VBAN_CAP_BLOCKS: usize = 8;
+
+/// The target fill of a PROGRAM feed (every VBAN leg that is not a cambox: the FOH `fohabl`, `lv1`,
+/// `mbc`), in hub blocks: 32 ms at 256 frames / 48 kHz. The camboxes keep [`VBAN_TARGET_BLOCKS`].
+///
+/// Measured live on strih-lx, 4.10.2026: the Windows FOH sender does not pace its packets. 932
+/// packets/s arrive in bursts (median gap 0, p90 5.94 ms, p99.9 17.64 ms) with gaps up to 19.4 ms
+/// (30 gaps over 12 ms in 12 s), and with the 16 ms target the leg ran dry about every 2-3 s
+/// without one missed hub tick. 32 ms covers the 19.4 ms gap plus one block plus the burst's own
+/// sawtooth below the mean. The cost is a steady 16 ms more delay on the strih program audio (the
+/// OBS `ASIO zvuk` input); the cambox talkback is unchanged (issue 1401, design comment 5979008527).
+pub const VBAN_PROGRAM_TARGET_BLOCKS: usize = 6;
+
+/// The cap of a program-feed leg, in hub blocks: the same five blocks of headroom above its target
+/// as [`VBAN_CAP_BLOCKS`] gives a cambox leg.
+pub const VBAN_PROGRAM_CAP_BLOCKS: usize = 11;
 
 /// The servo's averaging window in output frames: 1 s at the 48 kHz hub rate. Long enough that the
 /// packet ripple and the arrival jitter average out of the mean pre-pop fill.
