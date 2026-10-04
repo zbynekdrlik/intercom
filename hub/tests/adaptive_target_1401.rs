@@ -19,8 +19,8 @@ use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_VBAN, CAMBOX_ROLE};
 use intercom_hub::vban_io::{DecodedAudio, JitterBuffer, TargetChange, STALE_STREAM_MS};
 use intercom_hub::vban_jitter::{
-    NetworkFill, SERVO_MIN_SPACING_FRAMES, SERVO_WINDOW_FRAMES, VBAN_CAP_BLOCKS,
-    VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
+    NetworkFill, SERVO_MIN_SPACING_FRAMES, SERVO_WALK_MAX_PER_WINDOW, SERVO_WINDOW_FRAMES,
+    VBAN_CAP_BLOCKS, VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
 };
 
 const BLOCK: usize = 256;
@@ -423,6 +423,13 @@ fn a_gap_trace_growing_from_19_to_35ms_underruns_at_most_once_then_settles_back_
     }
     assert_eq!(r.max_target, 9, "35 ms needs 9 blocks\n{ctx}");
     assert_no_correction_burst(&r);
+    // Every raise and lowering is walked in the gentle zone (design 5981457044): at most the
+    // walk's 7 a second, plus the single correction the drift servo adds now and then on top (a
+    // grown gap lowers the 1 s mean fill a little). The steep walk measured 47 here.
+    assert!(
+        r.max_corrections_per_s <= SERVO_WALK_MAX_PER_WINDOW as u64 + 1,
+        "a setpoint walk in the gentle zone\n{ctx}"
+    );
     // Back down: no step before the last 35 ms gap has left the window, the floor 30 min after it.
     let lowered: Vec<_> = r.changes.iter().filter(|c| c.0 > 1_200_000_000).collect();
     assert_eq!(lowered.len(), 3, "9 -> 8 -> 7 -> 6\n{ctx}");
@@ -451,6 +458,10 @@ fn a_gap_that_jumps_from_19_to_35ms_underruns_once_and_never_again() {
     );
     assert_eq!(r.max_target, 9, "{ctx}");
     assert_no_correction_burst(&r);
+    assert!(
+        r.max_corrections_per_s <= SERVO_WALK_MAX_PER_WINDOW as u64,
+        "the re-prime starts at the new target: nothing left to walk\n{ctx}"
+    );
 }
 
 #[test]

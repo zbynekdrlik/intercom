@@ -26,6 +26,8 @@ use intercom_hub::vban_io::{classify_send, SendOutcome};
 
 /// The hub block (`[hub].block_frames` on strih-lx).
 const BLOCK: usize = 256;
+/// The hub's (and the pw-cat pipes') sample rate.
+const RATE: u32 = 48_000;
 
 fn top_up(silence_frames: usize) -> PipeFillPlan {
     PipeFillPlan::TopUp { silence_frames }
@@ -43,29 +45,48 @@ fn the_pipe_target_is_two_graph_quanta_and_the_trim_mark_two_more() {
 
 #[test]
 fn the_pipe_fill_plan_tops_up_a_drained_pipe_writes_a_healthy_one_and_drops_above_the_mark() {
-    // Empty (a fresh pw-cat, or a pipe a hub stall drained): silence up to the target, then the block.
-    assert_eq!(pipe_fill_plan(0, BLOCK), top_up(2048));
+    // Empty and starved (a fresh pw-cat, or a pipe a hub stall drained): silence up to the target,
+    // then the block.
+    assert_eq!(pipe_fill_plan(0, BLOCK, true), top_up(2048));
     // Below one hub block: the same top-up, by exactly the missing frames.
-    assert_eq!(pipe_fill_plan(1, BLOCK), top_up(2047));
-    assert_eq!(pipe_fill_plan(BLOCK - 1, BLOCK), top_up(2048 - 255));
-    // One block and above is enough for the next graph cycle: write the block as it is.
-    assert_eq!(pipe_fill_plan(BLOCK, BLOCK), PipeFillPlan::Write);
-    // The healthy steady state rides 1024..2048 and never triggers either guard.
-    for fill in (1024..=2048).step_by(BLOCK) {
-        assert_eq!(pipe_fill_plan(fill, BLOCK), PipeFillPlan::Write, "{fill}");
+    assert_eq!(pipe_fill_plan(1, BLOCK, true), top_up(2047));
+    assert_eq!(pipe_fill_plan(BLOCK - 1, BLOCK, true), top_up(2048 - 255));
+    // Low but not starved (design 5981457044: one reading, or a low shorter than a hub period):
+    // the block is written as it is.
+    for fill in [0, 1, BLOCK - 1] {
+        assert_eq!(
+            pipe_fill_plan(fill, BLOCK, false),
+            PipeFillPlan::Write,
+            "{fill}"
+        );
     }
-    // Up to and including the trim mark the block is still written.
-    assert_eq!(pipe_fill_plan(3000, BLOCK), PipeFillPlan::Write);
-    assert_eq!(pipe_fill_plan(PIPE_HIGH_FRAMES, BLOCK), PipeFillPlan::Write);
-    // Above the target + 2 quanta: drop the block.
-    assert_eq!(
-        pipe_fill_plan(PIPE_HIGH_FRAMES + 1, BLOCK),
-        PipeFillPlan::Drop
-    );
-    assert_eq!(pipe_fill_plan(16_384, BLOCK), PipeFillPlan::Drop);
+    // One block and above is enough for the next graph cycle: write the block as it is.
+    for starved in [true, false] {
+        assert_eq!(pipe_fill_plan(BLOCK, BLOCK, starved), PipeFillPlan::Write);
+        // The healthy steady state rides 1024..2048 and never triggers either guard.
+        for fill in (1024..=2048).step_by(BLOCK) {
+            assert_eq!(
+                pipe_fill_plan(fill, BLOCK, starved),
+                PipeFillPlan::Write,
+                "{fill}"
+            );
+        }
+        // Up to and including the trim mark the block is still written.
+        assert_eq!(pipe_fill_plan(3000, BLOCK, starved), PipeFillPlan::Write);
+        assert_eq!(
+            pipe_fill_plan(PIPE_HIGH_FRAMES, BLOCK, starved),
+            PipeFillPlan::Write
+        );
+        // Above the target + 2 quanta: drop the block, on any reading.
+        assert_eq!(
+            pipe_fill_plan(PIPE_HIGH_FRAMES + 1, BLOCK, starved),
+            PipeFillPlan::Drop
+        );
+        assert_eq!(pipe_fill_plan(16_384, BLOCK, starved), PipeFillPlan::Drop);
+    }
     // "One hub block" is the block being written, not a fixed 256.
-    assert_eq!(pipe_fill_plan(500, 512), top_up(2048 - 500));
-    assert_eq!(pipe_fill_plan(512, 512), PipeFillPlan::Write);
+    assert_eq!(pipe_fill_plan(500, 512, true), top_up(2048 - 500));
+    assert_eq!(pipe_fill_plan(512, 512, true), PipeFillPlan::Write);
 }
 
 #[test]
@@ -93,7 +114,7 @@ fn le_bytes(samples: &[i16]) -> Vec<u8> {
 fn a_sink_writer_tops_an_empty_pipe_up_to_the_target_and_then_writes_the_block() {
     let (mut reader, writer) = std::io::pipe().expect("pipe");
     let probe = writer.try_clone().expect("clone the write end");
-    let mut sink = PipeFillWriter::new(writer, 2);
+    let mut sink = PipeFillWriter::new(writer, 2, RATE);
     let block = stereo_block();
 
     // The first write after a spawn primes the pipe to the target, then writes the block.
@@ -151,7 +172,7 @@ fn a_four_channel_sink_measures_its_fill_in_four_channel_frames() {
     // The cutters' MiniFuse cans: 4 channels, 8 bytes per frame.
     let (_reader, writer) = std::io::pipe().expect("pipe");
     let probe = writer.try_clone().expect("clone the write end");
-    let mut sink = PipeFillWriter::new(writer, 4);
+    let mut sink = PipeFillWriter::new(writer, 4, RATE);
     let block: Vec<i16> = vec![1; BLOCK * 4];
     let report = sink.write_block(&block).unwrap();
     assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES));

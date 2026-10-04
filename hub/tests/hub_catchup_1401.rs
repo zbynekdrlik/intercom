@@ -14,6 +14,11 @@
 //! around the real [`run_batch`] dispatch. A 15 ms stall every 60 s loses nothing and underruns
 //! nothing; a 40 ms stall loses exactly the part beyond four blocks, a bounded, counted loss; the
 //! old skip-at-once dispatch on the same wakes loses blocks on every output.
+//!
+//! Step 4 (design 5981457044) closed the step-3 residuals in the 21-26 ms band: a 21-24 ms stall
+//! refills neither pipe (a pipe is topped up only once it read under one block for a whole hub
+//! period), and a 26 ms stall neither overruns nor underruns a VBAN leg (every leg's cap is its
+//! target + the four late ticks + the current one + one block, `vban_cap_blocks`).
 
 use std::time::Duration;
 
@@ -25,8 +30,8 @@ use intercom_hub::pipe_fill::{
     PipeFillControl, PipeFillPlan, PIPE_SAMPLE_INTERVAL, PW_GRAPH_BURST_FRAMES,
 };
 use intercom_hub::vban_jitter::{
-    NetworkFill, PopPlan, VBAN_CAP_BLOCKS, VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS,
-    VBAN_TARGET_BLOCKS,
+    vban_cap_blocks, NetworkFill, PopPlan, VBAN_CAP_BLOCKS, VBAN_CAP_HEADROOM_BLOCKS,
+    VBAN_PROGRAM_CAP_BLOCKS, VBAN_PROGRAM_TARGET_BLOCKS, VBAN_TARGET_BLOCKS,
 };
 
 const RATE: u32 = 48_000;
@@ -63,6 +68,42 @@ fn up_to_four_missed_ticks_are_caught_up_and_only_the_rest_is_lost() {
     assert!(
         VBAN_PROGRAM_CAP_BLOCKS - VBAN_PROGRAM_TARGET_BLOCKS + 1 >= CATCHUP_MAX_BLOCKS as usize + 2
     );
+}
+
+#[test]
+fn every_vban_cap_is_derived_from_its_target_and_the_catch_up() {
+    // Design 5981457044: the target, the four ticks the loop runs late, the current tick and one
+    // block of headroom for the wake's phase and the arrival jitter. Never a typed number.
+    assert_eq!(VBAN_CAP_HEADROOM_BLOCKS, 1);
+    for target in 1..=12 {
+        assert_eq!(
+            vban_cap_blocks(target),
+            target + CATCHUP_MAX_BLOCKS as usize + 1 + VBAN_CAP_HEADROOM_BLOCKS,
+            "target {target}"
+        );
+    }
+    assert_eq!(VBAN_CAP_BLOCKS, vban_cap_blocks(VBAN_TARGET_BLOCKS));
+    assert_eq!(VBAN_CAP_BLOCKS, 9, "a cambox: 3 + 4 + 1 + 1 blocks (48 ms)");
+    assert_eq!(
+        VBAN_PROGRAM_CAP_BLOCKS,
+        vban_cap_blocks(VBAN_PROGRAM_TARGET_BLOCKS)
+    );
+    assert_eq!(VBAN_PROGRAM_CAP_BLOCKS, 12, "a program feed at its floor");
+    // A program feed's cap follows its adaptive target by the same rule.
+    let mut f = NetworkFill::new(
+        VBAN_PROGRAM_TARGET_BLOCKS * BLOCK,
+        VBAN_PROGRAM_CAP_BLOCKS * BLOCK,
+    );
+    for target in [7, 9, 12, 6] {
+        f.set_target(target * BLOCK);
+        let cap = vban_cap_blocks(target) * BLOCK;
+        assert_eq!(f.overrun_keep(cap), None, "target {target}");
+        assert_eq!(
+            f.overrun_keep(cap + 1),
+            Some(target * BLOCK),
+            "target {target}"
+        );
+    }
 }
 
 #[test]
@@ -322,7 +363,7 @@ struct Pipe {
 impl Pipe {
     fn new(sink_ppm: f64, seed: u64) -> Self {
         Pipe {
-            ctl: PipeFillControl::new(),
+            ctl: PipeFillControl::new(RATE),
             fill: 0,
             read_period: PW_GRAPH_BURST_FRAMES as f64 * 1e9
                 / (f64::from(RATE) * (1.0 + sink_ppm * 1e-6)),
@@ -518,6 +559,48 @@ fn the_old_skip_at_once_dispatch_loses_blocks_on_the_same_wakes() {
     assert_eq!(old.cycles + old.lost, old.ticks, "{old:?}");
     let new = run(stalls_of(15, 1200, false, 1));
     assert_eq!(new.lost, 0, "{new:?}");
+}
+
+#[test]
+fn a_21_to_24ms_stall_refills_neither_pipe() {
+    // Step 3 (comment 5981169929): when two pw-cat quantum reads land in the write gap the pipe
+    // reads under one block for a few ms, with the catch-up blocks about to arrive, and the old
+    // one-reading guard topped the cans up with ~40 ms of silence (15 refills in 57 stalls at
+    // 24 ms). Such a low lasts less than a hub period, so it is no starvation any more.
+    for stall in 21..=24 {
+        for seed in 1..=3 {
+            let o = run(stalls_of(stall, 1200, false, seed));
+            let ctx = format!("{stall} ms, seed {seed}: {o:?}");
+            assert_eq!(o.stalls, 19, "{ctx}");
+            assert_eq!(o.lost, 0, "{ctx}");
+            for (i, (refills, trims, starved)) in o.pipes.iter().enumerate() {
+                assert_eq!((*refills, *trims), (0, 0), "pipe {i}\n{ctx}");
+                // The one starved read at 24 ms is the first stall, 60 s after the spawn, while
+                // the cans' depth is still being walked in (the same count before this change).
+                let allowed = u64::from(stall == 24 && i == 1);
+                assert!(*starved <= allowed, "pipe {i}\n{ctx}");
+            }
+            for (i, leg) in o.legs.iter().enumerate() {
+                assert_eq!(*leg, (0, 0, 0), "leg {i}\n{ctx}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_26ms_stall_neither_overruns_nor_underruns_a_vban_leg() {
+    // Step 3: a 4-tick-late wake (up to 26.7 ms) lets up to six blocks arrive before the catch-up
+    // pops; with five blocks of headroom a cambox leg overran, trimmed to its target and the
+    // caught-up pops then ran it dry (24 + 24 in 57 stalls; the FOH leg 10 + 10). The derived cap
+    // holds every arrival of a covered stall.
+    for seed in 1..=3 {
+        let o = run(stalls_of(26, 1200, false, seed));
+        let ctx = format!("seed {seed}: {o:?}");
+        assert_eq!(o.stalls, 19, "{ctx}");
+        assert_eq!(o.lost, 0, "4 ticks run late, none lost\n{ctx}");
+        assert_eq!(o.legs[0], (0, 0, 0), "the cambox leg\n{ctx}");
+        assert_eq!(o.legs[1], (0, 0, 0), "the FOH leg\n{ctx}");
+    }
 }
 
 #[test]

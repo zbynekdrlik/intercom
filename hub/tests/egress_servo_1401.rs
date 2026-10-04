@@ -13,6 +13,9 @@
 //!   pre-write readings see a drift only as a whole-block step at each read/write phase crossing,
 //!   and the servo would answer in bursts (design question 5979620130). The sink thread reads the
 //!   pipe about every 1 ms between blocks, and the servo gets the trapezoid mean of those readings.
+//! - **A refill needs a starved pipe (step 4, design 5981457044).** The fill must read under one
+//!   block on every reading for at least one hub period: a momentary low between a pw-cat read and
+//!   the next write or catch-up burst is not starvation. The prime and the trim act on one reading.
 //!
 //! The two-clock bench drives the real `PipeFillControl` on frame counts: the hub's block loop on
 //! its 5.333 ms grid (tokio rounds every wake up to the next ms, plus up to 50 us of OS latency),
@@ -20,6 +23,7 @@
 //! 1024-frame quantum per cycle on its own clock. It measures the TRUE time-weighted pipe fill
 //! itself from the exact event times, never the controller's numbers.
 
+use intercom_hub::janus_pacing::hub_block_period;
 use intercom_hub::local_audio::{
     pipe_fill_bytes, pipe_write_bytes, LocalAudioStats, PipeFillWriter, PW_GRAPH_BURST_FRAMES,
 };
@@ -31,6 +35,8 @@ use intercom_hub::vban_jitter::{NetworkFill, PopPlan, ServoStep};
 
 /// The hub block on strih-lx (`[hub].block_frames`).
 const BLOCK: usize = 256;
+/// The hub's (and every pw-cat pipe's) sample rate.
+const RATE: u32 = 48_000;
 /// pw-cat's read: one graph quantum.
 const QUANTUM: usize = PW_GRAPH_BURST_FRAMES;
 /// The prime: the silence up to the target plus the prime's own block.
@@ -185,7 +191,7 @@ fn each_plan_writes_exactly_its_frames() {
 
 #[test]
 fn the_start_hold_drops_blocks_until_pw_cat_first_reads() {
-    let mut c = PipeFillControl::new();
+    let mut c = PipeFillControl::new(RATE);
     let ms = 1_000_000u64;
     let prime = c.plan_block(0, 0, BLOCK);
     assert_eq!(
@@ -225,7 +231,7 @@ fn the_servo_measures_from_pw_cats_first_read() {
     // Every later block reads 1280 before its write and leaves 1536 after it: a trapezoid of 1408.
     let later = (after_read + after_read + BLOCK) / 2;
     for drop_seen_at_a_sample in [true, false] {
-        let mut c = PipeFillControl::new();
+        let mut c = PipeFillControl::new(RATE);
         c.plan_block(0, 0, BLOCK);
         assert_eq!(
             c.plan_block(step, PRIME, BLOCK).plan,
@@ -258,7 +264,7 @@ fn a_guard_forgets_the_servos_pending_corrections() {
     let step = 16_000_000 / 3;
     let high = SETPOINT + 400;
     for guard_fill in [PIPE_HIGH_FRAMES + 1, 0] {
-        let mut c = PipeFillControl::new();
+        let mut c = PipeFillControl::new(RATE);
         c.plan_block(0, 0, BLOCK);
         c.sample(step / 2, PRIME - QUANTUM);
         let mut t = step;
@@ -295,7 +301,7 @@ fn a_real_pipe_holds_the_prime_until_it_is_read() {
     use std::io::Read;
     let (mut reader, writer) = std::io::pipe().expect("pipe");
     let probe = writer.try_clone().expect("clone the write end");
-    let mut sink = PipeFillWriter::new(writer, 2);
+    let mut sink = PipeFillWriter::new(writer, 2, RATE);
     let stats = LocalAudioStats::default();
     let block: Vec<i16> = vec![5; BLOCK * 2];
     let fill = || pipe_fill_bytes(&probe).unwrap() / 4;
@@ -334,7 +340,7 @@ fn a_pw_cat_that_exits_during_the_start_hold_is_noticed() {
     // made the sink thread respawn a dead pw-cat. A child that died before its first read must
     // still be noticed, by the 1 ms readings and by a held block alike.
     let (reader, writer) = std::io::pipe().expect("pipe");
-    let mut sink = PipeFillWriter::new(writer, 2);
+    let mut sink = PipeFillWriter::new(writer, 2, RATE);
     let block: Vec<i16> = vec![3; BLOCK * 2];
     sink.write_block(&block).unwrap();
     sink.sample_fill().unwrap();
@@ -420,6 +426,113 @@ fn the_sink_thread_reads_the_pipe_between_blocks() {
     assert!(brk < after.find('}').expect("the if block"), "{after:.120}");
     assert!(body.contains("stats.record_servo_depth(sink.servo_depth())"));
     assert!(body.contains("Err(RecvTimeoutError::Disconnected) => return"));
+}
+
+// --- the starvation-only refill (step 4, design 5981457044) -------------------------------------
+
+/// A controller past its prime and pw-cat's first read, with the next reading due at 2 ms.
+fn running() -> (PipeFillControl, u64) {
+    let mut c = PipeFillControl::new(RATE);
+    assert!(c.plan_block(0, 0, BLOCK).first, "the prime");
+    c.sample(MS, PRIME - QUANTUM);
+    assert!(c.started());
+    (c, 2 * MS)
+}
+
+fn period() -> u64 {
+    hub_block_period(BLOCK, RATE).as_nanos() as u64
+}
+
+fn is_top_up(plan: PipeFillPlan) -> bool {
+    matches!(plan, PipeFillPlan::TopUp { .. })
+}
+
+#[test]
+fn one_low_reading_is_no_refill_only_a_whole_hub_period_of_them_is() {
+    // A momentary low: two pw-cat reads landed in a catch-up gap, the burst is about to arrive.
+    let (mut c, t) = running();
+    let r = c.plan_block(t, 100, BLOCK);
+    assert!(!is_top_up(r.plan), "one low pre-write reading: {r:?}");
+    assert_eq!(r.fill_frames, 100);
+    // The burst's next block reads the block just written: the low is over.
+    let r = c.plan_block(t + 20_000, 356, BLOCK);
+    assert!(!is_top_up(r.plan), "{r:?}");
+
+    // Low on a 1 ms reading and on the pre-write reading one nanosecond short of a hub period.
+    let (mut c, t) = running();
+    c.sample(t, 100);
+    let r = c.plan_block(t + period() - 1, 100, BLOCK);
+    assert!(!is_top_up(r.plan), "under one period: {r:?}");
+
+    // A whole hub period of low readings: starved, topped up to the target, and not the prime.
+    let (mut c, t) = running();
+    c.sample(t, 100);
+    let r = c.plan_block(t + period(), 100, BLOCK);
+    assert_eq!(
+        r.plan,
+        PipeFillPlan::TopUp {
+            silence_frames: PIPE_TARGET_FRAMES - 100
+        }
+    );
+    assert!(!r.first);
+}
+
+#[test]
+fn a_reading_of_one_block_or_more_ends_the_low_run() {
+    let (mut c, t) = running();
+    c.sample(t, 100);
+    c.sample(t + 2 * MS, BLOCK);
+    c.sample(t + 3 * MS, 100);
+    // A hub period after the FIRST low reading, but the run restarted at 3 ms.
+    let r = c.plan_block(t + period() + MS, 100, BLOCK);
+    assert!(!is_top_up(r.plan), "{r:?}");
+    let r = c.plan_block(t + 3 * MS + period(), 100, BLOCK);
+    assert!(is_top_up(r.plan), "{r:?}");
+}
+
+#[test]
+fn a_blocked_pw_cat_that_swallows_every_block_is_refilled_within_one_hub_period() {
+    // The live failure the guard exists for: pw-cat sits in its fread of a whole quantum and takes
+    // every block the moment it lands, so the pipe reads 0 on every reading, also right after a
+    // write. The run of low readings is not broken by the writes themselves.
+    let (mut c, mut t) = running();
+    let step = period();
+    let first = c.plan_block(t, 0, BLOCK);
+    assert!(!is_top_up(first.plan), "{first:?}");
+    let mut refilled_at = None;
+    for k in 1..=3u64 {
+        for ms in 1..5 {
+            c.sample(t + ms * MS, 0);
+        }
+        t += step;
+        if is_top_up(c.plan_block(t, 0, BLOCK).plan) {
+            refilled_at = Some(k);
+            break;
+        }
+    }
+    assert_eq!(refilled_at, Some(1), "refilled at the next block's write");
+}
+
+#[test]
+fn the_prime_and_the_trim_still_act_on_one_reading_and_a_top_up_ends_the_run() {
+    let mut c = PipeFillControl::new(RATE);
+    let prime = c.plan_block(0, 0, BLOCK);
+    assert!(prime.first && is_top_up(prime.plan), "{prime:?}");
+    let (mut c, t) = running();
+    assert_eq!(
+        c.plan_block(t, PIPE_HIGH_FRAMES + 1, BLOCK).plan,
+        PipeFillPlan::Drop,
+        "one reading above the trim mark drops the block"
+    );
+    // After a refill the pipe holds the target: an older low reading no longer counts.
+    let (mut c, t) = running();
+    c.sample(t, 0);
+    assert!(is_top_up(c.plan_block(t + period(), 0, BLOCK).plan));
+    let r = c.plan_block(t + period() + 20_000, 0, BLOCK);
+    assert!(
+        !is_top_up(r.plan),
+        "a new run starts after the top-up: {r:?}"
+    );
 }
 
 // --- the two-clock bench -------------------------------------------------------------------------
@@ -541,7 +654,7 @@ impl Outcome {
 /// One pw-cat spawn: the prime, the start hold, then `secs` of the hub against the sink.
 fn run(sp: Spawn) -> Outcome {
     let mut rng = Rng(sp.seed);
-    let mut c = PipeFillControl::new();
+    let mut c = PipeFillControl::new(RATE);
     let mut out = Outcome {
         corrections: vec![0; sp.secs as usize],
         ..Default::default()
