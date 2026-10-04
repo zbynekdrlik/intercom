@@ -118,7 +118,10 @@ fn a_sink_writer_tops_an_empty_pipe_up_to_the_target_and_then_writes_the_block()
     reader.read_exact(&mut audio).unwrap();
     assert_eq!(audio, le_bytes(&block), "the block follows the silence");
 
-    // pw-cat took everything: the next write is a REFILL (not the first write any more).
+    // pw-cat took everything and the pipe stays empty for a whole hub period (a 1 ms reading now,
+    // the pre-write reading 6 ms later): the next write is a REFILL (not the first write any more).
+    sink.sample_fill().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(6));
     let report = sink.write_block(&block).unwrap();
     assert_eq!(report.fill_frames, 0);
     assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES));
