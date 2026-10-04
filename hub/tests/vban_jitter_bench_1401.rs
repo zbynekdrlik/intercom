@@ -1,0 +1,407 @@
+//! Issue 1401: the two-clock + arrival-jitter bench for a VBAN network leg.
+//!
+//! A sender on its own clock (the FOH desk's Dante tick, a cambox headset ADC: `ppm` against the
+//! hub) produces 48 kHz audio and sends it as packets; each packet reaches the hub after a Gaussian
+//! one-way delay, in order (UDP on one LAN path never overtakes); the hub pops one 256-frame block
+//! on its exact 5.333 ms grid, every tick waking up to 1 ms late (tokio rounds a deadline up to
+//! the next ms). The bench drives the real [`NetworkFill`] controller on frame counts alone, so
+//! hours of simulated time run in seconds, and it measures everything itself (the pre-pop fill,
+//! its 1 s means, the spacing of the corrections) rather than trusting the controller's numbers.
+//!
+//! Realistic means: +-20 ppm (the measured `fohabl-strih` is +0.5 ppm) and a 1 ms sd jitter. The
+//! live underrun pattern of the old buffer (one every 2-15 min with well under one block of margin,
+//! reproduced on issue 1401 with a 0.2 ms sd) puts the real jitter far below that. The FOH feed is
+//! 103 frames at 96 kHz per packet = 51/52 at 48 kHz after decimation (~934 packets/s); a cambox
+//! sends 128 mono frames (375 packets/s).
+
+use std::collections::VecDeque;
+
+use intercom_hub::vban_jitter::{
+    NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES, SERVO_MIN_SPACING_FRAMES, VBAN_CAP_BLOCKS,
+    VBAN_TARGET_BLOCKS,
+};
+
+const RATE: f64 = 48_000.0;
+const BLOCK: usize = 256;
+const TARGET: usize = VBAN_TARGET_BLOCKS * BLOCK;
+const CAP: usize = VBAN_CAP_BLOCKS * BLOCK;
+/// Pops per 1 s measurement window (48 000 / 256 = 187.5, rounded up).
+const WINDOW_POPS: usize = 188;
+/// Fill and band statistics start after this (start-up prime + the servo's first settle).
+const SETTLE_S: f64 = 30.0;
+/// The FOH program feed after the 96 -> 48 kHz decimation.
+const FOH: &[usize] = &[51, 52];
+/// A cambox's mono talkback packet.
+const CAMBOX: &[usize] = &[128];
+
+/// splitmix64 + Box-Muller: deterministic and std-only.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in (0, 1).
+    fn unit(&mut self) -> f64 {
+        ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    fn gauss(&mut self) -> f64 {
+        (-2.0 * self.unit().ln()).sqrt() * (std::f64::consts::TAU * self.unit()).cos()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StallKind {
+    /// The packets sent during the stall are held and then all arrive at its end.
+    Burst,
+    /// The packets sent during the stall never arrive.
+    Lost,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Stall {
+    at_s: f64,
+    len_s: f64,
+    kind: StallKind,
+}
+
+#[derive(Debug, Clone)]
+struct Scenario {
+    /// Frames per packet at 48 kHz, cycled.
+    packets: &'static [usize],
+    /// Packets sent together once the last one's audio exists (1 = evenly paced).
+    burst: usize,
+    /// The sender's clock against the hub's.
+    ppm: f64,
+    jitter_sd_ms: f64,
+    base_delay_ms: f64,
+    /// Every hub tick wakes up uniformly 0..this late.
+    hub_late_ms: f64,
+    /// One missed hub tick (`MissedTickBehavior::Skip` loses a block) every this many seconds.
+    hub_skip_every_s: Option<f64>,
+    stall: Option<Stall>,
+    secs: f64,
+    seed: u64,
+}
+
+impl Scenario {
+    fn new(packets: &'static [usize], ppm: f64, jitter_sd_ms: f64, secs: f64, seed: u64) -> Self {
+        Scenario {
+            packets,
+            burst: 1,
+            ppm,
+            jitter_sd_ms,
+            base_delay_ms: 1.0,
+            hub_late_ms: 1.0,
+            hub_skip_every_s: None,
+            stall: None,
+            secs,
+            seed,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Outcome {
+    /// Pops that found a primed stream short of a block (each one underrun).
+    ran_dry: u64,
+    /// Above-cap trims.
+    overruns: u64,
+    /// Silent blocks after the first audio (each one an audible gap).
+    silent_after_prime: u64,
+    drops: u64,
+    repeats: u64,
+    /// The lowest pre-pop fill of an audio pop after the settle.
+    min_fill: usize,
+    /// The highest pre-pop fill after the settle.
+    max_fill: usize,
+    /// The largest distance of a 1 s mean pre-pop fill from the target after the settle.
+    max_window_dev: usize,
+    /// The fewest output frames between two corrections.
+    min_correction_gap: usize,
+    /// After a stall: seconds from its end until the last time the leg was not primed or its 1 s
+    /// mean fill was outside the servo band.
+    recovered_s: f64,
+}
+
+/// The sender side: lazily generated packets in arrival order.
+struct Sender<'a> {
+    sc: &'a Scenario,
+    rng: Rng,
+    rate: f64,
+    idx: usize,
+    produced: usize,
+    group_send_t: f64,
+    last_arrival: f64,
+}
+
+impl<'a> Sender<'a> {
+    fn new(sc: &'a Scenario) -> Self {
+        Sender {
+            sc,
+            rng: Rng(sc.seed),
+            rate: RATE * (1.0 + sc.ppm * 1e-6),
+            idx: 0,
+            produced: 0,
+            group_send_t: 0.0,
+            last_arrival: 0.0,
+        }
+    }
+
+    fn size(&self, i: usize) -> usize {
+        self.sc.packets[i % self.sc.packets.len()]
+    }
+
+    /// The next packet that reaches the hub: `(arrival time s, frames)`.
+    fn next(&mut self) -> (f64, usize) {
+        loop {
+            let i = self.idx;
+            if i.is_multiple_of(self.sc.burst) {
+                // A group leaves once the audio of its last packet exists.
+                let group: usize = (i..i + self.sc.burst).map(|j| self.size(j)).sum();
+                self.group_send_t = (self.produced + group) as f64 / self.rate;
+            }
+            let n = self.size(i);
+            self.idx += 1;
+            self.produced += n;
+            let send = self.group_send_t;
+            let delay =
+                (self.sc.base_delay_ms + self.sc.jitter_sd_ms * self.rng.gauss()).max(0.0) * 1e-3;
+            let mut arrival = (send + delay).max(self.last_arrival);
+            if let Some(st) = self.sc.stall {
+                if send >= st.at_s && send < st.at_s + st.len_s {
+                    match st.kind {
+                        StallKind::Lost => continue,
+                        StallKind::Burst => arrival = arrival.max(st.at_s + st.len_s),
+                    }
+                }
+            }
+            self.last_arrival = arrival;
+            return (arrival, n);
+        }
+    }
+}
+
+fn run(sc: &Scenario) -> Outcome {
+    let mut ctl = NetworkFill::new(TARGET, CAP);
+    let mut sender = Sender::new(sc);
+    let mut rng = Rng(sc.seed ^ 0xA5A5_A5A5);
+    let period = BLOCK as f64 / RATE;
+    let pops = (sc.secs / period) as usize;
+    let skip_every = sc.hub_skip_every_s.map(|s| ((s / period) as usize).max(2));
+    let stall_end = sc.stall.map(|st| st.at_s + st.len_s);
+
+    let mut out = Outcome {
+        min_fill: usize::MAX,
+        min_correction_gap: usize::MAX,
+        ..Outcome::default()
+    };
+    let mut fill = 0usize;
+    let mut next = sender.next();
+    let mut primed_once = false;
+    let mut audio_frames = 0usize;
+    let mut last_correction: Option<usize> = None;
+    let mut window: VecDeque<usize> = VecDeque::with_capacity(WINDOW_POPS);
+    let mut last_bad_t = 0.0f64;
+
+    for k in 1..=pops {
+        if skip_every.is_some_and(|n| k.is_multiple_of(n)) {
+            continue;
+        }
+        let t = k as f64 * period + rng.unit() * sc.hub_late_ms * 1e-3;
+        while next.0 <= t {
+            fill += next.1;
+            if let Some(keep) = ctl.overrun_keep(fill) {
+                fill = keep;
+                out.overruns += 1;
+            }
+            next = sender.next();
+        }
+        let settled = t >= SETTLE_S;
+        let pre = fill;
+        match ctl.plan_pop(fill, BLOCK) {
+            PopPlan::Silent { ran_dry } => {
+                out.ran_dry += u64::from(ran_dry);
+                out.silent_after_prime += u64::from(primed_once);
+                window.clear();
+                last_bad_t = t;
+            }
+            PopPlan::Audio { take } => {
+                primed_once = true;
+                fill -= take;
+                audio_frames += BLOCK;
+                if take != BLOCK {
+                    if take > BLOCK {
+                        out.drops += 1;
+                    } else {
+                        out.repeats += 1;
+                    }
+                    if let Some(prev) = last_correction {
+                        out.min_correction_gap = out.min_correction_gap.min(audio_frames - prev);
+                    }
+                    last_correction = Some(audio_frames);
+                }
+                if settled {
+                    out.min_fill = out.min_fill.min(pre);
+                    out.max_fill = out.max_fill.max(pre);
+                }
+                window.push_back(pre);
+                if window.len() == WINDOW_POPS {
+                    let mean = window.iter().sum::<usize>() / WINDOW_POPS;
+                    let dev = mean.abs_diff(TARGET);
+                    if settled {
+                        out.max_window_dev = out.max_window_dev.max(dev);
+                    }
+                    if dev > SERVO_DEADBAND_FRAMES {
+                        last_bad_t = t;
+                    }
+                    window.clear();
+                }
+            }
+        }
+    }
+    out.recovered_s = stall_end.map_or(0.0, |end| (last_bad_t - end).max(0.0));
+    out
+}
+
+/// The drift the servo must take out: frames the sender gains (+) or loses (-) over the run.
+fn drift_frames(sc: &Scenario) -> f64 {
+    sc.ppm * 1e-6 * RATE * sc.secs
+}
+
+/// The realistic-jitter verdict: not one gap, not one trim, the servo exactly takes out the
+/// drift at <= 1 ms/s, and the 1 s mean fill never leaves the band by more than the servo's lag.
+fn assert_clean(sc: &Scenario, o: &Outcome, extra_net_drops: f64) {
+    let ctx = format!("{sc:?}\n{o:?}");
+    assert_eq!(o.ran_dry, 0, "no underrun at realistic jitter\n{ctx}");
+    assert_eq!(o.silent_after_prime, 0, "no silent block at all\n{ctx}");
+    assert_eq!(o.overruns, 0, "no overrun trim\n{ctx}");
+    assert!(
+        o.min_fill >= BLOCK + 2 * 48,
+        "at least 2 ms of margin is left at the worst pop\n{ctx}"
+    );
+    assert!(o.max_fill <= CAP, "{ctx}");
+    assert!(
+        o.min_correction_gap >= SERVO_MIN_SPACING_FRAMES,
+        "<= 1 ms/s of corrections\n{ctx}"
+    );
+    let net = o.drops as f64 - o.repeats as f64;
+    let expected = drift_frames(sc) + extra_net_drops;
+    assert!(
+        (net - expected).abs() <= (2 * BLOCK) as f64,
+        "the servo takes out exactly the drift: net {net} vs {expected}\n{ctx}"
+    );
+}
+
+// --- realistic jitter: zero underruns over hours ---------------------------------------------
+
+#[test]
+fn program_feed_8h_at_plus_20ppm_never_underruns() {
+    let sc = Scenario::new(FOH, 20.0, 1.0, 8.0 * 3600.0, 1);
+    let o = run(&sc);
+    assert_clean(&sc, &o, 0.0);
+    assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
+}
+
+#[test]
+fn program_feed_8h_at_minus_20ppm_never_underruns() {
+    let sc = Scenario::new(FOH, -20.0, 1.0, 8.0 * 3600.0, 2);
+    let o = run(&sc);
+    assert_clean(&sc, &o, 0.0);
+    assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
+}
+
+#[test]
+fn mono_cambox_leg_8h_at_plus_and_minus_20ppm_never_underruns() {
+    for (ppm, seed) in [(20.0, 3), (-20.0, 4)] {
+        let sc = Scenario::new(CAMBOX, ppm, 1.0, 8.0 * 3600.0, seed);
+        let o = run(&sc);
+        assert_clean(&sc, &o, 0.0);
+        assert!(o.max_window_dev <= SERVO_DEADBAND_FRAMES + 32, "{o:?}");
+    }
+}
+
+#[test]
+fn cambox_headset_adc_at_plus_540ppm_is_absorbed_for_an_hour() {
+    // The cam1 headset ADC measured 48 026 samples/s against the hub (issue 1345): with no servo
+    // that was one overrun every ~5 s.
+    let sc = Scenario::new(CAMBOX, 540.0, 1.0, 3600.0, 5);
+    let o = run(&sc);
+    assert_clean(&sc, &o, 0.0);
+}
+
+#[test]
+fn a_bursty_program_sender_never_underruns() {
+    // A Windows sender pushing five packets at once (~5.4 ms of audio, one 512-frame 96 kHz
+    // driver buffer) at the measured +0.5 ppm, plus the same 1 ms jitter, for 2 h.
+    let mut sc = Scenario::new(FOH, 0.5, 1.0, 2.0 * 3600.0, 6);
+    sc.burst = 5;
+    let o = run(&sc);
+    assert_clean(&sc, &o, 0.0);
+}
+
+#[test]
+fn missed_hub_ticks_are_walked_back_without_a_trim() {
+    // One lost mix block every 30 s for an hour: each leaves one extra block in the buffer, which
+    // the servo drops a frame at a time before the next one.
+    let mut sc = Scenario::new(FOH, 0.5, 1.0, 3600.0, 7);
+    sc.hub_skip_every_s = Some(30.0);
+    let o = run(&sc);
+    let skipped = (sc.secs / 30.0).floor();
+    assert_clean(&sc, &o, skipped * BLOCK as f64);
+}
+
+// --- a real stall: one counted, bounded outcome ----------------------------------------------
+
+fn stall_scenario(kind: StallKind, seed: u64) -> Scenario {
+    let mut sc = Scenario::new(FOH, 0.5, 1.0, 1200.0, seed);
+    sc.stall = Some(Stall {
+        at_s: 600.0,
+        len_s: 0.060,
+        kind,
+    });
+    sc
+}
+
+/// The 60 ms stall spans this many hub blocks.
+fn stall_blocks() -> u64 {
+    (0.060 / (BLOCK as f64 / RATE)).ceil() as u64
+}
+
+#[test]
+fn a_60ms_stall_with_a_catch_up_burst_is_one_counted_underrun() {
+    let sc = stall_scenario(StallKind::Burst, 8);
+    let o = run(&sc);
+    let ctx = format!("{o:?}");
+    assert_eq!(o.ran_dry, 1, "the stall is exactly one underrun\n{ctx}");
+    assert!(
+        o.silent_after_prime <= stall_blocks(),
+        "silence only while the stall lasts\n{ctx}"
+    );
+    assert!(
+        o.overruns <= 2,
+        "the 60 ms backlog trims at most twice\n{ctx}"
+    );
+    assert!(o.recovered_s <= 30.0, "back in the band within 30 s\n{ctx}");
+    assert!(o.min_correction_gap >= SERVO_MIN_SPACING_FRAMES, "{ctx}");
+}
+
+#[test]
+fn a_60ms_stall_that_loses_the_audio_is_one_counted_underrun() {
+    let sc = stall_scenario(StallKind::Lost, 9);
+    let o = run(&sc);
+    let ctx = format!("{o:?}");
+    assert_eq!(o.ran_dry, 1, "the stall is exactly one underrun\n{ctx}");
+    assert_eq!(o.overruns, 0, "{ctx}");
+    assert!(
+        o.silent_after_prime <= stall_blocks() + VBAN_TARGET_BLOCKS as u64,
+        "silence for the stall plus one re-prime to the target\n{ctx}"
+    );
+    assert!(o.recovered_s <= 30.0, "back in the band within 30 s\n{ctx}");
+}
