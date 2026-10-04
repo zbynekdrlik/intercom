@@ -254,6 +254,31 @@ fn a_real_pipe_holds_the_prime_until_it_is_read() {
 }
 
 #[test]
+fn a_pw_cat_that_exits_during_the_start_hold_is_noticed() {
+    // Review round 1: during the hold the sink writes nothing, so it never gets the EPIPE that
+    // made the sink thread respawn a dead pw-cat. A child that died before its first read must
+    // still be noticed, by the 1 ms readings and by a held block alike.
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    let mut sink = PipeFillWriter::new(writer, 2);
+    let block: Vec<i16> = vec![3; BLOCK * 2];
+    sink.write_block(&block).unwrap();
+    sink.sample_fill().unwrap();
+    assert_eq!(
+        sink.write_block(&block).unwrap().plan,
+        PipeFillPlan::StartHold
+    );
+    drop(reader); // pw-cat exits before reading
+    let e = sink
+        .sample_fill()
+        .expect_err("a dead reader is noticed between blocks");
+    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+    let e = sink
+        .write_block(&block)
+        .expect_err("a held block notices it too");
+    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[test]
 fn the_facet_counts_holds_and_servo_corrections() {
     let stats = LocalAudioStats::default();
     let report = |plan| PipeWriteReport {
