@@ -254,26 +254,36 @@ fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
 }
 
 #[test]
-fn the_block_loop_gives_up_a_missed_tick_and_publishes_the_fill_numbers() {
-    // The daemon's tokio loop is not unit-testable; anchor the two calls that wire the pure pieces
-    // (missed_ticks / skip_missed / network_stats, all tested on their own) into it.
+fn the_block_loop_catches_up_gives_up_only_the_lost_part_and_publishes_the_fill_numbers() {
+    // The daemon's block loop is not unit-testable; anchor the calls that wire the pure pieces
+    // (BlockGrid / run_batch / skip_missed / network_stats, all tested on their own) into it.
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     let src = std::fs::read_to_string(&p).expect("read main.rs");
+    let batch = src
+        .find("run_batch(batch, |lost|")
+        .expect("every due tick runs through the catch-up dispatch");
     let skip = src
-        .find("b.skip_missed(missed, block_frames)")
-        .expect("skip wired");
+        .find("b.skip_missed(lost, block_frames)")
+        .expect("only the lost part is given up");
     let pop = src.find("b.pop_block(block_frames)").expect("pop");
-    assert!(skip < pop, "the missed block is given up before the pop");
     assert!(
-        src.contains("missed_ticks(tick - prev, period)"),
-        "the gap between SCHEDULED ticks"
+        batch < skip && skip < pop,
+        "inside each cycle, the lost blocks go before the pop"
+    );
+    assert!(
+        !src.contains("missed_ticks("),
+        "the grid counts the due ticks itself"
     );
     assert!(
         src.contains(".jitter = b.network_stats()"),
         "the block loop publishes each VBAN leg's fill numbers to /api/state"
     );
     assert!(
-        src.contains("snapshot.missed_ticks = missed_total"),
-        "the block loop publishes the run's missed ticks"
+        src.contains("snapshot.caught_up_ticks = caught_up_total"),
+        "the block loop publishes the run's caught-up ticks"
+    );
+    assert!(
+        src.contains("snapshot.lost_ticks = lost_total"),
+        "the block loop publishes the run's lost ticks"
     );
 }
