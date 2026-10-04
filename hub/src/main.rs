@@ -27,7 +27,7 @@ use intercom_hub::local_audio::{
     LocalSourceConfig,
 };
 use intercom_hub::matrix::Matrix;
-use intercom_hub::mix_thread::{spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
+use intercom_hub::mix_thread::{current_sched_class, spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
@@ -242,6 +242,18 @@ async fn main() -> Result<()> {
         &vec![RuntimeStats::default(); n],
     ));
     let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+    // The periodic status line is written here, on tokio, from every snapshot the block loop
+    // publishes: a journal write can block, and the block loop runs on the real-time hub-mix
+    // thread (issue 1401).
+    {
+        let mut status_rx = live_rx.clone();
+        tokio::spawn(async move {
+            while status_rx.changed().await.is_ok() {
+                let line = status_rx.borrow_and_update().status_line();
+                tracing::info!("{line}");
+            }
+        });
+    }
 
     // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
     // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
@@ -269,10 +281,17 @@ async fn main() -> Result<()> {
                                 slot.publish(conv);
                             }
                             if let Some(audio) = converted {
-                                if let Ok(mut jb) = jitter.lock() {
-                                    if let Some(b) = jb.get_mut(id) {
+                                // A program feed's target change is logged after the lock is
+                                // released: the real-time hub-mix thread takes the same lock
+                                // every block (issue 1401).
+                                let change = jitter.lock().ok().and_then(|mut jb| {
+                                    jb.get_mut(id).and_then(|b| {
                                         b.push(&audio);
-                                    }
+                                        b.take_target_change()
+                                    })
+                                });
+                                if let Some(change) = change {
+                                    change.log();
                                 }
                             }
                         }
@@ -417,6 +436,9 @@ fn run_block_loop(bl: BlockLoop) {
     let mut caught_up_total: u64 = 0;
     let mut lost_total: u64 = 0;
     let mut last_lost_warn: Option<u64> = None;
+    // This thread's class as the start-up asked for it, for /api/state (a refused grant shows).
+    let mix_thread_sched =
+        current_sched_class().map_or_else(|e| format!("unknown ({e})"), |class| class.label());
     loop {
         clock.sleep_until(grid.next_deadline());
         let Some(batch) = grid.take_due(clock.elapsed()) else {
@@ -561,6 +583,7 @@ fn run_block_loop(bl: BlockLoop) {
                 // block lost on every output.
                 snapshot.caught_up_ticks = caught_up_total;
                 snapshot.lost_ticks = lost_total;
+                snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
                 // Attach the Interkom picture facet (M3c) when the video leg is running.
                 if let Some(vs) = &video_for_loop {
                     let now_wall = std::time::SystemTime::now()
@@ -569,7 +592,7 @@ fn run_block_loop(bl: BlockLoop) {
                         .unwrap_or(0);
                     snapshot.video = Some(vs.snapshot(now_wall));
                 }
-                tracing::info!("{}", snapshot.status_line());
+                // The status line is logged by the tokio task that watches this channel.
                 let _ = live_tx.send(Arc::new(snapshot));
             }
         });

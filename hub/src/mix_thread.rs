@@ -41,6 +41,17 @@ pub enum SchedClass {
     Other,
 }
 
+impl SchedClass {
+    /// The class as `chrt` names it: `SCHED_FIFO 10` or `SCHED_OTHER` (the `/api/state`
+    /// `mix_thread_sched` value).
+    pub fn label(&self) -> String {
+        match self {
+            SchedClass::Fifo(priority) => format!("SCHED_FIFO {priority}"),
+            SchedClass::Other => "SCHED_OTHER".to_string(),
+        }
+    }
+}
+
 /// Ask for SCHED_FIFO at `priority` for the CALLING thread only (`sched_setscheduler(0, ..)`
 /// addresses the calling thread on Linux, never the whole process).
 pub fn set_realtime_fifo(priority: i32) -> io::Result<()> {

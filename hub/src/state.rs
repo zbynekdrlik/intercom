@@ -141,6 +141,11 @@ pub struct HubState {
     /// four it runs late. Each one is a block lost on EVERY output, the program sink included (the
     /// VBAN legs give the same block up). Set by the daemon after the snapshot.
     pub lost_ticks: u64,
+    /// The hub-mix block loop thread's scheduling class as it read it at start (`SCHED_FIFO 10`,
+    /// or `SCHED_OTHER` when the unit's realtime grant is missing): a refused grant is visible
+    /// here without ssh. Set by the daemon; omitted from the pure snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix_thread_sched: Option<String>,
 }
 
 impl HubState {
@@ -184,6 +189,7 @@ impl HubState {
             video: None,
             caught_up_ticks: 0,
             lost_ticks: 0,
+            mix_thread_sched: None,
         }
     }
 

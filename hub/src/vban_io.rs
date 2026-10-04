@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use intercom_vban::{VbanCodec, VbanHeader, VBAN_HEADER_SIZE};
@@ -224,6 +224,39 @@ pub struct JitterBuffer {
     last_peak: i16,
     /// A program feed's adaptive target (issue 1401), `None` for a leg with a fixed target.
     adaptive: Option<AdaptiveLeg>,
+    /// The last target change, waiting for the caller to take and log it off the lock.
+    target_change: Option<TargetChange>,
+}
+
+/// A program feed's target change (issue 1401), handed to the caller to log once it has released
+/// the buffer's lock: the receive task holds the jitter lock while it pushes, and the real-time
+/// hub-mix thread takes that same lock every block, so no journal write may happen under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetChange {
+    /// The leg's participant name.
+    pub leg: String,
+    pub from_frames: usize,
+    pub to_frames: usize,
+    /// The largest gap of the last 10 min the new target follows.
+    pub max_gap_10min: Duration,
+}
+
+impl TargetChange {
+    /// Log the change as one info line. Call it with no lock held.
+    pub fn log(&self) {
+        tracing::info!(
+            leg = %self.leg,
+            from_frames = self.from_frames,
+            to_frames = self.to_frames,
+            max_gap_ms_10min = self.max_gap_10min.as_secs_f64() * 1000.0,
+            "intercom-hub: program feed target {} (the largest gap of the last 10 min)",
+            if self.to_frames > self.from_frames {
+                "raised"
+            } else {
+                "lowered"
+            }
+        );
+    }
 }
 
 /// A VBAN leg whose target follows its sender's gaps, and the leg's name for its log line.
@@ -271,6 +304,7 @@ impl JitterBuffer {
             last_rx: None,
             last_peak: 0,
             adaptive: None,
+            target_change: None,
         }
     }
 
@@ -321,6 +355,12 @@ impl JitterBuffer {
             });
         }
         self
+    }
+
+    /// Take a program feed's last target change, if any, to log it once the caller has released
+    /// the buffer's lock ([`TargetChange::log`]). The receive task takes it after every push.
+    pub fn take_target_change(&mut self) -> Option<TargetChange> {
+        self.target_change.take()
     }
 
     /// The VBAN leg's live fill numbers (target, depth, servo corrections, stalls, and a program
@@ -420,14 +460,13 @@ impl JitterBuffer {
                 if let Some(target) = leg.target.observe(gap, now) {
                     let from = fill.target();
                     fill.set_target(target);
-                    tracing::info!(
-                        leg = %leg.name,
-                        from_frames = from,
-                        to_frames = target,
-                        max_gap_ms_10min = leg.target.max_gap_10min().as_secs_f64() * 1000.0,
-                        "intercom-hub: program feed target {} (the largest gap of the last 10 min)",
-                        if target > from { "raised" } else { "lowered" }
-                    );
+                    // Recorded, never logged here: the caller logs it off the lock.
+                    self.target_change = Some(TargetChange {
+                        leg: leg.name.clone(),
+                        from_frames: from,
+                        to_frames: target,
+                        max_gap_10min: leg.target.max_gap_10min(),
+                    });
                 }
             }
         }
