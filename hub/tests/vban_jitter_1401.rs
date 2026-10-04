@@ -377,7 +377,7 @@ fn a_sender_that_changes_its_channel_count_starts_the_leg_over() {
 }
 
 #[test]
-fn a_missed_hub_tick_is_given_up_at_once_but_never_below_the_target() {
+fn a_missed_hub_tick_is_given_up_at_once_never_more_than_half_a_block_below_the_target() {
     let t0 = Instant::now();
     let mut jb = primed_leg_with(BLOCK, t0);
     // Steady: TARGET queued before every pop.
