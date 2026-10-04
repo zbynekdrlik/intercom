@@ -312,7 +312,7 @@ impl JitterBuffer {
     /// its target (see [`NetworkFill::discard_for_missed_ticks`]); the other policies are unchanged.
     pub fn skip_missed(&mut self, missed: u64, frames: usize) {
         let buffered = self.buffered_frames();
-        if let FillPolicy::Network(fill) = &mut self.policy {
+        if let FillPolicy::Network(fill) = &self.policy {
             let drop = fill.discard_for_missed_ticks(buffered, frames, missed);
             if drop > 0 {
                 for q in &mut self.channels {

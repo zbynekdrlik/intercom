@@ -251,7 +251,7 @@ impl NetworkFill {
     /// discard leaves the depth where the lost pops would have, and no fill from before it was ever
     /// measured, so cancelling the budget would only starve the drift correction when the hub
     /// misses ticks often.
-    pub fn discard_for_missed_ticks(&mut self, fill: usize, frames: usize, missed: u64) -> usize {
+    pub fn discard_for_missed_ticks(&self, fill: usize, frames: usize, missed: u64) -> usize {
         if !self.primed || missed == 0 {
             return 0;
         }

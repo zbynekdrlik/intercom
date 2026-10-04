@@ -38,14 +38,14 @@ pub const CAMBOX_ROLE: &str = "cambox";
 
 /// Roles a participant plays (informational + validated at load; the engine never branches on it).
 const KNOWN_ROLES: &[&str] = &[
-    "cambox",
+    CAMBOX_ROLE,
     "program_ref",
     "cutters",
-    "phones",
+    JANUS_ONLY_ROLE,
     "speakers",
     "line34",
     "program_monitor",
-    "program_out",
+    PROGRAM_OUT_ROLE,
 ];
 
 /// The Janus audiobridge edge config (the optional `[janus]` table, M3a). Absent → the hub runs the
