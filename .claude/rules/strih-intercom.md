@@ -403,8 +403,9 @@ are on issue 1401 (comment 5977982465).
   `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed with every
   restart. Now it is:
   - the 32 ms program-feed target;
-  - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below,
-    within about 1 ms whatever pw-cat's connect time.
+  - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below.
+    A spawn starts within +-2.7 ms of it and is walked in within ~60 s; after that every restart
+    sits within about 1 ms of the same depth, whatever pw-cat's connect time.
   
   Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345 "10-20 ms"
   acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
@@ -464,17 +465,27 @@ are on issue 1401 (comment 5977982465).
       the trapezoid mean of the readings since the last block.
     - **Setpoint = the depth the hold leaves.** `pipe_servo_setpoint(block)` = target + block -
       quantum / 2 = 1792 frames (37.3 ms), derived in code. That is the prime minus half a quantum,
-      the time-average over a read cycle and over where the first read falls in a hub block. So a
-      spawn starts on its setpoint: no walk-in, the same depth after every restart.
+      the time-average over a read cycle, in the middle over where pw-cat's first read falls inside
+      a hub block. One spawn starts at 1664..1920 (+-2.7 ms) depending on that phase; the gentle
+      servo walks it in (up to ~120 single-frame corrections, at most ~9 a second, settled within
+      ~60 s), and every restart then sits at the same depth.
+    - **A dead pw-cat during the hold is noticed (review round 1).** The hold writes nothing, so no
+      write gets the `EPIPE` that respawns a dead child, and `FIONREAD` keeps answering after the
+      reader closed. Every reading therefore first asks `pipe_reader_gone` (a timeout-0 `poll` on
+      the write end; Linux reports `POLLERR` once the pipe has no reader) and returns
+      `BrokenPipe`, so the sink thread respawns.
     - **Never** go back to a setpoint of `PIPE_TARGET_FRAMES` on the pre-write fill: its mean sits
       `(quantum + block) / 2` under the hold level, a +384-frame walk at 47 corrections a second
       after every spawn.
     - Measured on the two-clock bench (`tests/egress_servo_1401.rs`; pw-cat at quantum 1024 vs
       256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact event times):
       - 0 ppm: no corrections after 60 s, true depth within 18 of 1792;
-      - +-50 ppm: <= 3 corrections a second, true depth within 53;
-      - +-200 ppm: rate 9.6 a second (median 10, a bench second straddling two servo windows up to
-        15), true depth within 140;
+      - +-50 ppm: <= 3 corrections a second, true depth within 53 (the servo's own view, i.e.
+        `pipe_depth_frames`, within 62: it runs ~10 further off, the 1 ms readings place each read
+        only within a millisecond);
+      - +-200 ppm: rate 9.6 a second (median 10; up to 15 in one second, the servo's own budget
+        while the 1 s error rides 128..146, just past the knee), true depth within 140, the
+        servo's view within 147;
       - 0 trims, 0 refills, 0 starved reads in every 1 h run;
       - 16 connect delays: first read = the prime every time, <= 9 corrections a second after the
         spawn, settled (the servo's measured depth within 20, the true within 22) by 60 s, all 16
@@ -482,8 +493,9 @@ are on issue 1401 (comment 5977982465).
       - the residual is the 1 ms readings placing each read only within a millisecond, on top of
         the servo's 16-frame band.
   - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims`, the last
-    `pipe_fill_frames` (measured before the last write; it rides pw-cat's quantum reads, the
-    setpoint -/+ ~384, so never judge the depth from it), `pipe_start_holds`, `pipe_servo_drops`,
+    `pipe_fill_frames` (measured before the last write; it rides pw-cat's quantum reads, from the
+    held depth - 640 to the depth + 384, so never judge the depth from it), `pipe_start_holds`,
+    `pipe_servo_drops`,
     `pipe_servo_repeats`, `pipe_depth_frames` (the servo's 1 s time-weighted mean) and
     `pipe_setpoint_frames` (1792). `tx_blocks` counts written blocks only (a corrected block is one).
   - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
@@ -509,16 +521,21 @@ are on issue 1401 (comment 5977982465).
     - `pw-top -b` on strih-lx: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
       row's driver (the MiniFuse for the cans);
     - `/api/state` -> `program_out` and `cutters` `local_audio` (egress step 2):
-      `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-60 of it, and within +-20 on the
-      program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
+      `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-70 of it on the cans (a 50 ppm
+      MiniFuse reads ~62 off in the servo's own view, the true depth ~10 closer), and within +-20
+      on the program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
       reading) anywhere in depth - 640 .. depth + 384, ~1000..2350 (it rides pw-cat's 1024-frame
       reads); `pipe_refills` 0 and `pipe_trims` flat;
       `pipe_start_holds` grows only at a pw-cat (re)spawn (pw-cat's connect time / 5.33 ms
       blocks each), together with `spawns`;
     - over >= 1 h: `pipe_servo_drops - pipe_servo_repeats` grows at the sink's drift and no
-      faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0); a jump of
-      hundreds within a minute is a burst, a finding. Note each `pw-cat` row's driver in `pw-top`
-      (the MiniFuse for the cans);
+      faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0). The first minute
+      after each pw-cat (re)spawn adds the walk-in, up to ~120 corrections (see the setpoint
+      above); outside that, a jump of hundreds within a minute is a burst, a finding. Note each
+      `pw-cat` row's driver in `pw-top` (the MiniFuse for the cans);
+    - a `pipe_start_holds` that keeps climbing between spawns means pw-cat is not reading; the
+      journal then shows `local-audio: ... pw-cat exited — respawning` once it dies (the hold
+      notices a dead child, see above);
     - the status line shows no `missed=` while camboxes are off, and `tx_dropped` stays 0 on every
       leg; an off cambox shows as `unresolved_discards` rising (or `ip -s neigh show <ip>`
       INCOMPLETE/FAILED), not in the hub.
@@ -530,12 +547,16 @@ are on issue 1401 (comment 5977982465).
     once). Step 2: `tests/egress_servo_1401.rs`:
     - the setpoint and its derivation, `servo_step` == the pop servo, `stretch_interleaved`, the
       bytes per plan;
-    - the start hold, pure and on a real pipe;
+    - the start hold, pure and on a real pipe, and a reader closed during the hold (`BrokenPipe`);
+    - a guard forgetting the servo's pending budget, the servo measuring from pw-cat's first read
+      (both ways the hold ends);
     - the facet counters, the sink-thread `recv_timeout` / `sample_fill` anchor;
     - the two-clock bench (the 16 spawns, 0 / +-50 / +-200 ppm for 1 h; < 1 s in a debug build).
+      It bounds the TRUE depth (from exact event times) and, separately, the depth the servo
+      itself measures (the trapezoids of the hub's own readings).
     
-    Its bench seconds are not the servo's 1 s windows, so a per-second bound allows a straddled
-    second, the ingress bench's lesson.
+    Its per-second correction counts are bench seconds, not the servo's windows. At 200 ppm the
+    peak of 15 is the servo's own budget past the knee, not a straddle.
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
     same change, which had grown past the ~300-line budget); `main()` only builds the
     `BlockLoop` and spawns it.
