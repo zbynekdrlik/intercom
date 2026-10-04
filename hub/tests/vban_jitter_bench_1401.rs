@@ -101,7 +101,8 @@ struct Scenario {
     base_delay_ms: f64,
     /// Every hub tick wakes up uniformly 0..this late.
     hub_late_ms: f64,
-    /// One missed hub tick (`MissedTickBehavior::Skip` loses a block) every this many seconds.
+    /// One LOST hub tick (a block lost on every output; since design 5980775411 only the part of a
+    /// late wake beyond the four ticks the block loop runs late) every this many seconds.
     hub_skip_every_s: Option<f64>,
     stall: Option<Stall>,
     secs: f64,
@@ -253,7 +254,7 @@ fn run(sc: &Scenario) -> Outcome {
             }
             next = sender.next();
         }
-        // The block loop gives up a missed tick's block before the pop, as `main.rs` does.
+        // The block loop gives up a lost tick's block before the pop, as `main.rs` does.
         let discard = ctl.discard_for_missed_ticks(fill, BLOCK, missed);
         fill -= discard;
         out.discarded += discard;
