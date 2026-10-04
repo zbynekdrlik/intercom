@@ -203,8 +203,14 @@ fn the_real_time_thread_publishes_the_status_and_tokio_writes_it_to_the_journal(
         "the real-time thread never writes the status line itself"
     );
     assert!(body.contains("live_tx.send("), "it publishes the snapshot");
-    assert!(
-        src.contains("status_rx.borrow_and_update().status_line()"),
-        "a tokio task logs every published snapshot's status line"
-    );
+    // The tokio task only clones the snapshot's Arc under the watch channel's read lock and
+    // formats the line after it, so the real-time thread's send never waits on the formatting.
+    let clone = src
+        .find("let snap = status_rx.borrow_and_update().clone();")
+        .expect("a tokio task takes every published snapshot");
+    let line = src
+        .find("let line = snap.status_line();")
+        .expect("and formats its status line after the borrow");
+    assert!(clone < line);
+    assert!(!src.contains("borrow_and_update().status_line()"));
 }
