@@ -176,7 +176,7 @@ fn lost_and_caught_up_hub_ticks_show_on_api_state_and_only_the_lost_on_the_statu
     let line = hs.status_line();
     assert!(line.contains(" lost=3"), "got: {line}");
     assert!(
-        line.starts_with("intercom-hub: status participants=2 underruns=0 overruns=0"),
+        line.starts_with("intercom-hub: status participants=3 underruns=0 overruns=0"),
         "got: {line}"
     );
     let v = serde_json::to_value(&hs).unwrap();
