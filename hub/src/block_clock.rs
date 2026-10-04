@@ -28,8 +28,9 @@ use std::time::Duration;
 /// The most missed ticks one wake runs late: 4 blocks (21.3 ms at 256 frames / 48 kHz, design
 /// 5980775411). A cambox VBAN leg trims above its 3-block target plus 5 blocks of headroom; the
 /// pop of the last tick before a stall left it one block under the target, so the blocks that
-/// arrive while the loop is up to 4 ticks late (plus the current one) reach that cap at most.
-/// Beyond this the part past the first four is given up instead (`TickBatch::lost`).
+/// arrive while the loop is up to 4 ticks late (plus the current one) reach exactly that cap:
+/// arrival jitter can trim it from about 24 ms late (the bench). Beyond this the part past the
+/// first four is given up instead (`TickBatch::lost`).
 pub const CATCHUP_MAX_BLOCKS: u64 = 4;
 
 /// What one wake of the block loop does with the ticks that are due.

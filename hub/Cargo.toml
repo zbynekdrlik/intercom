@@ -31,8 +31,9 @@ ndi = ["dep:libloading"]
 [dependencies]
 # The ONE shared VBAN codec (byte-identical to the appliance's src/vban.rs re-export).
 intercom-vban = { path = "../vban" }
-# axum `ws` = the /ws live-state push; tokio `net`+`time`+`sync` = the UDP adapter + block ticker +
-# the watch channel the http layer reads (the bkshading service skeleton).
+# axum `ws` = the /ws live-state push; tokio `net`+`time`+`sync` = the UDP adapter + the output
+# re-resolve / Janus keepalive timers + the watch channel the http layer reads (the bkshading service
+# skeleton). The block loop itself runs on its own OS thread, not on tokio's timer (issue 1401).
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive", "rc"] }   # rc: Serialize for Arc<HubState> (the /api/state Json body)
@@ -58,7 +59,8 @@ jpeg-encoder = "0.7"
 opus = "0.4"
 tokio-stream = "0.1"
 libloading = { version = "0.8", optional = true }
-# The FIONREAD ioctl that measures a pw-cat playback pipe's fill before every write (issue 1401).
-# std has no pipe-fill query; libc is already in the dependency graph through tokio, so nothing
-# new is downloaded (rustix was rejected: a new crate for one call).
+# The FIONREAD ioctl that measures a pw-cat playback pipe's fill before every write, and the
+# hub-mix thread's sched_setscheduler + clock_nanosleep (issue 1401). std has none of these; libc
+# is already in the dependency graph through tokio, so nothing new is downloaded (rustix was
+# rejected: a new crate for one call).
 libc = "0.2"

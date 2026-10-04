@@ -10,7 +10,7 @@
 //!
 //! - a short underflow is bridged with a whole silent frame, then the ring re-primes to its target
 //!   (never a partial zero-splice);
-//! - a fill that drifts (a missed mix tick, a rate offset) is pulled back by a gentle 1 ms/s
+//! - a fill that drifts (a lost mix tick, a rate offset) is pulled back by a gentle 1 ms/s
 //!   servo, long before either edge case below;
 //! - an overflow trims the oldest samples back to the target;
 //! - one packet per tick keeps the RTP timestamps contiguous by construction.
@@ -95,7 +95,8 @@ enum ServoAction {
 /// The ring between the block loop (push, 256 frames every 5.33 ms) and the paced sender (pop,
 /// 960 frames every 20 ms). Mono 48 kHz samples.
 ///
-/// The two sides run on the same monotonic clock, but a missed mix tick loses a block and any
+/// The two sides run on the same monotonic clock, but a lost mix tick (since issue 1401 only the
+/// part of a late wake beyond the four ticks the hub-mix thread runs late) loses a block and any
 /// rounding in the block period is a slow rate offset. So a gentle fill servo keeps the pre-pop
 /// fill inside a band: after [`SERVO_TICKS`] pops in a row above `target + FRAME/2` it drops
 /// [`SERVO_STEP_FRAMES`]; after as many below `target - FRAME/4` it repeats 1 ms inside the frame
