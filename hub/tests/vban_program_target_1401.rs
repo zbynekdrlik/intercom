@@ -91,8 +91,11 @@ fn the_program_feed_target_covers_the_measured_gap_plus_one_block() {
         "target {target_us} us must cover the 19.4 ms gap + one block"
     );
     assert_eq!(VBAN_PROGRAM_TARGET_BLOCKS, 6, "32 ms");
-    // the same five blocks of headroom above the target as the cambox legs
-    assert!(VBAN_PROGRAM_CAP_BLOCKS >= VBAN_PROGRAM_TARGET_BLOCKS + 5);
+    assert_eq!(
+        VBAN_PROGRAM_CAP_BLOCKS - VBAN_PROGRAM_TARGET_BLOCKS,
+        VBAN_CAP_BLOCKS - VBAN_TARGET_BLOCKS,
+        "the same headroom above the target as the cambox legs"
+    );
     assert_eq!(VBAN_TARGET_BLOCKS, 3, "the camboxes keep 16 ms");
 }
 
