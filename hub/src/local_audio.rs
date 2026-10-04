@@ -43,10 +43,11 @@ use serde::Serialize;
 use crate::pipe_fill::{stretch_interleaved, PipeFillControl, PipeServoDepth};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
-// The pipe's fill controller lives in `pipe_fill`; these keep their `local_audio::` paths.
+// The pipe's fill controller (and the graph quantum it is built on) lives in `pipe_fill`; these
+// keep their `local_audio::` paths.
 pub use crate::pipe_fill::{
     pipe_fill_plan, PipeFillPlan, PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL,
-    PIPE_TARGET_FRAMES,
+    PIPE_TARGET_FRAMES, PW_GRAPH_BURST_FRAMES,
 };
 
 /// The PCM sample format `pw-cat` speaks with the hub (signed 16-bit LE, matching the VBAN PCM16 the
@@ -57,11 +58,6 @@ pub const PW_CAT_FORMAT: &str = "s16";
 /// the feeder's best-effort `try_send` DROPS THE NEW block (it never evicts a queued one and never
 /// blocks the mix loop) — a dropped ~5 ms block is tolerable program jitter; a stalled mix loop is not.
 const EGRESS_QUEUE_BLOCKS: usize = 64;
-
-/// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
-/// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
-/// bursts of this many frames, whatever block size the hub pops.
-pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
 
 /// The node latency (in frames at `--rate`) the capture child asks PipeWire for: the MiniFuse graph
 /// quantum itself ([`PW_GRAPH_BURST_FRAMES`], 1024). A smaller request pulls the WHOLE graph down to
@@ -364,21 +360,24 @@ pub struct LocalAudioFacet {
     /// Blocks dropped because the playback pipe held more than the trim mark (4096 frames).
     pub pipe_trims: u64,
     /// The playback pipe's fill measured before the last write, in frames. It rides pw-cat's
-    /// quantum reads (about the setpoint -/+ 384 at the 256-frame block), so read the servo's
-    /// `pipe_depth_frames` for the held depth.
+    /// quantum reads (from about the held depth - 640 to the depth + 384 at the 256-frame block),
+    /// so read the servo's `pipe_depth_frames` for the held depth.
     pub pipe_fill_frames: u64,
     /// Blocks dropped by the start hold: written while pw-cat had not read since its spawn, so
-    /// every spawn starts at the same depth (issue 1401). A few per spawn; never a running count.
+    /// every spawn starts at the same depth (issue 1401). It grows only around a spawn, by pw-cat's
+    /// connect time / one hub block; a count that keeps climbing means pw-cat is not reading.
     pub pipe_start_holds: u64,
     /// Single frames the pipe's drift servo dropped (the hub's clock runs ahead of the sink's).
     pub pipe_servo_drops: u64,
     /// Single frames the pipe's drift servo repeated (the sink's clock runs ahead of the hub's).
     pub pipe_servo_repeats: u64,
-    /// The servo's mean time-weighted pipe fill over its last 1 s window, in frames: within a few
-    /// tens of frames of `pipe_setpoint_frames` (0 before pw-cat's first read).
+    /// The servo's mean time-weighted pipe fill over its last complete 1 s window, in frames:
+    /// within a few tens of frames of `pipe_setpoint_frames` once settled (up to ~70 off at a
+    /// 50 ppm sink). 0 until the first window after pw-cat's first read completes; after a
+    /// respawn it keeps the previous child's value until the new child's first read.
     pub pipe_depth_frames: u64,
     /// The depth the servo holds: the time-average the start hold leaves, 1792 frames at the
-    /// 256-frame block (0 before pw-cat's first read).
+    /// 256-frame block. 0 until pw-cat's first read after the hub start.
     pub pipe_setpoint_frames: u64,
 }
 

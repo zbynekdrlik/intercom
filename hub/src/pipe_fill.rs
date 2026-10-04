@@ -33,8 +33,13 @@
 
 use std::time::Duration;
 
-use crate::local_audio::PW_GRAPH_BURST_FRAMES;
 use crate::vban_jitter::{stretch_block, NetworkFill, ServoStep};
+
+/// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
+/// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
+/// bursts of this many frames, whatever block size the hub pops, and a `pw-cat --playback` child
+/// reads its stdin pipe in quanta of this size.
+pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
 
 /// The fill a `pw-cat --playback` stdin pipe is primed to (issue 1401, 4.10.2026): two graph quanta,
 /// 2048 frames (42.7 ms at 48 kHz). pw-cat `fread`s a whole quantum ([`PW_GRAPH_BURST_FRAMES`])
@@ -57,10 +62,13 @@ pub const PIPE_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 /// The servo's setpoint: the time-average depth the start hold leaves, the prime minus half a
 /// graph quantum. pw-cat's first read finds the prime ([`PIPE_TARGET_FRAMES`] + one hub block) and
 /// takes a whole quantum; the hub then writes the quantum back one block at a time before the next
-/// read, so averaged over a read cycle (and over where the read falls inside a hub block) the pipe
-/// holds the prime minus half a quantum: 2048 + 256 - 512 = 1792 frames (37.3 ms) at the 256-frame
-/// hub block. Holding the servo there means a spawn starts on its setpoint: no walk after a
-/// restart, and the same depth after every restart.
+/// read. Averaged over a read cycle, one spawn's pipe holds between the prime minus a quantum plus
+/// 1.5 and 2.5 blocks, depending on where pw-cat's first read falls inside a hub block (1664..1920
+/// frames); the middle of that, over every such phase, is the prime minus half a quantum: 2048 +
+/// 256 - 512 = 1792 frames (37.3 ms) at the 256-frame hub block. A spawn therefore starts within
+/// half a block (+-128 frames, +-2.7 ms) of the setpoint, gets walked in by the gentle part of the
+/// servo (at most ~9 corrections a second, settled within ~60 s), and every restart then sits at
+/// the same depth.
 pub const fn pipe_servo_setpoint(block_frames: usize) -> usize {
     (PIPE_TARGET_FRAMES + block_frames).saturating_sub(PW_GRAPH_BURST_FRAMES / 2)
 }
