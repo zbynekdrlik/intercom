@@ -705,6 +705,31 @@ mod tests {
     }
 
     #[test]
+    fn a_sender_socket_never_blocks() {
+        // Issue 1401 (4.10.2026): one blocking socket for every cambox stalled the block loop once
+        // a dead cambox's unresolved-neighbour queue filled its send buffer (16929 missed ticks).
+        // Every sender socket is non-blocking: with nothing to read, recv_from returns WouldBlock
+        // at once. A blocking socket would wait out the 2 s timeout first.
+        let sender = VbanSender::bind_ephemeral().unwrap();
+        sender
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        let started = Instant::now();
+        let err = sender
+            .socket
+            .recv_from(&mut buf)
+            .expect_err("nothing was sent to it");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "returned at once, not after the timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn vban_loopback_demux_and_foreign_ignored() {
         // Our sender → the receiver socket on a RANDOM UDP port → stream-name demux; a foreign
         // name is ignored (returns None), exactly like the cambox receiver.
@@ -726,16 +751,22 @@ mod tests {
             interleaved: &interleaved,
             frames: 256,
         };
-        sender.send_block(addr, &known_block).unwrap();
-        sender
-            .send_block(
-                addr,
-                &OutBlock {
-                    stream_name: "cam9",
-                    ..known_block
-                },
-            )
-            .unwrap();
+        assert_eq!(
+            sender.send_block(addr, &known_block).unwrap(),
+            SendOutcome::Sent
+        );
+        assert_eq!(
+            sender
+                .send_block(
+                    addr,
+                    &OutBlock {
+                        stream_name: "cam9",
+                        ..known_block
+                    },
+                )
+                .unwrap(),
+            SendOutcome::Sent
+        );
 
         let mut buf = [0u8; 8192];
         let mut got_known = false;
