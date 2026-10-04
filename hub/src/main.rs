@@ -32,13 +32,16 @@ use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
     resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
 };
+use intercom_hub::vban_jitter::{VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS};
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
 
-/// Jitter buffer depth = 8 blocks per participant (older samples drop as an overrun).
-const JITTER_CAP_BLOCKS: usize = 8;
+/// Jitter buffer cap = 8 blocks per participant (older samples drop as an overrun): the VBAN legs'
+/// cap ([`VBAN_CAP_BLOCKS`], issue 1401), also used for the plain buffers of participants with no
+/// ingress.
+const JITTER_CAP_BLOCKS: usize = VBAN_CAP_BLOCKS;
 /// How often the output hosts are re-resolved off the hot path (DHCP lease moves).
 const OUTPUT_RESOLVE_REFRESH_S: u64 = 60;
 /// The fixed RTP SSRC of the hub's Janus plain-RTP leg ("STRL"), stable for a run (M3a).
@@ -328,6 +331,8 @@ async fn main() -> Result<()> {
                         rx_stats[id].overruns = b.overruns;
                         rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
                         rx_stats[id].level_dbfs = b.last_level_dbfs();
+                        // The VBAN leg's target / depth / servo corrections (issue 1401).
+                        rx_stats[id].jitter = b.network_stats().map(Into::into);
                         if let Some(slot) = rate_stats.get(id) {
                             rx_stats[id].sample_rate = slot.sample_rate();
                             rx_stats[id].rate_rejects = slot.rate_rejects();
@@ -459,8 +464,11 @@ async fn main() -> Result<()> {
 
 /// One input buffer per participant (issue 1345, 24.9.2026). The local PipeWire captures (the
 /// MiniFuse talkback) get the target-fill ring that absorbs pw-cat's 1024-frame bursts; the generic
-/// 2048-frame no-prefill buffer spliced ~8x/s. Every buffer fans a mono packet into ch2 for a
-/// participant with >= 2 input channels (the camboxes send mono VBAN).
+/// 2048-frame no-prefill buffer spliced ~8x/s. Every VBAN leg (the FOH program feed, the camboxes'
+/// talkback) gets the target-fill buffer with the drift servo (issue 1401: the no-target buffer
+/// zero-padded a block whenever a packet was a little late — dropouts in the strih program audio).
+/// Every buffer fans a mono packet into ch2 for a participant with >= 2 input channels (the
+/// camboxes send mono VBAN).
 fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
     let block_frames = matrix.hub.block_frames;
     let local_capture_ids: std::collections::HashSet<usize> = matrix
@@ -481,6 +489,11 @@ fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
                 JitterBuffer::local_capture(
                     block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
                     LOCAL_CAPTURE_TARGET_FRAMES,
+                )
+            } else if p.adapter == intercom_hub::matrix::ADAPTER_VBAN {
+                JitterBuffer::vban_leg(
+                    block_frames * JITTER_CAP_BLOCKS,
+                    block_frames * VBAN_TARGET_BLOCKS,
                 )
             } else {
                 JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)

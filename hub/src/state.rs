@@ -2,7 +2,8 @@
 //!
 //! Per participant: name/role/adapter/host plus the live counters a dev1 watchdog reads — rx/tx
 //! packets, jitter underruns/overruns, the age of the last received packet, and the input level in
-//! dBFS. The whole snapshot is rebuilt each block-status tick from the jitter buffers.
+//! dBFS. A VBAN leg also carries its jitter-buffer facet (target, depth, servo corrections, issue
+//! 1401). The whole snapshot is rebuilt each block-status tick from the jitter buffers.
 
 use serde::Serialize;
 
@@ -10,6 +11,39 @@ use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
+use crate::vban_jitter::NetworkFillStats;
+
+/// A VBAN leg's jitter buffer as `/api/state` shows it (issue 1401): the target and the measured
+/// depth in frames (the hub `sample_rate` turns them into ms), and how often the drift servo
+/// dropped or repeated a single frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct JitterFacet {
+    /// The target pre-pop fill.
+    pub target_frames: usize,
+    /// The mean pre-pop fill over the last 1 s window (0 before the first window).
+    pub depth_frames: usize,
+    /// The lowest pre-pop fill in that window (the underrun margin is this minus one block).
+    pub depth_min_frames: usize,
+    /// Single frames dropped because the fill sat high (the sender runs fast).
+    pub servo_drops: u64,
+    /// Single frames repeated because the fill sat low (the sender runs slow).
+    pub servo_repeats: u64,
+    /// Audio is flowing (false while priming: before the first packet or after an underrun).
+    pub primed: bool,
+}
+
+impl From<NetworkFillStats> for JitterFacet {
+    fn from(s: NetworkFillStats) -> Self {
+        JitterFacet {
+            target_frames: s.target_frames,
+            depth_frames: s.depth_frames,
+            depth_min_frames: s.depth_min_frames,
+            servo_drops: s.servo_drops,
+            servo_repeats: s.servo_repeats,
+            primed: s.primed,
+        }
+    }
+}
 
 /// Per-participant runtime counters, gathered from its jitter buffer + tx side each tick.
 #[derive(Debug, Clone, Copy, Default)]
@@ -30,6 +64,8 @@ pub struct RuntimeStats {
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
     /// `program_out` sink + the talkback capture (issue 1344).
     pub local_audio: Option<LocalAudioFacet>,
+    /// The VBAN leg's jitter-buffer facet (issue 1401), `None` for the other participants.
+    pub jitter: Option<JitterFacet>,
 }
 
 /// One participant's serialized state.
@@ -61,6 +97,10 @@ pub struct ParticipantState {
     /// `pipewire`-adapter participant — omitted from the JSON for every other participant (issue 1344).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_audio: Option<LocalAudioFacet>,
+    /// The VBAN leg's jitter buffer (target / depth / servo drops + repeats, issue 1401), present
+    /// only for a VBAN participant — omitted from the JSON for every other participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<JitterFacet>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -102,6 +142,7 @@ impl HubState {
                     rate_rejects: vban.then_some(s.rate_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
+                    jitter: s.jitter.filter(|_| vban),
                 }
             })
             .collect();
@@ -116,12 +157,13 @@ impl HubState {
         }
     }
 
-    /// A one-line status summary for the periodic log (a dev1 watchdog greps it): worst underruns +
-    /// the participant levels, so a dead/underrunning leg is visible between E2E runs. Dropped
-    /// wrong-rate VBAN packets are named as `rate_rejects=N` when there are any (issue 1345), so a
+    /// A one-line status summary for the periodic log (a dev1 watchdog greps it): the underruns and
+    /// overruns summed over every participant, each naming the leg with the most (issue 1401:
+    /// `underruns=220(fohabl)`), + the participant levels, so a dead/underrunning leg is visible
+    /// between E2E runs. The VBAN legs' drift-servo corrections show as `servo=<drops>/<repeats>`
+    /// and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue 1345) when there are any, so a
     /// rejected stream (which reads as silent) stays explained after its one warn scrolls away.
     pub fn status_line(&self) -> String {
-        let total_underruns: u64 = self.participants.iter().map(|p| p.underruns).sum();
         let total_rate_rejects: u64 = self
             .participants
             .iter()
@@ -138,13 +180,44 @@ impl HubState {
         } else {
             String::new()
         };
+        let (drops, repeats) = self
+            .participants
+            .iter()
+            .filter_map(|p| p.jitter)
+            .fold((0u64, 0u64), |(d, r), j| {
+                (d + j.servo_drops, r + j.servo_repeats)
+            });
+        let servo = if drops + repeats > 0 {
+            format!(" servo={drops}/{repeats}")
+        } else {
+            String::new()
+        };
         format!(
-            "intercom-hub: status participants={} underruns={}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{} {}",
             self.participants.len(),
-            total_underruns,
+            self.total_naming_worst(|p| p.underruns),
+            self.total_naming_worst(|p| p.overruns),
+            servo,
             rejects,
             levels.join(" ")
         )
+    }
+
+    /// `N` summed over the participants, followed by `(name)` of the one with the most when `N` > 0
+    /// (the first of a tie). The total keeps leading, so a parser of the bare number still works.
+    fn total_naming_worst(&self, count: impl Fn(&ParticipantState) -> u64) -> String {
+        let total: u64 = self.participants.iter().map(&count).sum();
+        // The FIRST participant with the highest count (`max_by_key` would name the last of a tie).
+        let mut worst: Option<&ParticipantState> = None;
+        for p in &self.participants {
+            if worst.is_none_or(|w| count(p) > count(w)) {
+                worst = Some(p);
+            }
+        }
+        match worst {
+            Some(p) if total > 0 => format!("{total}({})", p.name),
+            _ => total.to_string(),
+        }
     }
 }
 
@@ -196,6 +269,7 @@ out_channels = 4
                 rate_rejects: 0,
                 janus: None,
                 local_audio: None,
+                jitter: None,
             },
             RuntimeStats::default(),
         ];

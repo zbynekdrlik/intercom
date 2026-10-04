@@ -28,4 +28,5 @@ pub mod mulaw;
 pub mod ndi_video;
 pub mod state;
 pub mod vban_io;
+pub mod vban_jitter;
 pub mod vban_rate;
