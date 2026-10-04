@@ -8,7 +8,8 @@
 //! These tests pin the VBAN-leg policy through the public API:
 //! - the prefill, and every prime starting exactly at the target;
 //! - one whole silent block per underrun, then the re-prime;
-//! - a missed hub tick given up at once;
+//! - a lost hub tick (the part of a late wake beyond the four ticks the block loop runs late)
+//!   given up at once;
 //! - the overrun trim to the target;
 //! - the stale / never-received / muted-cambox / stall rules, a sender changing its channel count;
 //! - the mono cambox fan-out;
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use intercom_hub::vban_io::{BufferKind, DecodedAudio, JitterBuffer, STALE_STREAM_MS};
 use intercom_hub::vban_jitter::{
-    missed_ticks, servo_corrections, stretch_block, NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES,
+    servo_corrections, stretch_block, NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES,
     SERVO_GENTLE_DIV, SERVO_KNEE_FRAMES, SERVO_MIN_SPACING_FRAMES, SERVO_STEEP_DIV,
     SERVO_WINDOW_FRAMES, VBAN_CAP_BLOCKS, VBAN_TARGET_BLOCKS,
 };
@@ -120,28 +121,6 @@ fn the_servo_budget_is_gentle_below_the_knee_steep_past_it_and_never_the_whole_e
         prev = n;
     }
 }
-
-#[test]
-fn missed_ticks_counts_whole_periods_past_the_first() {
-    let p = Duration::from_nanos(5_333_333);
-    assert_eq!(missed_ticks(Duration::ZERO, p), 0);
-    assert_eq!(missed_ticks(p, p), 0, "consecutive ticks");
-    assert_eq!(missed_ticks(p * 2, p), 1);
-    assert_eq!(missed_ticks(p * 5, p), 4);
-    assert_eq!(
-        missed_ticks(p * 7 / 5, p),
-        0,
-        "rounded to the nearest period"
-    );
-    assert_eq!(missed_ticks(p * 13 / 5, p), 2);
-    assert_eq!(
-        missed_ticks(p * 3, Duration::ZERO),
-        0,
-        "no period, no count"
-    );
-}
-
-// --- prefill, underrun, re-prime, overrun -------------------------------------------------------
 
 #[test]
 fn a_vban_leg_prefills_to_the_target_before_the_first_pop() {
