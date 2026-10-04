@@ -193,7 +193,7 @@ fn a_new_setpoint_moves_the_cap_with_it_and_drops_nothing() {
 fn a_gap_across_a_stall_never_reaches_the_adaptive_target() {
     // A FOH outage longer than the stale limit is a stall: the leg starts over, and the silence
     // before the stream came back is no inter-arrival gap. Counted as one, a 2 s outage would hold
-    // the program feed at the 64 ms cap for about 10 min and above its floor for about 70 min.
+    // the program feed at the 64 ms cap for about 10 min and above its floor for about 60 min.
     let t0 = Instant::now();
     let mut jb = JitterBuffer::vban_leg(VBAN_PROGRAM_CAP_BLOCKS * BLOCK, FLOOR)
         .with_adaptive_target("fohabl", BLOCK, RATE);
