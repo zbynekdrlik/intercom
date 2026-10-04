@@ -26,6 +26,13 @@ DynamicUser=yes
 # never appears here — only the file path (issue 1345 M3 follow-up).
 LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
 NoNewPrivileges=true
+# issue 1401 (design 5980775411): the hub's block loop runs on ONE thread, "hub-mix", at SCHED_FIFO
+# priority 10, so contention on the box no longer makes it miss ticks (a lost block on every
+# output). This grant lets that thread ask for it (sched_setscheduler on itself only; every other
+# hub thread stays SCHED_OTHER). Kept in sync with intercom/hub/src/mix_thread.rs MIX_RT_PRIORITY
+# (a hub test pins it). Without the grant the thread logs one warning and runs SCHED_OTHER. The
+# OBS boxes' "rtprio stays OFF" rule (issue 1357) is about OBS's render tick, not this daemon.
+LimitRTPRIO=10
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

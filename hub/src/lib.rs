@@ -15,6 +15,8 @@
 //! Interkom video, and the cut-over are M2/M3/M4 — those participants are declared in the matrix
 //! with `adapter = "none"` and are computed by the engine but not yet delivered.
 
+pub mod adaptive_target;
+pub mod block_clock;
 pub mod engine;
 pub mod fir;
 pub mod http;
@@ -25,6 +27,7 @@ pub mod janus_rtp;
 pub mod janus_sender;
 pub mod local_audio;
 pub mod matrix;
+pub mod mix_thread;
 pub mod mulaw;
 pub mod ndi_video;
 pub mod pipe_fill;
