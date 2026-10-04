@@ -33,6 +33,10 @@
 //! - **Overrun.** Above the cap the OLDEST audio is dropped back down to the target (not just to the
 //!   cap, where the next packet would overrun again).
 //!
+//! The same drift servo ([`NetworkFill::servo_step`]) also keeps the `pw-cat` egress pipes at their
+//! depth: there the fill is measured outside the controller ([`crate::pipe_fill`], issue 1401), so
+//! there is one drift policy for every hub audio path.
+//!
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557), and
 //! the hours-long two-clock bench runs on frame counts alone.
 
@@ -149,6 +153,19 @@ pub enum PopPlan {
     /// `take` frames and output one block: `take` is the block size, one more for a servo drop, one
     /// fewer for a servo repeat (the block is then [`stretch_block`]ed to size).
     Audio { skip: usize, take: usize },
+}
+
+/// What the drift servo does to one block ([`NetworkFill::servo_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServoStep {
+    /// No correction on this block.
+    Keep,
+    /// The fill sits high: one frame of audio comes out of this block (a pop takes one more frame,
+    /// an egress write puts one fewer into its pipe).
+    Drop,
+    /// The fill sits low: one frame of audio is added to this block (a pop takes one fewer frame,
+    /// an egress write puts one more into its pipe).
+    Repeat,
 }
 
 /// The VBAN leg's live fill numbers for `/api/state` (issue 1401).
@@ -302,27 +319,44 @@ impl NetworkFill {
             self.restart_window();
             return PopPlan::Silent { ran_dry: true };
         }
+        let take = match self.servo_step(fill, frames) {
+            ServoStep::Keep => frames,
+            ServoStep::Drop => frames + 1,
+            ServoStep::Repeat => frames - 1,
+        };
+        PopPlan::Audio { skip, take }
+    }
+
+    /// The drift servo alone: add one block's fill to the 1 s window and decide this block's
+    /// correction. [`NetworkFill::plan_pop`] runs exactly this once its leg is primed. A buffer
+    /// whose fill is measured outside this controller uses it directly (the `pw-cat` egress pipes,
+    /// [`crate::pipe_fill::PipeFillControl`], issue 1401). The caller owns any prime / underrun
+    /// handling, and [`NetworkFill::restart`] forgets the window and the pending correction.
+    ///
+    /// `fill` is the fill this block sees, `frames` the block. A drop needs `fill > frames`, a
+    /// repeat `frames > 1`, the same guards as a pop.
+    pub fn servo_step(&mut self, fill: usize, frames: usize) -> ServoStep {
         self.observe(fill, frames);
         self.since_correction = self.since_correction.saturating_add(frames);
-        if self.budget > 0 && self.since_correction >= self.interval {
-            let take = match self.correction {
-                Correction::Drop if fill > frames => {
-                    self.servo_drops += 1;
-                    frames + 1
-                }
-                Correction::Repeat if frames > 1 => {
-                    self.servo_repeats += 1;
-                    frames - 1
-                }
-                _ => frames,
-            };
-            if take != frames {
-                self.budget -= 1;
-                self.since_correction = 0;
-            }
-            return PopPlan::Audio { skip, take };
+        if self.budget == 0 || self.since_correction < self.interval {
+            return ServoStep::Keep;
         }
-        PopPlan::Audio { skip, take: frames }
+        let step = match self.correction {
+            Correction::Drop if fill > frames => {
+                self.servo_drops += 1;
+                ServoStep::Drop
+            }
+            Correction::Repeat if frames > 1 => {
+                self.servo_repeats += 1;
+                ServoStep::Repeat
+            }
+            _ => ServoStep::Keep,
+        };
+        if step != ServoStep::Keep {
+            self.budget -= 1;
+            self.since_correction = 0;
+        }
+        step
     }
 
     /// Add one primed pre-pop fill to the window; at the window's end plan the next second's

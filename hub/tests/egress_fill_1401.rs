@@ -158,7 +158,9 @@ fn a_four_channel_sink_measures_its_fill_in_four_channel_frames() {
     );
     let report = sink.write_block(&block).unwrap();
     assert_eq!(report.fill_frames, PIPE_TARGET_FRAMES + BLOCK);
-    assert_eq!(report.plan, PipeFillPlan::Write);
+    // Nothing read the pipe since the prime: the start hold drops the block (egress step 2,
+    // ROZHODNUTÉ 5979509439; the hold itself is pinned in egress_servo_1401.rs).
+    assert_eq!(report.plan, PipeFillPlan::StartHold);
 }
 
 #[test]

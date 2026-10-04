@@ -13,9 +13,12 @@
 //! `lv1-strih` VBAN blocks the engine already sums via the matrix points) is written to a PipeWire
 //! playback stream targeted at the operator's `strih-program` null sink. OBS captures
 //! `strih-program.monitor` as its `ASIO zvuk` program input. The same sink serves the cutters'
-//! MiniFuse cans. Every write first measures the stdin pipe's fill ([`pipe_fill_bytes`]) and keeps
-//! it at [`PIPE_TARGET_FRAMES`] ([`pipe_fill_plan`], issue 1401): pw-cat reads a whole graph quantum
-//! per cycle, so a pipe the hub let drain would otherwise xrun on every cycle until a restart.
+//! MiniFuse cans. Every write first measures the stdin pipe's fill ([`pipe_fill_bytes`]), and the
+//! sink thread also reads it about every millisecond between blocks. [`crate::pipe_fill`] decides
+//! each write from those readings (issue 1401): the refill and trim guards (pw-cat reads a whole
+//! graph quantum per cycle, so a pipe the hub let drain would otherwise xrun on every cycle until a
+//! restart), the start hold (every spawn starts at the same depth) and the drift servo on the
+//! time-weighted fill (the sink's clock is not the hub's).
 //!
 //! INGRESS ([`PwCatSource`]): the MiniFuse 4 capture (the strih operator's talkback mic) is read as
 //! PCM and pushed into the `cutters` participant's [`JitterBuffer`] the engine already pops into the
@@ -30,14 +33,22 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::pipe_fill::{stretch_interleaved, PipeFillControl, PipeServoDepth};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
+
+// The pipe's fill controller (and the graph quantum it is built on) lives in `pipe_fill`; these
+// keep their `local_audio::` paths.
+pub use crate::pipe_fill::{
+    pipe_fill_plan, PipeFillPlan, PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL,
+    PIPE_TARGET_FRAMES, PW_GRAPH_BURST_FRAMES,
+};
 
 /// The PCM sample format `pw-cat` speaks with the hub (signed 16-bit LE, matching the VBAN PCM16 the
 /// engine mixes). Kept one place so the argv builders + the framing helpers never drift apart.
@@ -47,11 +58,6 @@ pub const PW_CAT_FORMAT: &str = "s16";
 /// the feeder's best-effort `try_send` DROPS THE NEW block (it never evicts a queued one and never
 /// blocks the mix loop) — a dropped ~5 ms block is tolerable program jitter; a stalled mix loop is not.
 const EGRESS_QUEUE_BLOCKS: usize = 64;
-
-/// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
-/// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
-/// bursts of this many frames, whatever block size the hub pops.
-pub const PW_GRAPH_BURST_FRAMES: usize = 1024;
 
 /// The node latency (in frames at `--rate`) the capture child asks PipeWire for: the MiniFuse graph
 /// quantum itself ([`PW_GRAPH_BURST_FRAMES`], 1024). A smaller request pulls the WHOLE graph down to
@@ -70,55 +76,6 @@ pub const LOCAL_CAPTURE_CAP_BLOCKS: usize = 32;
 /// without the ring running dry (issue 1345).
 pub const LOCAL_CAPTURE_TARGET_FRAMES: usize = 2 * PW_GRAPH_BURST_FRAMES;
 
-/// The fill a `pw-cat --playback` stdin pipe is kept at (issue 1401, 4.10.2026): two graph quanta,
-/// 2048 frames (42.7 ms at 48 kHz). pw-cat `fread`s a whole quantum ([`PW_GRAPH_BURST_FRAMES`])
-/// from the pipe inside each process callback. A pipe holding less blocks that callback until the
-/// hub has written the rest, the graph cycle overruns and the stream xruns. The hub writes at
-/// exactly the consumer's rate, so nothing refills a pipe a lost block drained (live: ERR ~50/s on
-/// the program sink and the cutters' cans until a hub restart). A pipe below one hub block is
-/// topped up to this with silence ([`pipe_fill_plan`]).
-pub const PIPE_TARGET_FRAMES: usize = 2 * PW_GRAPH_BURST_FRAMES;
-
-/// Above this fill (the target + two more quanta, 4096 frames, 85 ms) a block is dropped instead of
-/// written, so a pipe that grew never holds more delay than this.
-pub const PIPE_HIGH_FRAMES: usize = PIPE_TARGET_FRAMES + 2 * PW_GRAPH_BURST_FRAMES;
-
-/// What one block write does to a `pw-cat` playback pipe ([`pipe_fill_plan`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipeFillPlan {
-    /// The pipe holds less than one hub block: write `silence_frames` of silence (up to
-    /// [`PIPE_TARGET_FRAMES`]), then the block.
-    TopUp { silence_frames: usize },
-    /// The pipe holds more than [`PIPE_HIGH_FRAMES`]: drop the block.
-    Drop,
-    /// Healthy: write the block as it is.
-    Write,
-}
-
-/// Decide one block write from the pipe's measured fill (issue 1401). `fill_frames` is the fill
-/// before the write, `block_frames` the block being written (one hub block):
-///
-/// - below one block: top up with silence to [`PIPE_TARGET_FRAMES`], then write the block. A
-///   fresh pipe (the first write after a spawn) reads 0 and gets the same top-up;
-/// - above [`PIPE_HIGH_FRAMES`]: drop the block;
-/// - otherwise: write it. A healthy steady state never triggers either guard.
-///
-/// The prime does not cap the start depth: pw-cat reads nothing until its stream runs, the hub
-/// keeps writing meanwhile, and only the trim mark bounds that backlog. So the steady fill is the
-/// target (riding ~1024..2304 with pw-cat's quantum reads) plus whatever pw-cat's connect left, up
-/// to [`PIPE_HIGH_FRAMES`], and it can differ after every spawn.
-pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize) -> PipeFillPlan {
-    if fill_frames < block_frames {
-        PipeFillPlan::TopUp {
-            silence_frames: PIPE_TARGET_FRAMES.saturating_sub(fill_frames),
-        }
-    } else if fill_frames > PIPE_HIGH_FRAMES {
-        PipeFillPlan::Drop
-    } else {
-        PipeFillPlan::Write
-    }
-}
-
 /// The bytes queued in a pipe right now: the `FIONREAD` ioctl, which a Linux pipe answers on either
 /// end. The sink asks it on its WRITE end before every block.
 pub fn pipe_fill_bytes<F: AsFd>(pipe: F) -> io::Result<usize> {
@@ -132,25 +89,69 @@ pub fn pipe_fill_bytes<F: AsFd>(pipe: F) -> io::Result<usize> {
     usize::try_from(queued).map_err(|_| io::Error::other("FIONREAD reported a negative pipe fill"))
 }
 
-/// What one [`PipeFillWriter::write_block`] did, for the `local_audio` facet and the log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PipeWriteReport {
-    /// The pipe fill measured before the write, in frames.
-    pub fill_frames: usize,
-    /// What the write did.
-    pub plan: PipeFillPlan,
-    /// The first write into this pipe (just after the spawn). Its top-up is the prime, not a
-    /// refill: `pipe_refills` counts only a pipe that drained under a running pw-cat.
-    pub first: bool,
+/// Whether a pipe's read end has closed (the pw-cat child exited): `poll` reports `POLLERR` on the
+/// write end of a pipe that has no reader left. A sink that writes nothing (the start hold) never
+/// gets the `EPIPE` a write would, so it asks this instead (review round 1, issue 1401). Never
+/// blocks (timeout 0); a signal interrupting the call reads as "still there".
+pub fn pipe_reader_gone<F: AsFd>(pipe: F) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd: pipe.as_fd().as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the whole call, which never blocks (timeout 0); the fd is
+    // borrowed from its live owner for that call.
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(pfd.revents & libc::POLLERR != 0)
+}
+
+/// The bytes one block write puts into the pipe for `plan`, or `None` when the block is not written
+/// (a trim or the start hold): the silence of a top-up in front of the block, or the block stretched
+/// by one frame for a servo correction ([`stretch_interleaved`]).
+pub fn pipe_write_bytes(
+    plan: PipeFillPlan,
+    interleaved: &[i16],
+    channels: usize,
+) -> Option<Vec<u8>> {
+    let n_ch = channels.max(1);
+    let block_frames = interleaved.len() / n_ch;
+    match plan {
+        PipeFillPlan::Drop | PipeFillPlan::StartHold => None,
+        PipeFillPlan::Write => Some(interleaved_to_le_bytes(interleaved)),
+        PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => {
+            let out_frames = plan.written_frames(block_frames);
+            Some(interleaved_to_le_bytes(&stretch_interleaved(
+                interleaved,
+                n_ch,
+                out_frames,
+            )))
+        }
+        PipeFillPlan::TopUp { silence_frames } => {
+            // One write: the silence, then the block.
+            let mut bytes = vec![0u8; silence_frames * n_ch * 2];
+            bytes.extend_from_slice(&interleaved_to_le_bytes(interleaved));
+            Some(bytes)
+        }
+    }
 }
 
 /// The fill guard on a `pw-cat --playback` stdin pipe (issue 1401): measures the pipe before every
-/// block and applies [`pipe_fill_plan`]. Generic over the pipe's write end so a test can drive it
-/// over a real `std::io::pipe`.
+/// block and between blocks ([`PipeFillWriter::sample_fill`]), and writes what its
+/// [`PipeFillControl`] plans (the guards, the start hold, the drift servo). Generic over the pipe's
+/// write end so a test can drive it over a real `std::io::pipe`.
 pub struct PipeFillWriter<W> {
     pipe: W,
     channels: usize,
-    first: bool,
+    control: PipeFillControl,
+    /// The controller's clock: nanoseconds since this writer (this pw-cat child) was created.
+    epoch: Instant,
 }
 
 impl<W: Write + AsFd> PipeFillWriter<W> {
@@ -159,32 +160,52 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         PipeFillWriter {
             pipe,
             channels: usize::from(channels.max(1)),
-            first: true,
+            control: PipeFillControl::new(),
+            epoch: Instant::now(),
         }
+    }
+
+    /// The pipe fill in frames, or `BrokenPipe` once pw-cat closed its end: every reading, held or
+    /// written, notices a dead child, so the sink thread respawns it.
+    fn fill_frames(&self) -> io::Result<usize> {
+        if pipe_reader_gone(&self.pipe)? {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "pw-cat closed its stdin pipe",
+            ));
+        }
+        Ok(pipe_fill_bytes(&self.pipe)? / (self.channels * 2))
+    }
+
+    fn now_ns(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Read the pipe fill between blocks, for the servo's time-weighted fill. The sink thread calls
+    /// this about every [`PIPE_SAMPLE_INTERVAL`] while it waits for the next block.
+    pub fn sample_fill(&mut self) -> io::Result<()> {
+        let fill_frames = self.fill_frames()?;
+        self.control.sample(self.now_ns(), fill_frames);
+        Ok(())
     }
 
     /// Write one interleaved PCM16 block through the fill guard. An `Err` means the pipe is broken
     /// (the child died).
     pub fn write_block(&mut self, interleaved: &[i16]) -> io::Result<PipeWriteReport> {
-        let bytes_per_frame = self.channels * 2;
-        let fill_frames = pipe_fill_bytes(&self.pipe)? / bytes_per_frame;
-        let plan = pipe_fill_plan(fill_frames, interleaved.len() / self.channels);
-        let first = std::mem::replace(&mut self.first, false);
-        match plan {
-            PipeFillPlan::Drop => {}
-            PipeFillPlan::Write => self.pipe.write_all(&interleaved_to_le_bytes(interleaved))?,
-            PipeFillPlan::TopUp { silence_frames } => {
-                // One write: the silence, then the block.
-                let mut bytes = vec![0u8; silence_frames * bytes_per_frame];
-                bytes.extend_from_slice(&interleaved_to_le_bytes(interleaved));
-                self.pipe.write_all(&bytes)?;
-            }
+        let fill_frames = self.fill_frames()?;
+        let block_frames = interleaved.len() / self.channels;
+        let report = self
+            .control
+            .plan_block(self.now_ns(), fill_frames, block_frames);
+        if let Some(bytes) = pipe_write_bytes(report.plan, interleaved, self.channels) {
+            self.pipe.write_all(&bytes)?;
         }
-        Ok(PipeWriteReport {
-            fill_frames,
-            plan,
-            first,
-        })
+        Ok(report)
+    }
+
+    /// The drift servo's depth and setpoint, once pw-cat has started reading.
+    pub fn servo_depth(&self) -> Option<PipeServoDepth> {
+        self.control.servo_depth()
     }
 }
 
@@ -312,6 +333,11 @@ pub struct LocalAudioStats {
     pipe_refill_frames: AtomicU64,
     pipe_trims: AtomicU64,
     pipe_fill_frames: AtomicU64,
+    pipe_start_holds: AtomicU64,
+    pipe_servo_drops: AtomicU64,
+    pipe_servo_repeats: AtomicU64,
+    pipe_depth_frames: AtomicU64,
+    pipe_setpoint_frames: AtomicU64,
 }
 
 /// The serialized local-audio facet added to `/api/state` for a `program_out` / `cutters`
@@ -333,9 +359,28 @@ pub struct LocalAudioFacet {
     pub pipe_refill_frames: u64,
     /// Blocks dropped because the playback pipe held more than the trim mark (4096 frames).
     pub pipe_trims: u64,
-    /// The playback pipe's fill measured before the last write, in frames: between one hub block
-    /// and the trim mark (4096) when healthy; see [`pipe_fill_plan`] for why it varies per spawn.
+    /// The playback pipe's fill measured before the last write, in frames. It rides pw-cat's
+    /// quantum reads (from about the held depth - 640 to the depth + 384 at the 256-frame block),
+    /// so read the servo's `pipe_depth_frames` for the held depth.
     pub pipe_fill_frames: u64,
+    /// Blocks dropped by the start hold: written while pw-cat had not read since its spawn, so
+    /// every spawn starts at the same depth (issue 1401). It grows only around a spawn: by pw-cat's
+    /// connect time / one hub block, plus, after a respawn, up to the 63 blocks the egress queue
+    /// filled during the restart backoff. A count that keeps climbing means pw-cat is not reading.
+    pub pipe_start_holds: u64,
+    /// Single frames the pipe's drift servo dropped (the hub's clock runs ahead of the sink's).
+    pub pipe_servo_drops: u64,
+    /// Single frames the pipe's drift servo repeated (the sink's clock runs ahead of the hub's).
+    pub pipe_servo_repeats: u64,
+    /// The servo's mean time-weighted pipe fill over its last complete 1 s window, in frames:
+    /// within a few tens of frames of `pipe_setpoint_frames` once settled (up to ~70 off at a
+    /// 50 ppm sink). 0 until the first window after pw-cat's first read completes; after a
+    /// respawn it keeps the previous child's value until the new child's first read, then reads 0
+    /// until that child's first 1 s window completes.
+    pub pipe_depth_frames: u64,
+    /// The depth the servo holds: the time-average the start hold leaves, 1792 frames at the
+    /// 256-frame block. 0 until pw-cat's first read after the hub start.
+    pub pipe_setpoint_frames: u64,
 }
 
 impl LocalAudioStats {
@@ -350,11 +395,17 @@ impl LocalAudioStats {
             pipe_refill_frames: self.pipe_refill_frames.load(Ordering::Relaxed),
             pipe_trims: self.pipe_trims.load(Ordering::Relaxed),
             pipe_fill_frames: self.pipe_fill_frames.load(Ordering::Relaxed),
+            pipe_start_holds: self.pipe_start_holds.load(Ordering::Relaxed),
+            pipe_servo_drops: self.pipe_servo_drops.load(Ordering::Relaxed),
+            pipe_servo_repeats: self.pipe_servo_repeats.load(Ordering::Relaxed),
+            pipe_depth_frames: self.pipe_depth_frames.load(Ordering::Relaxed),
+            pipe_setpoint_frames: self.pipe_setpoint_frames.load(Ordering::Relaxed),
         }
     }
 
-    /// Count one playback write: a written block (topped up or not) is a `tx_block`, a dropped one
-    /// a `pipe_trim`, a top-up that is not the prime a `pipe_refill`.
+    /// Count one playback write: a written block (topped up, servo-corrected or not) is a
+    /// `tx_block`, a trimmed one a `pipe_trim`, a held one a `pipe_start_hold`, a top-up that is
+    /// not the prime a `pipe_refill`, a servo correction a `pipe_servo_drop` / `_repeat`.
     pub fn record_write(&self, report: &PipeWriteReport) {
         self.pipe_fill_frames
             .store(report.fill_frames as u64, Ordering::Relaxed);
@@ -362,8 +413,19 @@ impl LocalAudioStats {
             PipeFillPlan::Drop => {
                 self.pipe_trims.fetch_add(1, Ordering::Relaxed);
             }
+            PipeFillPlan::StartHold => {
+                self.pipe_start_holds.fetch_add(1, Ordering::Relaxed);
+            }
             PipeFillPlan::Write => {
                 self.tx_blocks.fetch_add(1, Ordering::Relaxed);
+            }
+            PipeFillPlan::ServoDrop => {
+                self.tx_blocks.fetch_add(1, Ordering::Relaxed);
+                self.pipe_servo_drops.fetch_add(1, Ordering::Relaxed);
+            }
+            PipeFillPlan::ServoRepeat => {
+                self.tx_blocks.fetch_add(1, Ordering::Relaxed);
+                self.pipe_servo_repeats.fetch_add(1, Ordering::Relaxed);
             }
             PipeFillPlan::TopUp { silence_frames } => {
                 self.tx_blocks.fetch_add(1, Ordering::Relaxed);
@@ -375,6 +437,17 @@ impl LocalAudioStats {
             }
         }
     }
+
+    /// Publish the pipe servo's depth and setpoint. `None` (before pw-cat's first read) leaves the
+    /// last published values.
+    pub fn record_servo_depth(&self, depth: Option<PipeServoDepth>) {
+        if let Some(d) = depth {
+            self.pipe_depth_frames
+                .store(d.depth_frames as u64, Ordering::Relaxed);
+            self.pipe_setpoint_frames
+                .store(d.setpoint_frames as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A local audio EGRESS sink: write interleaved PCM16 blocks to a PipeWire node.
@@ -382,6 +455,13 @@ pub trait LocalAudioSink: Send {
     /// Write one interleaved PCM16 block and report what it did to the sink's buffer; an `Err`
     /// means the underlying child died (the supervisor respawns).
     fn write_block(&mut self, interleaved: &[i16]) -> io::Result<PipeWriteReport>;
+
+    /// Read the sink's buffer between blocks (the pw-cat pipe's fill, for the drift servo's
+    /// time-weighted fill, issue 1401); an `Err` means the underlying child died.
+    fn sample_fill(&mut self) -> io::Result<()>;
+
+    /// The drift servo's depth and setpoint, once it runs.
+    fn servo_depth(&self) -> Option<PipeServoDepth>;
 }
 
 /// A local audio INGRESS source: read one fixed-size raw block from a PipeWire node.
@@ -428,6 +508,14 @@ impl PwCatSink {
 impl LocalAudioSink for PwCatSink {
     fn write_block(&mut self, interleaved: &[i16]) -> io::Result<PipeWriteReport> {
         self.stdin.write_block(interleaved)
+    }
+
+    fn sample_fill(&mut self) -> io::Result<()> {
+        self.stdin.sample_fill()
+    }
+
+    fn servo_depth(&self) -> Option<PipeServoDepth> {
+        self.stdin.servo_depth()
     }
 }
 
@@ -540,17 +628,24 @@ fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<Loca
                 failures = 0;
                 tracing::info!(%target, rate, channels, channel_map = ?channel_map, "local-audio: {label} pw-cat spawned");
                 let err = loop {
-                    match rx.recv() {
+                    match rx.recv_timeout(PIPE_SAMPLE_INTERVAL) {
                         Ok(block) => match sink.write_block(&block) {
                             Ok(report) => {
                                 stats.record_write(&report);
+                                stats.record_servo_depth(sink.servo_depth());
                                 log_pipe_write(label, &target, &report);
                             }
                             // The child died mid-write — break to respawn.
                             Err(e) => break e,
                         },
+                        // No block yet: read the pipe for the servo's time-weighted fill.
+                        Err(RecvTimeoutError::Timeout) => {
+                            if let Err(e) = sink.sample_fill() {
+                                break e;
+                            }
+                        }
                         // The sender was dropped: the hub is shutting down.
-                        Err(_) => return,
+                        Err(RecvTimeoutError::Disconnected) => return,
                     }
                 };
                 stats.exits.fetch_add(1, Ordering::Relaxed);
@@ -566,8 +661,9 @@ fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<Loca
 }
 
 /// Log a playback write the fill guard acted on: the prime after a spawn at info, a refill (the
-/// pipe drained under a running pw-cat, issue 1401) as one warn line, a trim at debug (a stalled
-/// pw-cat trims every block; `pipe_trims` counts them).
+/// pipe drained under a running pw-cat, issue 1401) as one warn line, a trim and a start-hold drop
+/// at debug (a stalled pw-cat trims every block; `pipe_trims` / `pipe_start_holds` count them). The
+/// servo's single-frame corrections are only counted (`pipe_servo_drops` / `_repeats`).
 fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport) {
     match report.plan {
         PipeFillPlan::TopUp { silence_frames } if report.first => {
@@ -579,7 +675,10 @@ fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport) {
         PipeFillPlan::Drop => {
             tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} pipe above the trim mark — block dropped");
         }
-        PipeFillPlan::Write => {}
+        PipeFillPlan::StartHold => {
+            tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} pw-cat not reading yet — block dropped by the start hold");
+        }
+        PipeFillPlan::Write | PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => {}
     }
 }
 
