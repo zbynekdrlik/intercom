@@ -404,8 +404,16 @@ fn the_sink_thread_reads_the_pipe_between_blocks() {
     let timeout = body
         .find("Err(RecvTimeoutError::Timeout)")
         .expect("no block yet");
-    let sample = body.find("sink.sample_fill()").expect("read the pipe");
+    let sample = body
+        .find("if let Err(e) = sink.sample_fill() {")
+        .expect("read the pipe, and act on its error");
     assert!(timeout < sample);
+    // A dead pw-cat seen by a 1 ms reading ends the loop, so the thread respawns it.
+    let after = &body[sample..];
+    let brk = after
+        .find("break e;")
+        .expect("a failed reading breaks the loop");
+    assert!(brk < after.find('}').expect("the if block"), "{after:.120}");
     assert!(body.contains("stats.record_servo_depth(sink.servo_depth())"));
     assert!(body.contains("Err(RecvTimeoutError::Disconnected) => return"));
 }
