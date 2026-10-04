@@ -321,69 +321,108 @@ Owner: short dropouts in the strih program audio. The old VBAN buffer (`JitterBu
 target: it popped whatever was queued and zero-padded a short block, so a packet a little late
 against the 5.33 ms hub block wrote a zero-padded block into the mix (single underruns every
 2-15 min on `fohabl`, a clean network). Read this before touching `vban_jitter`, `vban_io`'s
-`JitterBuffer`, or the status line.
+`JitterBuffer`, `inputs`, the block loop's missed-tick handling, or the status line. The decisions
+are on issue 1401 (comment 5977982465).
 
-- **Who gets which buffer (`main.rs` `input_buffers`).** `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`
-  (cap 8 blocks, target `VBAN_TARGET_BLOCKS` = 3 = 16 ms); local captures + Janus ->
-  `local_capture` (unchanged); everything else (no ingress) -> the plain `new`.
+- **Who gets which buffer (`inputs::input_buffers`, tested on the deployed TOML).**
+  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg` (cap 8 blocks, target `VBAN_TARGET_BLOCKS` = 3 = 16 ms).
+  - Local captures + Janus -> `local_capture` (unchanged).
+  - Everything else (no ingress) -> the plain `new`.
+  - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
+    tests now check it behaviourally.
 - **The policy lives in the std-only `vban_jitter::NetworkFill`** (frame counts only; the buffer
   moves the samples):
-  - prefill to the target before the first pop and after an underrun. Only a COLD start (the first
-    packets, or a stream back after going stale) trims the overshoot to the target;
-  - an underrun = ONE whole silent block, the partial tail KEPT, then re-prime. A late burst resumes
-    after that single block with no audio lost (content-preserving: the extra depth is walked back
-    by the servo, not trimmed);
-  - the servo is PROPORTIONAL and spread: every 1 s (48 000 output frames) the MEAN pre-pop fill vs
-    the target; beyond a 16-frame band the next second gets one corrected frame per 4 frames of
-    error (`SERVO_GAIN_DIV`), evenly spaced over the second, never closer than 1000 output frames
-    (977 ppm max). A slow drift is taken out a frame at a time (+20 ppm: about one per second,
-    never a burst). The review rejected the first cut, a bang-bang that put 47 corrections in one
-    second, because of its ~47 Hz phase modulation. A sender off by more than ~1000 ppm still
-    underruns or overruns (the ASRC, design Approach 3, is the escalation). The equilibrium offset
-    is band + 4 x the drift in frames/s (+540 ppm cambox ADC: about 120 frames high);
+  - prefill to the target. EVERY prime, the re-prime after an underrun included, starts exactly at
+    the target and drops the overshoot, the oldest audio, into the gap that is already there. This
+    is the `PacedRing` precedent. Review 2 rejected the first "keep every frame" re-prime: it left
+    a block that was then walked off at 47 corrections a second for ~10 s;
+  - an underrun = ONE whole silent block, then re-prime;
+  - the servo: every 1 s (48 000 output frames) the MEAN pre-pop fill vs the target.
+    `servo_corrections` turns the error into the next second's budget of single-frame
+    drops/repeats, evenly spaced and never closer than 1000 output frames (977 ppm max):
+    - 16-frame band;
+    - GENTLE up to the 128-frame knee (one per 16 frames of error, at most 7 a second);
+    - STEEP past it (one more per 2 frames);
+    - +-20 ppm runs at 1-2 corrections a second, gaps >= 0.5 s; the +540 ppm cambox ADC settles
+      ~166 frames (3.5 ms) high;
+    - a sender off by more than ~1000 ppm still underruns or overruns (the ASRC, design Approach
+      3, is the escalation);
+    - review 1 rejected a bang-bang that put 47 corrections into one second (~47 Hz flutter);
   - a correction is spread across the block by `stretch_block` (linear, both ends kept): a 0.4 %
     time stretch for 5.33 ms, no click (a plain one-sample cut on a loud 10 kHz tone is a ~1.6x
-    step; the test pins both);
+    step; the test pins both). The linear interpolation dips the highs about 2 dB inside that one
+    block, so corrections must stay rare, which is why the bursts above were findings;
+  - a MISSED HUB TICK: `main.rs` compares the SCHEDULED instants `Interval::tick` returns (tokio
+    `Skip` resumes on the same grid) via `missed_ticks`. Each VBAN leg's `skip_missed` then drops
+    that block of its oldest audio at once (the outputs already lost it), never more than half a
+    block under its target. The floor is half a block, not the target, so the jitter cannot leave
+    a residue for the servo;
   - above the cap: drop the oldest down to the TARGET and restart the servo window.
-- **Underruns and mutes (`vban_io::JitterBuffer`).** A VBAN leg's ran-dry pop is PENDING: it is
-  counted at the next packet only if that packet continues the stream (within `STALE_STREAM_MS`).
-  A cambox sends only while unmuted (`src/intercom.rs`), so a mute runs the leg dry while its last
-  packet is still fresh. Counting it would name the cambox in the status line and hide a real
-  `fohabl` dropout. A packet after a stale gap clears the old tail (never replayed ahead of the
-  fresh audio) and restarts the leg cold. `local_capture` still counts at once.
-- **Expected settle.** Under jitter the prime fires on a momentarily high fill, so the first windows
-  often correct a few frames in the first ~15 s. That is not hunting; after that a steady feed gets
-  no corrections (pinned for 51/52, 128 and 256-frame packets at 16 phases), and over 8 h the total
-  corrections equal the drift within 5 %.
-- **Observability.** `/api/state` VBAN participants carry `jitter: {target_frames, depth_frames
-  (1 s mean pre-pop fill), depth_min_frames (the 1 s low-water mark; margin = this minus one block),
-  servo_drops, servo_repeats, primed}`. The status line is now
-  `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>) [servo=<drops>/<repeats>]` — the total
-  still leads, so a `underruns=(\d+)` parser keeps working; the leg is named only when the sum > 0.
-- **Supervisor live check after a hub deploy:** `curl -s http://strih-lx:8790/api/state` -> the
-  `fohabl` participant: `jitter.primed: true`, `depth_frames` ~752..784 (target 768 +-16),
-  `depth_min_frames` well above 256, `servo_drops - servo_repeats` growing at the sender's drift
-  (+0.5 ppm = about one frame per 40 s). The journal status line: `underruns=` flat across a whole
-  program (one count per real stall, naming the leg; a cambox mute no longer counts),
-  `overruns=0`. A cambox far off 48 kHz shows `servo_*` growing at its own rate and its depth sitting
-  that far off the target; past ~1000 ppm it also shows underruns or overruns (the ASRC escalation).
+- **Underruns, mutes, stalls (`vban_io::JitterBuffer`).**
+  - A VBAN leg's ran-dry pop is PENDING. It is counted as an underrun at the next packet only if
+    that packet continues the stream (within `STALE_STREAM_MS`).
+  - A cambox sends only while unmuted (`src/intercom.rs`), so a mute is not an underrun (it would
+    name the cambox and hide a real `fohabl` dropout).
+  - A packet after a stale gap counts one STALL, drops the old tail (never replayed ahead of the
+    fresh audio) and re-primes.
+  - A packet with a different channel count also restarts the leg, so a channel that stopped
+    arriving cannot hold the shortest-channel fill at zero forever.
+  - `local_capture` still counts its underruns at once.
+- **Expected settle.** Under jitter a prime can leave a start-up offset (a packet of granularity, a
+  late hub wake). The gentle zone takes it out at <= 7 a second; then a steady feed gets no
+  corrections (pinned for 51/52, 128 and 256-frame packets at 16 phases after 60 s). Over 8 h the
+  total corrections equal the drift within 5 %.
+- **Observability.**
+  - `/api/state` VBAN participants carry `jitter: {target_frames, depth_frames (1 s mean pre-pop
+    fill), depth_min_frames (the 1 s low-water mark; margin = this minus one block), servo_drops,
+    servo_repeats, stalls, primed}`.
+  - The status line is `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>)
+    [stalls=<sum>(<worst program leg>)] [servo=<drops>/<repeats>]`. The total still leads, so a
+    `underruns=(\d+)` parser keeps working; a leg is named only when its sum > 0.
+  - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
+- **The program audio is ~13 ms later, now steady.** fohabl/lv1 feed `program_out` (the strih OBS
+  `ASIO zvuk`). The old depth was 0-5 ms and changed with every restart; now it is the 16 ms target.
+  Re-check any sync offset on that OBS input once after the hub deploy. The issue-1345 "10-20 ms"
+  acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
+  1401 design accepted ~16 ms knowingly.
+- **Supervisor live check after a hub deploy:**
+  - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
+    `depth_frames` ~752..784 (target 768 +-16), `depth_min_frames` well above 256,
+    `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
+    40 s).
+  - The journal status line: `underruns=` flat across a whole program (one count per gap under
+    500 ms inside a running stream, naming the leg), no `stalls=` unless a program sender really
+    stopped, `overruns=0`.
+  - A cambox far off 48 kHz shows `servo_*` growing at its own rate and its depth sitting that far
+    off the target. Past ~1000 ppm it also shows underruns or overruns (the ASRC escalation).
 - **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy), `tests/vban_jitter_state_1401.rs`
-  (facet, status line, the `input_buffers` anchor), `tests/vban_jitter_bench_1401.rs`: a two-clock +
-  Gaussian-jitter (FIFO) bench on frame counts — 8 h of the FOH feed and of a mono cambox at
-  +-20 ppm with 1 ms sd run in ~6 s debug. Realistic = 1 ms sd: the old buffer's live underrun rate
-  is reproduced with only 0.2 ms sd (issue 1401 STEP-0 comment), and the bench runs that old
-  policy on the same arrivals to prove it can tell them apart. With 1 ms sd over 8 h the worst
-  pre-pop fill still kept 5-6 ms of margin. The bench measures for itself (its own 1 s means,
-  correction gaps, corrections per second) and never trusts the controller's numbers; its 1 s
-  windows are not aligned with the servo's, so a per-second bound must allow a second that
-  straddles two servo seconds.
-- **Tier-0 verify without cargo.** A rustc `--test` replica: `vban_jitter.rs` + the `JitterBuffer`
-  section of `vban_io.rs` (extract by the doc-comment markers "/// One decoded VBAN packet" ..
-  "/// Encode an interleaved" and "/// A stream whose last packet" .. "/// A UDP sender") + the test
-  files with `intercom_hub::` -> `crate::`, then `clippy-driver --test -D warnings` on it. The whole
-  real `vban_io.rs` type-checks with the rlib recipe in "VBAN rate" above (add `vban_jitter.rs` to
-  the `#[path]` root). `state.rs` logic runs without serde: strip `Serialize` / `#[serde(...)]`,
-  stub `JanusStats` / `LocalAudioFacet` / `VideoStats` / a `Matrix { hub, participants }`.
+  (facet, status line, `input_buffers` on the deployed TOML, the block-loop wiring anchor), and
+  `tests/vban_jitter_bench_1401.rs`:
+  - a two-clock + Gaussian-jitter (FIFO) bench on frame counts. 8 h of the FOH feed and of a mono
+    cambox at +-20 ppm with 1 ms sd run in ~6 s debug;
+  - realistic = 1 ms sd. The old buffer's live underrun rate is reproduced with only 0.2 ms sd
+    (issue 1401 STEP-0 comment), and the bench runs that old policy on the same arrivals to prove
+    it can tell them apart;
+  - with 1 ms sd over 8 h the worst pre-pop fill still kept ~5 ms of margin;
+  - the bench models the block loop's missed-tick discard, a 60 ms stall (burst / lost) and a
+    cambox muted every 20 s;
+  - it measures for itself (its own 1 s means, correction gaps and per-second counts, after the
+    settle) and never trusts the controller's numbers;
+  - its 1 s windows are not aligned with the servo's, so a per-second bound must allow a second
+    that straddles two servo seconds (6 for a slow drift, 14 after a prime). The first bound, 3,
+    was raised for that reason;
+  - the gap bound starts after the settle; a start-up gap is seed-dependent.
+- **Tier-0 verify without cargo.**
+  - A rustc `--test` replica: `vban_jitter.rs` + the `JitterBuffer` section of `vban_io.rs` + the
+    test files with `intercom_hub::` -> `crate::`, then `clippy-driver --test -D warnings` on it.
+    Extract the section by the doc-comment markers "/// One decoded VBAN packet" .. "/// Encode an
+    interleaved" and "/// A stream whose last packet" .. "/// A UDP sender".
+  - The whole real `vban_io.rs` type-checks with the rlib recipe in "VBAN rate" above (add
+    `vban_jitter.rs` to the `#[path]` root).
+  - `state.rs` + `inputs.rs` run without serde: strip `Serialize` / `#[serde(...)]` and stub
+    `JanusStats` / `LocalAudioFacet` / `VideoStats` / a `Matrix { hub, participants }` with
+    `local_inputs()` and the local-capture constants.
+  - A RED proof for a round of changes: the same replica built from `git show <prev>:` sources.
 
 ## VBAN rate — the hub honours the header sample rate (issue 1345, 24.9.2026)
 
