@@ -54,6 +54,9 @@ impl From<NetworkFillStats> for JitterFacet {
 pub struct RuntimeStats {
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// VBAN packets to this participant dropped because its own send socket was full (issue 1401:
+    /// a cambox that is off), instead of blocking the block loop.
+    pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
@@ -81,6 +84,9 @@ pub struct ParticipantState {
     pub host: Option<String>,
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// VBAN packets to this participant dropped on a full send socket (issue 1401) — a cambox that
+    /// is off drops its whole stream here; a live one stays 0.
+    pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
@@ -142,6 +148,7 @@ impl HubState {
                     host: p.host.clone(),
                     rx_packets: s.rx_packets,
                     tx_packets: s.tx_packets,
+                    tx_dropped: s.tx_dropped,
                     underruns: s.underruns,
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
@@ -172,7 +179,9 @@ impl HubState {
     /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
     /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
     /// stops on every mute, so it is left out), the block loop's missed ticks as `missed=N` (a block
-    /// lost on every output), the VBAN legs' drift-servo corrections as
+    /// lost on every output), the VBAN packets dropped on a full send socket as
+    /// `tx_dropped=N(<worst leg>)` (issue 1401: a cambox that is off), the VBAN legs' drift-servo
+    /// corrections as
     /// `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as `rate_rejects=N` (issue
     /// 1345), so a rejected stream (which reads as silent) stays explained after its one warn
     /// scrolls away.
@@ -222,13 +231,19 @@ impl HubState {
         } else {
             String::new()
         };
+        let tx_dropped = if self.participants.iter().map(|p| p.tx_dropped).sum::<u64>() > 0 {
+            format!(" tx_dropped={}", self.total_naming_worst(|p| p.tx_dropped))
+        } else {
+            String::new()
+        };
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
             stalls,
             missed,
+            tx_dropped,
             servo,
             rejects,
             levels.join(" ")
@@ -293,6 +308,7 @@ out_channels = 4
             RuntimeStats {
                 rx_packets: 10,
                 tx_packets: 9,
+                tx_dropped: 0,
                 underruns: 1,
                 overruns: 0,
                 last_rx_age_ms: Some(5),

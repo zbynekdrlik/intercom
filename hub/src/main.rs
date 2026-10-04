@@ -31,7 +31,7 @@ use intercom_hub::matrix::Matrix;
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
-    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
+    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_jitter::missed_ticks;
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
@@ -301,7 +301,14 @@ async fn main() -> Result<()> {
         let video_for_loop = video_state.clone();
         // `janus_ring` + `janus_report` are captured by the `async move` below (the block loop is
         // their sole feeder + facet reader); nothing uses them after this spawn.
-        let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
+        // One NON-BLOCKING send socket per output slot (issue 1401): a cambox that is off fills only
+        // its own socket (its packets wait in an unresolved ARP neighbour queue) and its packets
+        // are dropped and counted, instead of one shared blocking socket stalling the block loop.
+        let senders: Vec<VbanSender> = outputs
+            .iter()
+            .map(|_| VbanSender::bind_ephemeral())
+            .collect::<std::io::Result<Vec<_>>>()
+            .context("bind the VBAN send sockets")?;
         // Status push cadence: ~1 s worth of blocks.
         let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
         tokio::spawn(async move {
@@ -311,6 +318,7 @@ async fn main() -> Result<()> {
             let mut ticker = tokio::time::interval(period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tx_packets = vec![0u64; n];
+            let mut tx_dropped = vec![0u64; n];
             let mut frame_counter = vec![0u32; n];
             let mut cycle: u64 = 0;
             let mut last_tick: Option<tokio::time::Instant> = None;
@@ -384,10 +392,12 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
+                // Send each cambox its mixed stereo stream — to the CACHED resolved address only,
+                // through the slot's own non-blocking socket.
                 let addrs: Vec<Option<SocketAddr>> =
                     out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
-                for (slot, (id, stream, host)) in outputs.iter().enumerate() {
+                for (slot, ((id, stream, host), sender)) in outputs.iter().zip(&senders).enumerate()
+                {
                     let Some(addr) = addrs.get(slot).copied().flatten() else {
                         if cycle.is_multiple_of(status_every as u64) {
                             tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
@@ -406,7 +416,10 @@ async fn main() -> Result<()> {
                         frames: block_frames,
                     };
                     match sender.send_block(addr, &block) {
-                        Ok(()) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
+                        Ok(SendOutcome::Sent) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
+                        // The slot's socket is full (a cambox that is off): this one packet is
+                        // dropped and counted; the block loop never waits on the network.
+                        Ok(SendOutcome::Dropped) => tx_dropped[*id] += 1,
                         Err(e) => {
                             tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
                         }
@@ -416,6 +429,7 @@ async fn main() -> Result<()> {
                 if cycle.is_multiple_of(status_every as u64) {
                     for (id, s) in rx_stats.iter_mut().enumerate() {
                         s.tx_packets = tx_packets[id];
+                        s.tx_dropped = tx_dropped[id];
                     }
                     // Attach the Janus facet to the phones participant's stats (M3a).
                     if let Some((pid, jstats)) = &janus_report {
