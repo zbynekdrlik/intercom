@@ -221,8 +221,10 @@ guard and one cap rule.
     the walk at up to 40 a second.
   - A lost tick during a RAISE: `discard_for_missed_ticks` gives the lost block up only down to the
     TARGET's floor (target - half a block), which lies above the walked setpoint, so part of it
-    stays (5 s into a one-block raise: 163 of 256 given up, 93 kept). That is a free step of the
-    walk; the setpoint follows it with no correction (pinned).
+    stays (5 s into a one-block raise: 162 of 256 given up, 94 kept). That is a free step of the
+    walk: the setpoint follows to the band's edge behind the fill (78 of the 94) with no
+    correction, the walk is shorter by that, and the fill rests at the band's edge above the
+    target (16 frames over; pinned).
   - Inside the band the setpoint stays. On a bursty sender the 1 s mean wobbles by ±10 frames (a
     window holds two or three long gaps); a setpoint that followed that wobble forward left the
     low windows behind the band and added a drift correction to every other walk second (8).
@@ -266,7 +268,7 @@ guard and one cap rule.
       at 35 ms; one block walked within 2 frames; a 35 ms control with no move that still needs a
       drift correction);
     - a tick lost 5 s into a raise (part of the block kept, no drop after it, the walk shorter by
-      it);
+      the kept part minus the band, the fill within the band of the target);
     - the give-up carried by the setpoint (no correction against the walk);
     - a raise reversed in the middle of a second (no repeat after it, the walked frames come back
       out, the leg ends at the target);

@@ -491,7 +491,9 @@ fn a_tick_lost_during_a_raise_walk_keeps_what_lies_under_the_target_floor() {
     // sits in the leg, and `discard_for_missed_ticks` gives it up only down to the TARGET's floor
     // (target - half a block), which during a raise lies above the walked setpoint. What is kept
     // is a free step of the walk: the fill is ahead of the setpoint toward the target, the
-    // setpoint follows it with no correction, and nothing pulls the fill back down.
+    // setpoint follows it to the band's edge with no correction, and nothing pulls the fill back
+    // down. The walk is shorter by the kept part minus the band, and the fill rests at the band's
+    // edge above the target (measured: 162 given up, 94 kept, 144 repeats, the fill at 1808).
     let mut leg = Leg::new(FLOOR, 0.0);
     leg.run_s(30);
     leg.f.set_target(RAISED);
@@ -510,11 +512,17 @@ fn a_tick_lost_during_a_raise_walk_keeps_what_lies_under_the_target_floor() {
     assert_eq!(leg.count_from(lost_at, true), 0, "no drop pulls it back");
     assert!(leg.max_in_any_second(lost_at) <= SERVO_WALK_MAX_PER_WINDOW);
     let repeats = leg.count_from(lost_at, false);
+    let walk = RAISED - setpoint;
     assert!(
-        repeats + kept <= RAISED - setpoint + SERVO_DEADBAND_FRAMES,
-        "the kept {kept} frames shortened the walk: {repeats} repeats left"
+        (walk..=walk + SERVO_DEADBAND_FRAMES).contains(&(repeats + kept)),
+        "the kept {kept} frames shortened the walk: {repeats} repeats left of {walk}"
     );
     assert_eq!(leg.f.setpoint(), RAISED);
+    let (mean, _) = *leg.seconds.last().unwrap();
+    assert!(
+        mean.abs_diff(RAISED) <= SERVO_DEADBAND_FRAMES,
+        "the fill rests within the band of the target: {mean}"
+    );
     assert_eq!((leg.ran_dry, leg.overruns), (0, 0));
 }
 
