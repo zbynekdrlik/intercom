@@ -326,16 +326,21 @@ against the 5.33 ms hub block wrote a zero-padded block into the mix (single und
 2-15 min on `fohabl`, a clean network). Read this before touching `vban_jitter`, `vban_io`'s
 `JitterBuffer`, `inputs`, `adaptive_target`, `block_clock`, `mix_thread`, the block loop's late-tick
 handling, or the status line. The decisions are on issue 1401 (comments 5977982465 and, for the
-catch-up, the real-time thread and the adaptive program target, design 5980775411).
+catch-up, the real-time thread and the adaptive program target, design 5980775411; for the gentle
+setpoint walk, the starvation-only pipe refill and the derived caps, design 5981457044).
 
 - **Who gets which buffer (`inputs::input_buffers`, tested on the deployed TOML).**
-  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: cap 8 blocks, the FIXED target
-    `VBAN_TARGET_BLOCKS` = 3 = 16 ms. Every other VBAN leg (the program feeds fohabl / lv1 / mbc)
-    also gets `.with_adaptive_target(..)`: its target starts at the floor
-    `VBAN_PROGRAM_TARGET_BLOCKS` = 6 = 32 ms (cap 11) and follows the sender's largest gap of the
-    last 10 min up to 12 blocks = 64 ms, the cap 5 blocks above it
+  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: the FIXED target `VBAN_TARGET_BLOCKS` =
+    3 = 16 ms, cap 9 blocks. Every other VBAN leg (the program feeds fohabl / lv1 / mbc) also gets
+    `.with_adaptive_target(..)`: its target starts at the floor `VBAN_PROGRAM_TARGET_BLOCKS` = 6 =
+    32 ms (cap 12) and follows the sender's largest gap of the last 10 min up to 12 blocks = 64 ms
     (`.claude/rules/strih-intercom-hub-mix.md`; the fixed 32 ms of design comment 5979008527
     covered the morning's 19.4 ms gaps, not the afternoon's 27.6 ms).
+  - Every cap is DERIVED, never typed (design 5981457044): `vban_cap_blocks(target)` = target +
+    `CATCHUP_MAX_BLOCKS` (4) + 1 (the current tick) + `VBAN_CAP_HEADROOM_BLOCKS` (1). That is
+    `VBAN_CAP_BLOCKS` 9 and `VBAN_PROGRAM_CAP_BLOCKS` 12, and `set_target` keeps the 6 blocks of
+    headroom at every adaptive target. So what arrives while the block loop runs up to four ticks
+    late never trims a leg (with 5 blocks a cambox overran and then underran on most 26 ms stalls).
   - Local captures + Janus -> `local_capture` (unchanged).
   - Everything else (no ingress) -> the plain `new`.
   - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
@@ -358,6 +363,11 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
     - a sender off by more than ~1000 ppm still underruns or overruns (the ASRC, design Approach
       3, is the escalation);
     - review 1 rejected a bang-bang that put 47 corrections into one second (~47 Hz flutter);
+    - the servo holds a SETPOINT (`NetworkFill::setpoint()`), which is the target except while a
+      `set_target` change is walked in: at most `SERVO_WALK_MAX_PER_WINDOW` (7, the gentle zone's
+      ceiling) corrections a second on top of the drift's own budget, so a one-block change takes
+      ~37 s, never the steep zone's 48 a second (design 5981457044; the mechanism and its pins are
+      in `.claude/rules/strih-intercom-hub-mix.md`, "Step 4");
   - a correction is spread across the block by `stretch_block` (linear, both ends kept): a 0.4 %
     time stretch for 5.33 ms, no click (a plain one-sample cut on a loud 10 kHz tone is a ~1.6x
     step; the test pins both). The linear interpolation dips the highs about 2 dB inside that one
@@ -373,7 +383,8 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
     often, 13 overruns in 10 min at a tick missed every 0.5 s with the +540 ppm cambox). The
     run's total is `lost_ticks` in `/api/state` and `lost=N` on the status line: each one is a
     block lost on EVERY output;
-  - above the cap: drop the oldest down to the TARGET and restart the servo window.
+  - above the cap: drop the oldest down to the TARGET and restart the servo window (a walk in
+    progress ends there, like at a prime).
 - **Underruns, mutes, stalls (`vban_io::JitterBuffer`).**
   - A VBAN leg's ran-dry pop is PENDING. It is counted as an underrun at the next packet only if
     that packet continues the stream (within `STALE_STREAM_MS`).
@@ -413,7 +424,8 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
   `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed with every
   restart. Now it is:
   - the program-feed target: 32 ms, or up to 64 ms while the FOH sender's gaps of the last
-    10 min need it (each step walked by the servo; `.claude/rules/strih-intercom-hub-mix.md`);
+    10 min need it (each one-block step walked in over ~37 s at <= 7 corrections a second;
+    `.claude/rules/strih-intercom-hub-mix.md`);
   - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below.
     A spawn starts within +-2.7 ms of it and is walked in within ~60 s; after that every restart
     sits within about 1 ms of the same depth, whatever pw-cat's connect time.
@@ -426,7 +438,7 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
     `target_frames` 1536..3072 (a cambox: 768) matching `max_gap_ms_10min` by the adaptive rule,
     `depth_frames` within +-16 of it once walked in, `depth_min_frames` well above 256,
     `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
-    40 s) plus the walks after a target change.
+    40 s) plus the walks after a target change (about 256 a block, at most ~7 a second).
   - The journal status line: `underruns=` flat across a whole program (one count per gap under
     500 ms inside a running stream, naming the leg), no `stalls=` unless a program sender really
     stopped, no `lost=` (a lost tick is a block lost on every output: the hub-mix thread woke
@@ -446,10 +458,21 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
   - **The guards (`pipe_fill::pipe_fill_plan`, last resort).** Before each block
     `local_audio::PipeFillWriter` (the one `PwCatSink` for both sinks) reads the pipe fill with
     `FIONREAD` on the write end (`pipe_fill_bytes`, the hub's direct `libc` dependency; bytes per
-    frame = channels x 2). Below one hub block -> top up with silence to `PIPE_TARGET_FRAMES`
-    (2 quanta = 2048 frames, 42.7 ms), then write the block. Above `PIPE_HIGH_FRAMES` (target + 2
-    quanta = 4096) -> drop the block (a trim). A drained pipe costs ONE short silent gap, not
-    continuous chopping. Since step 2 neither fires in a healthy run (see the servo below).
+    frame = channels x 2). A STARVED pipe under one hub block -> top up with silence to
+    `PIPE_TARGET_FRAMES` (2 quanta = 2048 frames, 42.7 ms), then write the block. Above
+    `PIPE_HIGH_FRAMES` (target + 2 quanta = 4096) -> drop the block (a trim). A drained pipe costs
+    ONE short silent gap, not continuous chopping. Since step 2 neither fires in a healthy run (see
+    the servo below).
+  - **Starved = under one block for a whole hub period (hub step 4, design 5981457044).** The
+    `starved` flag of `pipe_fill_plan` is set by `PipeFillControl`: for the prime, or when the fill
+    read under one block on EVERY reading (the 1 ms samples and the pre-write readings) for at
+    least one hub period (5.33 ms, from the pipe's sample rate: `PipeFillControl::new(rate)`,
+    `PipeFillWriter::new(pipe, channels, rate)`). A reading of one block or more ends the run, so
+    does a top-up; a plain write does not, since a pw-cat blocked in its read swallows each block
+    at once and a really starved pipe reads ~0 on every reading. One low reading is a momentary
+    low: two pw-cat reads in a catch-up gap with the burst about to arrive. Step 3's one-reading
+    guard filled exactly that with ~40 ms of silence, 15 times in 57 stalls at 24 ms on the cans;
+    now 0 up to 24 ms.
   - The first write after a spawn reads 0 and gets the same top-up, but it is the PRIME: logged at
     info, not counted as a refill. A refill (a pipe that drained under a running pw-cat) logs one
     warn line `pipe ran low — topped up with silence`; a trim is debug only. Both restart the
@@ -554,8 +577,9 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
     - the status line shows no `lost=` while camboxes are off, and `tx_dropped` stays 0 on every
       leg; an off cambox shows as `unresolved_discards` rising (or `ip -s neigh show <ip>`
       INCOMPLETE/FAILED), not in the hub.
-  - Tests: `tests/egress_fill_1401.rs` (the plan table, FIONREAD on a real `std::io::pipe`, the
-    sink writer priming an empty pipe and then the block, the 4-channel byte math, the facet
+  - Tests: `tests/egress_fill_1401.rs` (the plan table with the starvation flag, FIONREAD on a
+    real `std::io::pipe`, the sink writer priming an empty pipe and then the block and refilling it
+    once it read empty for 6 ms, the 4-channel byte math, the facet
     counters, `classify_send`, `tx_dropped` on the facet + status line, the `main.rs` anchor of one
     sender per output, the sink-thread anchor feeding `record_write`) and `vban_io`'s in-file
     `a_sender_socket_never_blocks` (a `recv_from` with a 2 s timeout must return `WouldBlock` at
@@ -563,6 +587,8 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
     - the setpoint and its derivation, `servo_step` == the pop servo, `stretch_interleaved`, the
       bytes per plan;
     - the start hold, pure and on a real pipe, and a reader closed during the hold (`BrokenPipe`);
+    - the starvation-only refill (hub step 4): one low reading, a period short by 1 ns, a whole
+      period, a good reading in between, a pw-cat blocked in its read, the prime / trim / top-up;
     - a guard forgetting the servo's pending budget, the servo measuring from pw-cat's first read
       (both ways the hold ends);
     - the facet counters, the sink-thread `recv_timeout` / `sample_fill` anchor;
@@ -604,9 +630,10 @@ catch-up, the real-time thread and the adaptive program target, design 598077541
   `adaptive_target`, `main.rs`, `vban_io`, `inputs`, their tests and the unit): the `hub-mix`
   SCHED_FIFO 10 thread, the catch-up of up to four late ticks, the measured stall-length table and
   its residuals, the 32-64 ms program target, the live check and the three Tier-0 replicas.
-- **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy), `tests/vban_jitter_state_1401.rs`
-  (facet, status line, `input_buffers` on the deployed TOML, the block-loop wiring anchor), and
-  `tests/vban_jitter_bench_1401.rs`:
+- **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy; the cambox cap pinned at 9),
+  `tests/setpoint_walk_1401.rs` (the gentle setpoint walk, hub step 4),
+  `tests/vban_jitter_state_1401.rs` (facet, status line, `input_buffers` on the deployed TOML, the
+  block-loop wiring anchor), and `tests/vban_jitter_bench_1401.rs`:
   - a two-clock + Gaussian-jitter (FIFO) bench on frame counts. 8 h of the FOH feed and of a mono
     cambox at +-20 ppm with 1 ms sd run in ~6 s debug;
   - realistic = 1 ms sd. The old buffer's live underrun rate is reproduced with only 0.2 ms sd
