@@ -324,3 +324,16 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   so the mix-thread tests always take the refused (SCHED_OTHER) path. "Only the calling thread" is
   backed by the `sched_setscheduler(2)` man page and the live `ps -L` check above.
 - The 51 min replay runs about 8.6 s in a debug build on a loaded dev1.
+- **Mutation probe (no cargo, step 4).** Copy `intercom/hub/src`, `intercom/hub/tests` and
+  `systemd/intercom-hub.service` into a scratch root, apply ONE exact-string replacement to a
+  source file (assert it matches once), and run the R1 script with `WT=<scratch root>`,
+  `CLIPPY=0` and `TESTS=` the touched test files. A mutant that passes is a missing pin. Step 4's
+  first test set let 4 of 14 through (the band, drift-first, keeping the window at `set_target`,
+  the cancel of the unspent walk share), each now pinned. Two survivors are equivalent on
+  256-frame blocks and are not gaps: `since_walk` starting at 0, and the walk spacing rounded
+  down.
+- **A per-second bound needs a SLIDING 1 s window.** A "bench second" can straddle two servo
+  windows, and a budget of 7 per window does not bound a sliding second once the plan changes
+  between windows: 8 walk steps fitted inside one bench second until each step got its own
+  spacing. Count events by output frame and bound every span of 48 000 frames
+  (`setpoint_walk_1401.rs` `max_of_in_any_second`).
