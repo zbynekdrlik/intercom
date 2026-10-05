@@ -286,6 +286,8 @@ struct Replay {
     min_correction_gap: usize,
     /// The most servo corrections in one second of output.
     max_corrections_per_s: u64,
+    /// The most of them that were setpoint-walk steps in one second of output.
+    max_walk_steps_per_s: u64,
     corrections: u64,
     max_target: usize,
     final_target: usize,
@@ -318,6 +320,7 @@ fn replay(secs: u64, gap_at: impl Fn(u64) -> u64) -> Replay {
     let mut output_frames = 0usize;
     let mut last_correction: Option<usize> = None;
     let mut second_corrections = 0u64;
+    let (mut walk_seen, mut second_walk) = (0u64, 0u64);
     let mut second = 0u64;
     loop {
         // The hub's n-th pop at n x 256 / 48000 s.
@@ -359,6 +362,8 @@ fn replay(secs: u64, gap_at: impl Fn(u64) -> u64) -> Replay {
         output_frames += BLOCK;
         let s = jb.network_stats().unwrap();
         let total = s.servo_drops + s.servo_repeats;
+        second_walk += s.servo_walk_steps - walk_seen;
+        walk_seen = s.servo_walk_steps;
         if total > corrections_seen {
             if let Some(prev) = last_correction {
                 out.min_correction_gap = out.min_correction_gap.min(output_frames - prev);
@@ -369,7 +374,9 @@ fn replay(secs: u64, gap_at: impl Fn(u64) -> u64) -> Replay {
         }
         if pop_us / 1_000_000 != second {
             out.max_corrections_per_s = out.max_corrections_per_s.max(second_corrections);
+            out.max_walk_steps_per_s = out.max_walk_steps_per_s.max(second_walk);
             second_corrections = 0;
+            second_walk = 0;
             second = pop_us / 1_000_000;
         }
         pop_n += 1;
@@ -424,11 +431,16 @@ fn a_gap_trace_growing_from_19_to_35ms_underruns_at_most_once_then_settles_back_
     assert_eq!(r.max_target, 9, "35 ms needs 9 blocks\n{ctx}");
     assert_no_correction_burst(&r);
     // Every raise and lowering is walked in the gentle zone (design 5981457044): at most the
-    // walk's 7 a second, plus the single correction the drift servo adds now and then on top (a
-    // grown gap lowers the 1 s mean fill a little). The steep walk measured 47 here.
+    // walk's 7 steps a second (the steep walk measured 47 here). The drift servo keeps its own
+    // budget on top: it answers the burst sender's 1 s mean wobbling out of its band at the larger
+    // gaps (as it does without a walk), one correction now and then.
+    assert!(
+        r.max_walk_steps_per_s <= SERVO_WALK_MAX_PER_WINDOW as u64,
+        "a setpoint walk in the gentle zone\n{ctx}"
+    );
     assert!(
         r.max_corrections_per_s <= SERVO_WALK_MAX_PER_WINDOW as u64 + 1,
-        "a setpoint walk in the gentle zone\n{ctx}"
+        "the walk plus at most one drift correction\n{ctx}"
     );
     // Back down: no step before the last 35 ms gap has left the window, the floor 30 min after it.
     let lowered: Vec<_> = r.changes.iter().filter(|c| c.0 > 1_200_000_000).collect();

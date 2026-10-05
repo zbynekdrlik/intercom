@@ -61,6 +61,8 @@ fn facet(servo_drops: u64, servo_repeats: u64, stalls: u64) -> JitterFacet {
         depth_min_frames: 610,
         servo_drops,
         servo_repeats,
+        setpoint_frames: 768,
+        servo_walk_steps: 0,
         stalls,
         primed: true,
         max_gap_ms_10min: None,
@@ -87,6 +89,8 @@ fn a_vban_leg_reports_its_jitter_facet_and_the_others_do_not() {
     assert_eq!(j["depth_min_frames"], 610);
     assert_eq!(j["servo_drops"], 12);
     assert_eq!(j["servo_repeats"], 3);
+    assert_eq!(j["setpoint_frames"], 768);
+    assert_eq!(j["servo_walk_steps"], 0);
     assert_eq!(j["stalls"], 2);
     assert_eq!(j["primed"].as_bool(), Some(true));
     assert!(v["participants"][1].get("jitter").is_none(), "{v}");
@@ -203,11 +207,18 @@ fn the_mix_threads_class_shows_on_api_state_once_the_daemon_sets_it() {
 fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
     let program = JitterFacet::from(NetworkFillStats {
         target_frames: 1792,
+        setpoint_frames: 1600,
+        servo_walk_steps: 64,
         max_gap_us_10min: Some(27_641),
         ..Default::default()
     });
     assert_eq!(program.max_gap_ms_10min, Some(27.6), "0.1 ms resolution");
     assert_eq!(program.target_frames, 1792, "the live target");
+    assert_eq!(
+        (program.setpoint_frames, program.servo_walk_steps),
+        (1600, 64),
+        "a walk in progress: where it is, how many steps it took"
+    );
     let cambox = JitterFacet::from(NetworkFillStats {
         target_frames: 768,
         ..Default::default()
@@ -233,6 +244,8 @@ fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
     );
     assert_eq!(v["participants"][2]["jitter"]["max_gap_ms_10min"], 27.6);
     assert_eq!(v["participants"][2]["jitter"]["target_frames"], 1792);
+    assert_eq!(v["participants"][2]["jitter"]["setpoint_frames"], 1600);
+    assert_eq!(v["participants"][2]["jitter"]["servo_walk_steps"], 64);
 }
 
 #[test]

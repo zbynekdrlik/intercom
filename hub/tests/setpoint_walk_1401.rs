@@ -11,8 +11,11 @@
 //! These tests drive the real `NetworkFill` on frame counts, popping one 256-frame block on the
 //! hub's exact grid and feeding a clean sender at a fixed rate offset. They count every correction
 //! by the output frame it lands on and bound them in EVERY 1 s span (a sliding window), so no
-//! alignment between a measured second and the servo's own window can hide a burst.
+//! alignment between a measured second and the servo's own window can hide a burst. The walk's own
+//! share (`servo_walk_steps`) is bounded the same way: at most 7 in any second, also when the
+//! drift servo corrects on top of it.
 
+use intercom_hub::adaptive_target::program_target_blocks;
 use intercom_hub::vban_jitter::{
     servo_corrections, vban_cap_blocks, NetworkFill, PopPlan, SERVO_DEADBAND_FRAMES,
     SERVO_WALK_MAX_PER_WINDOW, SERVO_WINDOW_FRAMES, VBAN_PROGRAM_TARGET_BLOCKS,
@@ -23,6 +26,15 @@ const FLOOR: usize = VBAN_PROGRAM_TARGET_BLOCKS * BLOCK;
 const RAISED: usize = FLOOR + BLOCK;
 const POPS_PER_S: usize = SERVO_WINDOW_FRAMES / BLOCK;
 
+/// One servo correction: the output frame it landed on, a drop (else a repeat), and whether it was
+/// a walk step (else a drift correction).
+#[derive(Debug, Clone, Copy)]
+struct Correction {
+    at: usize,
+    drop: bool,
+    walk: bool,
+}
+
 /// One program-feed leg on the real controller: a sender `ppm` off the hub, its frames arriving
 /// evenly (no jitter), one pop per hub block.
 struct Leg {
@@ -31,8 +43,7 @@ struct Leg {
     per_pop: f64,
     owed: f64,
     out_frames: usize,
-    /// (output frame, true = a drop) of every correction.
-    corrections: Vec<(usize, bool)>,
+    corrections: Vec<Correction>,
     ran_dry: u64,
     overruns: u64,
     /// The pre-pop fills and setpoints of the current second, and every finished second's means.
@@ -78,12 +89,26 @@ impl Leg {
             PopPlan::Audio { skip, take } => self.fill -= skip + take,
         }
         let after = self.f.stats();
+        let walk = after.servo_walk_steps > before.servo_walk_steps;
         if after.servo_drops > before.servo_drops {
-            self.corrections.push((self.out_frames, true));
+            self.corrections.push(Correction {
+                at: self.out_frames,
+                drop: true,
+                walk,
+            });
         }
         if after.servo_repeats > before.servo_repeats {
-            self.corrections.push((self.out_frames, false));
+            self.corrections.push(Correction {
+                at: self.out_frames,
+                drop: false,
+                walk,
+            });
         }
+        assert_eq!(
+            after.setpoint_frames,
+            self.f.setpoint(),
+            "the stats carry it"
+        );
         self.out_frames += BLOCK;
         if self.sec_pops == POPS_PER_S {
             self.seconds.push((
@@ -104,11 +129,20 @@ impl Leg {
 
     /// The most corrections inside any span of one second of output from `from` on.
     fn max_in_any_second(&self, from: usize) -> usize {
+        self.max_of_in_any_second(from, |_| true)
+    }
+
+    /// The most WALK steps inside any span of one second of output from `from` on.
+    fn max_walk_in_any_second(&self, from: usize) -> usize {
+        self.max_of_in_any_second(from, |c| c.walk)
+    }
+
+    fn max_of_in_any_second(&self, from: usize, keep: impl Fn(&Correction) -> bool) -> usize {
         let at: Vec<usize> = self
             .corrections
             .iter()
-            .map(|c| c.0)
-            .filter(|&o| o >= from)
+            .filter(|c| c.at >= from && keep(c))
+            .map(|c| c.at)
             .collect();
         let mut best = 0;
         let mut lo = 0;
@@ -124,7 +158,7 @@ impl Leg {
     fn count_from(&self, from: usize, drop: bool) -> usize {
         self.corrections
             .iter()
-            .filter(|c| c.0 >= from && c.1 == drop)
+            .filter(|c| c.at >= from && c.drop == drop)
             .count()
     }
 
@@ -169,6 +203,11 @@ fn a_raised_target_is_walked_in_at_no_more_than_seven_corrections_a_second() {
         leg.count_from(raise_at, false),
         BLOCK,
         "exactly the one block of setpoint error is repeated in"
+    );
+    assert_eq!(
+        leg.f.stats().servo_walk_steps,
+        BLOCK as u64,
+        "every one a walk step"
     );
     // 256 frames at 7 a second: about 37 s, never the steep zone's 5 s.
     let done = leg.walk_done_after_s(raise_at).expect("the walk finishes");
@@ -250,12 +289,15 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
                 error <= 147,
                 "{ppm} ppm, {s} s after the raise: depth {mean} vs setpoint {setpoint}"
             );
-            // The walk takes none of the drift's budget: its error does not grow to make up for
-            // corrections the walk took (the walk's share spent first: 136 vs 133 at -200 ppm).
-            assert!(
-                error <= before + 2,
-                "{ppm} ppm, {s} s after the raise: drift error {error} vs {before} before it"
-            );
+            // While the walk runs it takes none of the drift's budget: the drift's error does not
+            // grow to make up for corrections the walk took (with the walk's share spent first it
+            // grew 133 -> 136). The second the walk ends carries a 1-3 frame step of its own.
+            if setpoint < RAISED {
+                assert!(
+                    error <= before + 2,
+                    "{ppm} ppm, {s} s after the raise: drift error {error} vs {before} before it"
+                );
+            }
         }
         if ppm < 0.0 {
             // A slow sender needs a repeat about every 5000 frames: the raise never pauses them
@@ -263,9 +305,9 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
             let gap = leg
                 .corrections
                 .windows(2)
-                .filter(|w| w[0].0 + 2 * SERVO_WINDOW_FRAMES >= raise_at)
-                .filter(|w| w[0].0 <= raise_at + 10 * SERVO_WINDOW_FRAMES)
-                .map(|w| w[1].0 - w[0].0)
+                .filter(|w| w[0].at + 2 * SERVO_WINDOW_FRAMES >= raise_at)
+                .filter(|w| w[0].at <= raise_at + 10 * SERVO_WINDOW_FRAMES)
+                .map(|w| w[1].at - w[0].at)
                 .max()
                 .unwrap();
             assert!(
@@ -273,12 +315,31 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
                 "the drift paused for {gap} frames at the raise"
             );
         }
-        // The drift's share of every second is spent first (its full budget), so under a heavy
-        // drift the walk may run a little slower: at -200 ppm about 17 corrections a second are
-        // planned and the 1000-frame spacing on 256-frame blocks fits about 16 (45 s measured).
+        // The drift's share of every second is spent first (its full budget), and the walk's
+        // steps keep their own spacing, so under a heavy drift the walk yields: at -200 ppm the
+        // drift's ~10 corrections a second leave room for about 3 walk steps (85 s measured).
         // At +200 ppm the sender itself carries the fill toward the raised target (11 s).
         let done = leg.walk_done_after_s(raise_at).expect("the walk finishes");
-        assert!(done <= 50, "{ppm} ppm: the walk keeps going ({done} s)");
+        assert!(done <= 100, "{ppm} ppm: the walk keeps going ({done} s)");
+        let walk = leg.max_walk_in_any_second(raise_at);
+        assert!(
+            walk <= SERVO_WALK_MAX_PER_WINDOW,
+            "{ppm} ppm: {walk} walk steps in one second"
+        );
+        // A second plans the drift's corrections plus at most 7 walk steps and spreads them all
+        // across it: never bunched at the 1000-frame spacing at its start.
+        let spread = SERVO_WINDOW_FRAMES / (servo_corrections(147) + SERVO_WALK_MAX_PER_WINDOW);
+        let closest = leg
+            .corrections
+            .windows(2)
+            .filter(|w| w[0].at >= raise_at)
+            .map(|w| w[1].at - w[0].at)
+            .min()
+            .unwrap();
+        assert!(
+            closest >= spread,
+            "{ppm} ppm: two corrections {closest} frames apart"
+        );
         let (mean, _) = *leg.seconds.last().unwrap();
         assert!(mean.abs_diff(RAISED) <= 147, "{ppm} ppm: {mean}");
         let max = leg.max_in_any_second(raise_at);
@@ -290,11 +351,22 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
     }
 }
 
+/// What one run on the FOH burst pattern measured from the target move on.
+#[derive(Debug)]
+struct BurstRun {
+    /// The most corrections, and the most walk steps, in any 1 s span.
+    max: usize,
+    max_walk: usize,
+    /// The walk steps in all.
+    walked: u64,
+    ran_dry: u64,
+    overruns: u64,
+}
+
 /// The FOH sender's measured pattern at a FIXED long gap: 48 kHz audio handed out in a burst every
 /// 6 ms, and every 402 ms the next burst held back `gap_us` (as in `adaptive_target_1401.rs`). The
-/// target moves from `from` to `to` blocks after 120 s; returns the most corrections in any 1 s span
-/// from the move on, how many there were, and the underruns and overruns of the whole run.
-fn burst_pattern_walk(gap_us: u64, from: usize, to: usize) -> (usize, usize, u64, u64) {
+/// target moves from `from` to `to` blocks after 120 s (`from == to`: no move, the control).
+fn burst_pattern_walk(gap_us: u64, from: usize, to: usize) -> BurstRun {
     let mut leg = Leg::new(from * BLOCK, 0.0);
     // The sender's bursts are the only arrivals: no even feed, and the leg primes from empty.
     leg.per_pop = 0.0;
@@ -328,32 +400,89 @@ fn burst_pattern_walk(gap_us: u64, from: usize, to: usize) -> (usize, usize, u64
         }
         leg.pop();
     }
-    let walked = leg.corrections.iter().filter(|c| c.0 >= moved_at).count();
-    (
-        leg.max_in_any_second(moved_at),
-        walked,
-        leg.ran_dry,
-        leg.overruns,
-    )
+    BurstRun {
+        max: leg.max_in_any_second(moved_at),
+        max_walk: leg.max_walk_in_any_second(moved_at),
+        walked: leg.f.stats().servo_walk_steps,
+        ran_dry: leg.ran_dry,
+        overruns: leg.overruns,
+    }
 }
 
 #[test]
-fn a_walk_on_the_foh_burst_pattern_stays_at_seven_corrections_a_second() {
-    // The 1 s mean of a bursty sender wobbles (a window holds two or three of the long gaps). A
-    // setpoint that followed that wobble forward would leave the low windows behind the band and
-    // add a drift correction on top of the walk (8 a second); the band keeps it at 7.
-    for gap_us in [19_400, 25_000, 27_600] {
-        for (from, to) in [(7, 8), (8, 7), (9, 8)] {
-            let (max, walked, ran_dry, overruns) = burst_pattern_walk(gap_us, from, to);
-            let ctx = format!("gap {gap_us} us, {from} -> {to} blocks");
+fn a_walk_on_the_foh_burst_pattern_takes_at_most_seven_walk_steps_a_second() {
+    // The FOH sender's measured gaps, each at targets that cover it (the adaptive rule's own
+    // number and one or two blocks above): a raise, a lowering, and a lowering from further up.
+    for gap_us in [19_400, 25_000, 27_600, 31_000, 35_000] {
+        let need = program_target_blocks(std::time::Duration::from_micros(gap_us), BLOCK, 48_000);
+        for (from, to) in [(need, need + 1), (need + 1, need), (need + 2, need + 1)] {
+            let r = burst_pattern_walk(gap_us, from, to);
+            let ctx = format!("gap {gap_us} us, {from} -> {to} blocks: {r:?}");
+            assert!(r.max_walk <= SERVO_WALK_MAX_PER_WINDOW, "{ctx}");
+            // One block walked in steps; a wobble past the band toward the target may carry a
+            // few frames for free.
+            let walked = usize::try_from(r.walked).unwrap();
             assert!(
-                max <= SERVO_WALK_MAX_PER_WINDOW,
-                "{ctx}: {max} in one second"
+                walked <= BLOCK && BLOCK - walked <= SERVO_DEADBAND_FRAMES,
+                "one block walked\n{ctx}"
             );
-            assert!(walked.abs_diff(BLOCK) <= 2, "{ctx}: {walked} corrections");
-            assert_eq!((ran_dry, overruns), (0, 0), "{ctx}");
+            assert_eq!((r.ran_dry, r.overruns), (0, 0), "{ctx}");
+            // The 1 s mean of a bursty sender wobbles (a window holds two or three long gaps).
+            // Up to 25 ms the wobble stays inside the servo's band and a walk second holds the
+            // walk's steps only. A setpoint that followed the wobble forward (no band) left the
+            // low windows outside the band and added a drift correction (8) already here.
+            // From 27.6 ms the wobble itself leaves the band now and then, and the drift servo
+            // answers it with one correction, with or without a walk (the control below).
+            let total = if gap_us <= 25_000 {
+                SERVO_WALK_MAX_PER_WINDOW
+            } else {
+                SERVO_WALK_MAX_PER_WINDOW + 1
+            };
+            assert!(r.max <= total, "{ctx}");
         }
     }
+    // The control: no target move at 35 ms, and the drift servo still corrects the wobble.
+    let steady = burst_pattern_walk(35_000, 9, 9);
+    assert_eq!(steady.walked, 0, "{steady:?}");
+    assert!(
+        steady.max >= 1,
+        "the drift servo answers the 35 ms wobble by itself: {steady:?}"
+    );
+}
+
+#[test]
+fn a_walk_reversed_in_the_middle_of_a_second_never_corrects_the_wrong_way() {
+    // A raise walk, and 10.5 s in (mid-second, about 70 frames walked) the target goes back down.
+    // The unspent walk steps of that second toward the old target are dropped: not one repeat
+    // after the reversal, the walked frames come back out as drops, and the leg ends at the target.
+    let mut leg = Leg::new(FLOOR, 0.0);
+    leg.run_s(30);
+    leg.f.set_target(RAISED);
+    leg.run_s(10);
+    for _ in 0..POPS_PER_S / 2 {
+        leg.pop();
+    }
+    let walked = leg.f.setpoint() - FLOOR;
+    assert!(walked > 50, "mid-walk: {walked} frames walked");
+    let reversed_at = leg.out_frames;
+    leg.f.set_target(FLOOR);
+    leg.run_s(40);
+    assert_eq!(
+        leg.count_from(reversed_at, false),
+        0,
+        "no repeat after the reversal"
+    );
+    assert_eq!(
+        leg.count_from(reversed_at, true),
+        walked,
+        "the walked frames come back out"
+    );
+    assert!(leg.max_in_any_second(reversed_at) <= SERVO_WALK_MAX_PER_WINDOW);
+    assert_eq!(leg.f.setpoint(), FLOOR);
+    let (mean, setpoint) = *leg.seconds.last().unwrap();
+    assert_eq!(setpoint, FLOOR);
+    assert!(mean.abs_diff(FLOOR) <= SERVO_DEADBAND_FRAMES, "{mean}");
+    assert_eq!((leg.ran_dry, leg.overruns), (0, 0));
 }
 
 #[test]
