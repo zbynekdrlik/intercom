@@ -371,7 +371,9 @@ impl NetworkFill {
     /// priming (the prime trims anyway). The servo keeps its window and this second's budget: the
     /// discard leaves the depth where the lost pops would have, and no fill from before it was ever
     /// measured, so cancelling the budget would only starve the drift correction when the hub
-    /// loses ticks often.
+    /// loses ticks often. During a raise walk the floor (from the TARGET) lies above the walked
+    /// setpoint, so part of a lost block stays: a free step of the walk, which the setpoint then
+    /// follows without a correction.
     pub fn discard_for_missed_ticks(&self, fill: usize, frames: usize, missed: u64) -> usize {
         if !self.primed || missed == 0 {
             return 0;

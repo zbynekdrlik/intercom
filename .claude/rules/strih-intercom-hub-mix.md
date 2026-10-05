@@ -101,8 +101,9 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
       time), the second read finding 928-1010.
 
     A real pw-cat then blocks in its read until the catch-up burst arrives (an xrun), it does not
-    lose the audio. Why the depth sits that low at those phases was not traced; the lane handed it
-    to the supervisor as a follow-up candidate (LANE-RETURN on the ticket).
+    lose the audio. Why the depth sits that low at those phases was not traced: a follow-up
+    candidate for the supervisor (cans: 3 / 6 / 12 / 15 starved reads in 57 stalls at 24 / 25 /
+    26 / 27 ms; from 27 ms the program pipe 30).
 - **Residual: locks shared with SCHED_OTHER threads.** Std mutexes have no priority inheritance.
   The mix thread takes the jitter buffers' mutex (the VBAN receive task, the local capture threads
   and the Janus adapter push into it), the Janus ring's and the `out_addrs` mutex, and the watch
@@ -147,11 +148,15 @@ minute.
   - the long gap growing 19 -> 35 ms over 16 min: 0 underruns, raises at 25 / 31 / 35 ms (7 / 8 / 9
     blocks), back at 6 blocks 30 min after the last 35 ms gap, corrections never closer than 1000
     frames, at most 7 walk steps in any second (pinned) and at most 8 corrections (pinned `<=
-    SERVO_WALK_MAX_PER_WINDOW + 1`; 2 such seconds in the 51 min). The eighth is the drift servo's
-    own: from a ~27 ms gap the burst sender's 1 s mean wobbles out of the servo's band now and
-    then, and the servo answers it with or without a walk (`setpoint_walk_1401.rs` pins a 35 ms
-    control with no target move that still needs a correction). Up to a 25 ms gap a walk second
-    holds the walk's steps only;
+    SERVO_WALK_MAX_PER_WINDOW + 1`; 2 such seconds in the 51 min, at the 31 and the 35 ms gap).
+    The eighth is the drift servo's own. The burst sender's 1 s mean wobbles (a window holds two
+    or three long gaps), and at some gap / target phases it leaves the servo's band now and then:
+    a no-move control needed a drift correction at 19.4 ms with 8 blocks, at 25 ms with 8 and 9,
+    at 27.6 ms with 7 and at 35 ms with 9-11, none at 27.6 ms with 8 or 9 or at 31 ms with 8-10
+    (round-2 review). It depends on the phase, not on the gap's size. An eighth appears when such a
+    correction lands inside a walk's 1 s span: on the fixed-gap burst pattern only the 35 ms rows
+    (`setpoint_walk_1401.rs` pins <= 7 below 35 ms, and a 35 ms no-move control that still needs
+    a correction);
   - a sudden 19 -> 35 ms jump: exactly one underrun, at the first 35 ms gap (pinned `== 1`), and the
     re-prime goes straight to 9 blocks.
 
@@ -199,7 +204,10 @@ guard and one cap rule.
     it a second that also carried a drift correction spaced its 7 walk steps at 6144 frames, and
     the next second's walk followed at once: 8 walk steps inside one bench second in the
     growing-gap replay (review round 1). At -200 ppm the drift's ~10 corrections a second leave
-    room for ~3 walk steps: one block takes ~85 s there (a clean sender: 37 s).
+    room for ~3 walk steps: one block takes ~88 s there (-20 ppm: ~44 s; a clean sender: 37 s).
+    Real program feeds drift about 0.5 ppm. Running the walk on its own clock (gated only by its
+    spacing and the shared 1000-frame floor) would keep ~7 a second under drift too; not done,
+    an option for the main.
   - Visible on `/api/state` (review round 1): the jitter facet's `setpoint_frames` (where a walk
     stands; `depth_frames` follows it, not `target_frames`) and `servo_walk_steps` (the share of
     `servo_drops` + `servo_repeats` that walked a target change in).
@@ -211,6 +219,10 @@ guard and one cap rule.
     sender drifting that way (+200 ppm: a raise done in 11 s, the sender carries the fill) or a
     lost tick's give-up during a lowering. Without it the drift would pull the fill back against
     the walk at up to 40 a second.
+  - A lost tick during a RAISE: `discard_for_missed_ticks` gives the lost block up only down to the
+    TARGET's floor (target - half a block), which lies above the walked setpoint, so part of it
+    stays (5 s into a one-block raise: 163 of 256 given up, 93 kept). That is a free step of the
+    walk; the setpoint follows it with no correction (pinned).
   - Inside the band the setpoint stays. On a bursty sender the 1 s mean wobbles by ±10 frames (a
     window holds two or three long gaps); a setpoint that followed that wobble forward left the
     low windows behind the band and added a drift correction to every other walk second (8).
@@ -250,8 +262,11 @@ guard and one cap rule.
     - a raise and a lowering on a clean sender (<= 7, exactly one block, every one a walk step,
       36-40 s);
     - the FOH burst pattern at a fixed 19.4 / 25 / 27.6 / 31 / 35 ms gap, at the adaptive rule's
-      target and one or two blocks above (<= 7 walk steps; <= 7 corrections up to 25 ms, <= 8
-      from 27.6 ms; a 35 ms control with no move that still needs a drift correction);
+      target and one or two blocks above (<= 7 walk steps; <= 7 corrections below 35 ms, <= 8
+      at 35 ms; one block walked within 2 frames; a 35 ms control with no move that still needs a
+      drift correction);
+    - a tick lost 5 s into a raise (part of the block kept, no drop after it, the walk shorter by
+      it);
     - the give-up carried by the setpoint (no correction against the walk);
     - a raise reversed in the middle of a second (no repeat after it, the walked frames come back
       out, the leg ends at the target);
@@ -288,7 +303,7 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   the two real-pipe sink writers; the rest needs state / matrix) and `setpoint_walk_1401`, under
   `rustc --test` and `clippy-driver --test -D warnings`. Set
   `CARGO_MANIFEST_DIR=<worktree>/intercom/hub` at COMPILE time for the tests that read the unit and
-  main.rs. 111 tests, ~4 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
+  main.rs. 112 tests, ~5 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
   takes ~6 s and the growing-gap replay ~10 s.
 - **R2:** state.rs (serde stripped, its in-file tests cut) + inputs.rs over stub matrix /
   local_audio / janus_rtp / ndi_video modules. Since step 4 `vban_jitter` needs `block_clock`
