@@ -16,12 +16,15 @@
 //! has its own receive jitter buffer. Only the part beyond it is given up, through the VBAN legs'
 //! `skip_missed`, and counted (`lost_ticks`).
 //!
-//! What the two-clock bench (`tests/hub_catchup_1401.rs`) measured: a wake up to about 26 ms late
-//! (four ticks run late) costs nothing anywhere since step 4 (design 5981457044). A `pw-cat` pipe
-//! that reads under one block for a moment when two of its quantum reads land inside the write
-//! gap is no longer topped up (only a pipe starved for a whole hub period is), and every VBAN
-//! leg's cap holds what arrives while the loop is late ([`crate::vban_jitter::vban_cap_blocks`]).
-//! Past the catch-up a stall is a counted loss, never a silent one.
+//! What the two-clock bench (`tests/hub_catchup_1401.rs`) measured since step 4 (design
+//! 5981457044): the VBAN legs stay clean up to a 26 ms late wake (four ticks run late), because
+//! every leg's cap holds what arrives while the loop is late
+//! ([`crate::vban_jitter::vban_cap_blocks`]). Both `pw-cat` pipes stay refill-free up to 24 ms: a
+//! pipe that reads under one block for a moment when two of its quantum reads land inside the
+//! write gap is no longer topped up, only one starved for a whole hub period is. On 25-26 ms
+//! stalls the drifting cans pipe still refills now and then (3-6 in 57 stalls), and from 24 ms a
+//! pw-cat read inside the gap can come up short. Past the catch-up a stall is a counted loss,
+//! never a silent one.
 //!
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557).
 

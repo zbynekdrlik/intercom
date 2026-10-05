@@ -81,7 +81,7 @@ pub const VBAN_CAP_HEADROOM_BLOCKS: usize = 1;
 /// to four ticks late, up to five more blocks plus the wake's phase and the jitter arrive before
 /// the catch-up pops start. Under this cap those arrivals never trim the leg, so the caught-up
 /// pops never run it dry (the step-3 bench: with 5 blocks of headroom a cambox leg overran and
-/// then underran on most 26 ms stalls).
+/// then underran on 24 of 57 stalls of 26 ms).
 pub const fn vban_cap_blocks(target_blocks: usize) -> usize {
     target_blocks + crate::block_clock::CATCHUP_MAX_BLOCKS as usize + 1 + VBAN_CAP_HEADROOM_BLOCKS
 }
@@ -152,6 +152,12 @@ const SERVO_MAX_PER_WINDOW: usize = SERVO_WINDOW_FRAMES / SERVO_MIN_SPACING_FRAM
 pub const SERVO_WALK_MAX_PER_WINDOW: usize =
     (SERVO_KNEE_FRAMES - SERVO_DEADBAND_FRAMES).div_ceil(SERVO_GENTLE_DIV);
 
+/// The fewest output frames between two walk corrections: a second spread over the walk's 7,
+/// rounded up, so no span of one second ever holds more than [`SERVO_WALK_MAX_PER_WINDOW`] of them,
+/// whatever falls on the servo's window boundaries (the walk's share of a second that also carries
+/// drift corrections is spaced closer, and the next second's walk could follow it at once).
+const SERVO_WALK_SPACING_FRAMES: usize = SERVO_WINDOW_FRAMES.div_ceil(SERVO_WALK_MAX_PER_WINDOW);
+
 /// The servo's budget for the next second: how many single frames to drop or repeat for a mean
 /// pre-pop fill `error` frames away from the target. Zero inside the band, then the gentle slope up
 /// to the knee, then the steep one, capped at the 1 ms/s spacing. Never the whole error at once,
@@ -207,6 +213,12 @@ pub struct NetworkFillStats {
     pub servo_drops: u64,
     /// Single frames the servo repeated because the fill sat low.
     pub servo_repeats: u64,
+    /// The fill the servo holds now: the target, or while a target change is walked in, the point
+    /// the walk has reached ([`NetworkFill::setpoint`]).
+    pub setpoint_frames: usize,
+    /// How many of the servo's drops and repeats walked a target change in (the rest corrected
+    /// drift): at most [`SERVO_WALK_MAX_PER_WINDOW`] a second.
+    pub servo_walk_steps: u64,
     /// Times the stream stopped for longer than the stale limit and came back: a FOH sender outage,
     /// or for a cambox simply a mute (it sends only while unmuted).
     pub stalls: u64,
@@ -248,10 +260,13 @@ pub struct NetworkFill {
     budget: usize,
     interval: usize,
     since_correction: usize,
+    /// Output frames since the last walk correction.
+    since_walk: usize,
     last_mean: usize,
     last_min: usize,
     servo_drops: u64,
     servo_repeats: u64,
+    servo_walk_steps: u64,
     stalls: u64,
 }
 
@@ -276,10 +291,12 @@ impl NetworkFill {
             budget: 0,
             interval: SERVO_MIN_SPACING_FRAMES,
             since_correction: 0,
+            since_walk: SERVO_WALK_SPACING_FRAMES,
             last_mean: 0,
             last_min: 0,
             servo_drops: 0,
             servo_repeats: 0,
+            servo_walk_steps: 0,
             stalls: 0,
         }
     }
@@ -412,7 +429,14 @@ impl NetworkFill {
     pub fn servo_step(&mut self, fill: usize, frames: usize) -> ServoStep {
         self.observe(fill, frames);
         self.since_correction = self.since_correction.saturating_add(frames);
+        self.since_walk = self.since_walk.saturating_add(frames);
         if self.budget == 0 || self.since_correction < self.interval {
+            return ServoStep::Keep;
+        }
+        // The drift's share of this second is spent first (a correction it planned is never lost
+        // to the walk); the last `walk_budget` corrections are the walk's, each at its own spacing.
+        let walking = self.budget <= self.walk_budget;
+        if walking && self.since_walk < SERVO_WALK_SPACING_FRAMES {
             return ServoStep::Keep;
         }
         let step = match self.correction {
@@ -429,10 +453,11 @@ impl NetworkFill {
         if step != ServoStep::Keep {
             self.budget -= 1;
             self.since_correction = 0;
-            if self.budget < self.walk_budget {
-                // The drift's share of this second is spent first (so a correction it planned is
-                // never lost to the walk), then each walk frame done moves the setpoint with it.
+            if walking {
+                // One frame of the walk is done: the setpoint follows it toward the target.
                 self.walk_budget -= 1;
+                self.servo_walk_steps += 1;
+                self.since_walk = 0;
                 self.move_setpoint(1);
             }
         }
@@ -546,6 +571,8 @@ impl NetworkFill {
             depth_min_frames: self.last_min,
             servo_drops: self.servo_drops,
             servo_repeats: self.servo_repeats,
+            setpoint_frames: self.setpoint,
+            servo_walk_steps: self.servo_walk_steps,
             stalls: self.stalls,
             primed: self.primed,
             max_gap_us_10min: None,

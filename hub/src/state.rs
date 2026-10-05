@@ -28,6 +28,12 @@ pub struct JitterFacet {
     pub servo_drops: u64,
     /// Single frames repeated because the fill sat low (the sender runs slow).
     pub servo_repeats: u64,
+    /// The fill the servo holds now: `target_frames`, or while a target change is walked in (about
+    /// 37 s a block), the point the walk has reached. `depth_frames` follows this, not the target.
+    pub setpoint_frames: usize,
+    /// How many of `servo_drops` + `servo_repeats` walked a target change in (at most 7 a second);
+    /// the rest corrected the sender's drift.
+    pub servo_walk_steps: u64,
     /// Times the stream stopped for more than 500 ms and came back: a sender outage on a program
     /// feed, simply a mute on a cambox (it sends only while unmuted).
     pub stalls: u64,
@@ -48,6 +54,8 @@ impl From<NetworkFillStats> for JitterFacet {
             depth_min_frames: s.depth_min_frames,
             servo_drops: s.servo_drops,
             servo_repeats: s.servo_repeats,
+            setpoint_frames: s.setpoint_frames,
+            servo_walk_steps: s.servo_walk_steps,
             stalls: s.stalls,
             primed: s.primed,
             max_gap_ms_10min: s

@@ -337,9 +337,9 @@ impl JitterBuffer {
 
     /// Let a VBAN leg's target follow its sender (issue 1401, design 5980775411: the program feeds).
     /// It starts at the floor [`crate::vban_jitter::VBAN_PROGRAM_TARGET_BLOCKS`]; every packet
-    /// inside a running stream reports its gap to [`AdaptiveTarget::observe`], and a change goes to
-    /// the leg's setpoint ([`NetworkFill::set_target`]), so the servo walks the fill there. `name`
-    /// labels the leg's log line. The other policies ignore it.
+    /// inside a running stream reports its gap to [`AdaptiveTarget::observe`], and a change moves
+    /// the leg's target ([`NetworkFill::set_target`]); the servo's setpoint then walks there at most
+    /// 7 frames a second. `name` labels the leg's log line. The other policies ignore it.
     pub fn with_adaptive_target(
         mut self,
         name: &str,
