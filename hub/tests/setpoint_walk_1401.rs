@@ -291,13 +291,13 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
             );
             // While the walk runs it takes none of the drift's budget: the drift's error does not
             // grow to make up for corrections the walk took (with the walk's share spent first it
-            // grew 133 -> 136). The second the walk ends carries a 1-3 frame step of its own.
-            if setpoint < RAISED {
-                assert!(
-                    error <= before + 2,
-                    "{ppm} ppm, {s} s after the raise: drift error {error} vs {before} before it"
-                );
-            }
+            // grew 133 -> 136). The second the walk ends steps it once by up to 3 frames, and the
+            // drift takes that back.
+            let slack = if setpoint < RAISED { 2 } else { 3 };
+            assert!(
+                error <= before + slack,
+                "{ppm} ppm, {s} s after the raise: drift error {error} vs {before} before it"
+            );
         }
         if ppm < 0.0 {
             // A slow sender needs a repeat about every 5000 frames: the raise never pauses them
@@ -317,7 +317,7 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
         }
         // The drift's share of every second is spent first (its full budget), and the walk's
         // steps keep their own spacing, so under a heavy drift the walk yields: at -200 ppm the
-        // drift's ~10 corrections a second leave room for about 3 walk steps (85 s measured).
+        // drift's ~10 corrections a second leave room for about 3 walk steps (88 s measured).
         // At +200 ppm the sender itself carries the fill toward the raised target (11 s).
         let done = leg.walk_done_after_s(raise_at).expect("the walk finishes");
         assert!(done <= 100, "{ppm} ppm: the walk keeps going ({done} s)");
@@ -419,24 +419,24 @@ fn a_walk_on_the_foh_burst_pattern_takes_at_most_seven_walk_steps_a_second() {
             let r = burst_pattern_walk(gap_us, from, to);
             let ctx = format!("gap {gap_us} us, {from} -> {to} blocks: {r:?}");
             assert!(r.max_walk <= SERVO_WALK_MAX_PER_WINDOW, "{ctx}");
-            // One block walked in steps; a wobble past the band toward the target may carry a
-            // few frames for free.
+            // One block walked in steps; a wobble past the band toward the target carried a frame
+            // or two for free in some rows.
             let walked = usize::try_from(r.walked).unwrap();
             assert!(
-                walked <= BLOCK && BLOCK - walked <= SERVO_DEADBAND_FRAMES,
+                walked <= BLOCK && BLOCK - walked <= 2,
                 "one block walked\n{ctx}"
             );
             assert_eq!((r.ran_dry, r.overruns), (0, 0), "{ctx}");
-            // The 1 s mean of a bursty sender wobbles (a window holds two or three long gaps).
-            // Up to 25 ms the wobble stays inside the servo's band and a walk second holds the
-            // walk's steps only. A setpoint that followed the wobble forward (no band) left the
-            // low windows outside the band and added a drift correction (8) already here.
-            // From 27.6 ms the wobble itself leaves the band now and then, and the drift servo
-            // answers it with one correction, with or without a walk (the control below).
-            let total = if gap_us <= 25_000 {
-                SERVO_WALK_MAX_PER_WINDOW
-            } else {
+            // The 1 s mean of a bursty sender wobbles (a window holds two or three long gaps), and
+            // at some gap / target phases it leaves the servo's band now and then: the drift
+            // servo answers it with one correction, with or without a walk (the control below).
+            // An eighth correction in a second needs such a correction to land inside a walk's
+            // span: measured only on the 35 ms rows. A setpoint that followed the wobble forward
+            // (no band) left the low windows outside the band and added it on the 25 ms rows.
+            let total = if gap_us >= 35_000 {
                 SERVO_WALK_MAX_PER_WINDOW + 1
+            } else {
+                SERVO_WALK_MAX_PER_WINDOW
             };
             assert!(r.max <= total, "{ctx}");
         }
@@ -482,6 +482,39 @@ fn a_walk_reversed_in_the_middle_of_a_second_never_corrects_the_wrong_way() {
     let (mean, setpoint) = *leg.seconds.last().unwrap();
     assert_eq!(setpoint, FLOOR);
     assert!(mean.abs_diff(FLOOR) <= SERVO_DEADBAND_FRAMES, "{mean}");
+    assert_eq!((leg.ran_dry, leg.overruns), (0, 0));
+}
+
+#[test]
+fn a_tick_lost_during_a_raise_walk_keeps_what_lies_under_the_target_floor() {
+    // 5 s into a one-block raise the block loop loses one tick: the block that arrived meanwhile
+    // sits in the leg, and `discard_for_missed_ticks` gives it up only down to the TARGET's floor
+    // (target - half a block), which during a raise lies above the walked setpoint. What is kept
+    // is a free step of the walk: the fill is ahead of the setpoint toward the target, the
+    // setpoint follows it with no correction, and nothing pulls the fill back down.
+    let mut leg = Leg::new(FLOOR, 0.0);
+    leg.run_s(30);
+    leg.f.set_target(RAISED);
+    leg.run_s(5);
+    let lost_at = leg.out_frames;
+    let setpoint = leg.f.setpoint();
+    leg.fill += BLOCK;
+    let given_up = leg.f.discard_for_missed_ticks(leg.fill, BLOCK, 1);
+    assert!(
+        given_up > 0 && given_up < BLOCK,
+        "part of the lost block is kept: {given_up} given up"
+    );
+    leg.fill -= given_up;
+    let kept = BLOCK - given_up;
+    leg.run_s(60);
+    assert_eq!(leg.count_from(lost_at, true), 0, "no drop pulls it back");
+    assert!(leg.max_in_any_second(lost_at) <= SERVO_WALK_MAX_PER_WINDOW);
+    let repeats = leg.count_from(lost_at, false);
+    assert!(
+        repeats + kept <= RAISED - setpoint + SERVO_DEADBAND_FRAMES,
+        "the kept {kept} frames shortened the walk: {repeats} repeats left"
+    );
+    assert_eq!(leg.f.setpoint(), RAISED);
     assert_eq!((leg.ran_dry, leg.overruns), (0, 0));
 }
 
