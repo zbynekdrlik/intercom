@@ -238,10 +238,39 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
         leg.f.set_target(RAISED);
         leg.run_s(120);
         let first = raise_at / SERVO_WINDOW_FRAMES;
+        // The drift's own equilibrium error before the raise (133 frames at 200 ppm).
+        let before = leg.seconds[first - 5..first]
+            .iter()
+            .map(|&(mean, setpoint)| mean.abs_diff(setpoint))
+            .max()
+            .unwrap();
         for (s, &(mean, setpoint)) in leg.seconds[first..].iter().enumerate() {
+            let error = mean.abs_diff(setpoint);
             assert!(
-                mean.abs_diff(setpoint) <= 147,
+                error <= 147,
                 "{ppm} ppm, {s} s after the raise: depth {mean} vs setpoint {setpoint}"
+            );
+            // The walk takes none of the drift's budget: its error does not grow to make up for
+            // corrections the walk took (the walk's share spent first: 136 vs 133 at -200 ppm).
+            assert!(
+                error <= before + 2,
+                "{ppm} ppm, {s} s after the raise: drift error {error} vs {before} before it"
+            );
+        }
+        if ppm < 0.0 {
+            // A slow sender needs a repeat about every 5000 frames: the raise never pauses them
+            // (set_target keeps the window and its drift budget; restarting them left a 1 s gap).
+            let gap = leg
+                .corrections
+                .windows(2)
+                .filter(|w| w[0].0 + 2 * SERVO_WINDOW_FRAMES >= raise_at)
+                .filter(|w| w[0].0 <= raise_at + 10 * SERVO_WINDOW_FRAMES)
+                .map(|w| w[1].0 - w[0].0)
+                .max()
+                .unwrap();
+            assert!(
+                gap <= SERVO_WINDOW_FRAMES / 4,
+                "the drift paused for {gap} frames at the raise"
             );
         }
         // The drift's share of every second is spent first (its full budget), so under a heavy
@@ -258,6 +287,72 @@ fn drift_at_200_ppm_keeps_its_full_budget_while_a_walk_is_in_progress() {
             "{ppm} ppm: {max} in one second"
         );
         assert_eq!((leg.ran_dry, leg.overruns), (0, 0), "{ppm} ppm");
+    }
+}
+
+/// The FOH sender's measured pattern at a FIXED long gap: 48 kHz audio handed out in a burst every
+/// 6 ms, and every 402 ms the next burst held back `gap_us` (as in `adaptive_target_1401.rs`). The
+/// target moves from `from` to `to` blocks after 120 s; returns the most corrections in any 1 s span
+/// from the move on, how many there were, and the underruns and overruns of the whole run.
+fn burst_pattern_walk(gap_us: u64, from: usize, to: usize) -> (usize, usize, u64, u64) {
+    let mut leg = Leg::new(from * BLOCK, 0.0);
+    // The sender's bursts are the only arrivals: no even feed, and the leg primes from empty.
+    leg.per_pop = 0.0;
+    leg.fill = 0;
+    let (mut sent, mut burst_t) = (0u64, 6_000u64);
+    let mut moved_at = 0;
+    for pop in 0..240 * POPS_PER_S as u64 {
+        let pop_us = pop * BLOCK as u64 * 1_000_000 / 48_000;
+        loop {
+            let offset = burst_t % 402_000;
+            let arrive = if offset > 0 && offset < gap_us {
+                burst_t - offset + gap_us
+            } else {
+                burst_t
+            };
+            if arrive > pop_us {
+                break;
+            }
+            let produced = burst_t * 48_000 / 1_000_000;
+            leg.fill += (produced - sent) as usize;
+            sent = produced;
+            if let Some(keep) = leg.f.overrun_keep(leg.fill) {
+                leg.fill = keep;
+                leg.overruns += 1;
+            }
+            burst_t += 6_000;
+        }
+        if pop == 120 * POPS_PER_S as u64 {
+            leg.f.set_target(to * BLOCK);
+            moved_at = leg.out_frames;
+        }
+        leg.pop();
+    }
+    let walked = leg.corrections.iter().filter(|c| c.0 >= moved_at).count();
+    (
+        leg.max_in_any_second(moved_at),
+        walked,
+        leg.ran_dry,
+        leg.overruns,
+    )
+}
+
+#[test]
+fn a_walk_on_the_foh_burst_pattern_stays_at_seven_corrections_a_second() {
+    // The 1 s mean of a bursty sender wobbles (a window holds two or three of the long gaps). A
+    // setpoint that followed that wobble forward would leave the low windows behind the band and
+    // add a drift correction on top of the walk (8 a second); the band keeps it at 7.
+    for gap_us in [19_400, 25_000, 27_600] {
+        for (from, to) in [(7, 8), (8, 7), (9, 8)] {
+            let (max, walked, ran_dry, overruns) = burst_pattern_walk(gap_us, from, to);
+            let ctx = format!("gap {gap_us} us, {from} -> {to} blocks");
+            assert!(
+                max <= SERVO_WALK_MAX_PER_WINDOW,
+                "{ctx}: {max} in one second"
+            );
+            assert!(walked.abs_diff(BLOCK) <= 2, "{ctx}: {walked} corrections");
+            assert_eq!((ran_dry, overruns), (0, 0), "{ctx}");
+        }
     }
 }
 
