@@ -91,8 +91,9 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
     starved read of the 24 ms row; 26 ms zero overruns and underruns on the cambox AND the FOH
     leg; 40 ms bounded and counted (at most one underrun + overrun per leg and one refill per pipe
     a stall).
-  - The starved reads are a residual on the drifting cans only, and their counts are exactly the
-    step-3 code's (step 4 did not add or remove one). They happen inside the write gap, before
+  - The starved reads up to 26 ms are a residual on the drifting cans only (from 27 ms the program
+    pipe starves too, 30 in 57, as in step 3), and their counts are exactly the step-3 code's
+    (step 4 did not add or remove one). They happen inside the write gap, before
     the hub wakes, so no refill rule can prevent them:
     - 24 ms: the FIRST stall of each seed, 60 s after the spawn, while the cans' depth is still
       being walked in (pw-cat's second read in the gap found 1005-1010 of its 1024 frames);
@@ -100,8 +101,8 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
       time), the second read finding 928-1010.
 
     A real pw-cat then blocks in its read until the catch-up burst arrives (an xrun), it does not
-    lose the audio. Why the depth sits that low at those phases was not traced; it is a candidate
-    for the supervisor.
+    lose the audio. Why the depth sits that low at those phases was not traced; the lane handed it
+    to the supervisor as a follow-up candidate (LANE-RETURN on the ticket).
 - **Residual: locks shared with SCHED_OTHER threads.** Std mutexes have no priority inheritance.
   The mix thread takes the jitter buffers' mutex (the VBAN receive task, the local capture threads
   and the Janus adapter push into it), the Janus ring's and the `out_addrs` mutex, and the watch
@@ -145,10 +146,12 @@ minute.
   long gap every 402 ms) through the real buffer:
   - the long gap growing 19 -> 35 ms over 16 min: 0 underruns, raises at 25 / 31 / 35 ms (7 / 8 / 9
     blocks), back at 6 blocks 30 min after the last 35 ms gap, corrections never closer than 1000
-    frames, at most 8 in one second (pinned `<= SERVO_WALK_MAX_PER_WINDOW + 1`): 188 walk seconds
-    carry the walk's 7, 16 carry one more. That one is the drift servo's own: a grown gap lowers
-    the 1 s mean fill a little, and the gap growth is what raised the target, so the two always
-    meet. On the same pattern at a FIXED gap a walk never exceeds 7 (`setpoint_walk_1401.rs`);
+    frames, at most 7 walk steps in any second (pinned) and at most 8 corrections (pinned `<=
+    SERVO_WALK_MAX_PER_WINDOW + 1`; 2 such seconds in the 51 min). The eighth is the drift servo's
+    own: from a ~27 ms gap the burst sender's 1 s mean wobbles out of the servo's band now and
+    then, and the servo answers it with or without a walk (`setpoint_walk_1401.rs` pins a 35 ms
+    control with no target move that still needs a correction). Up to a 25 ms gap a walk second
+    holds the walk's steps only;
   - a sudden 19 -> 35 ms jump: exactly one underrun, at the first 35 ms gap (pinned `== 1`), and the
     re-prime goes straight to 9 blocks.
 
@@ -169,9 +172,10 @@ minute.
   underruns flat, its `target_frames` matching `max_gap_ms_10min` by the rule above, both pipes'
   `pipe_refills` flat.
 - After a program target change (the `program feed target raised` / `lowered` journal line): that
-  leg's `depth_frames` walks to the new `target_frames` over ~37 s a block, and its
-  `servo_drops` / `servo_repeats` grow by about 256 a block at no more than ~7 a second (8 in an
-  occasional second). A jump of tens within a second is the old steep walk: a finding.
+  leg's `setpoint_frames` walks to the new `target_frames` over ~37 s a block with `depth_frames`
+  following it, and `servo_walk_steps` grows by about 256 a block at no more than 7 a second (the
+  drift servo's own corrections come on top, `servo_drops` / `servo_repeats` minus the walk
+  steps). A jump of tens within a second is the old steep walk: a finding.
 - A `pipe ran low — topped up with silence` warn line now means the pipe read under one block for
   a whole hub period (a pw-cat starving), never a momentary low in a catch-up gap.
 
@@ -189,8 +193,16 @@ guard and one cap rule.
     what the 1 ms/s spacing leaves after the drift. Both always point the same way.
   - The drift's share of the second is spent first. Each walk correction done moves the setpoint
     one frame. So the walk can never take the drift's budget (spending the walk first let the
-    -200 ppm drift error grow 133 -> 136), and under a heavy drift the walk slows instead: at
-    -200 ppm ~17 are planned and ~16 fit on 256-frame blocks, so one block takes 45 s.
+    -200 ppm drift error grow 133 -> 136), and under a heavy drift the walk slows instead.
+  - Each walk step also keeps its own spacing, `SERVO_WALK_SPACING_FRAMES` = a second over 7,
+    rounded up (6858 frames), so no span of one second ever holds more than 7 walk steps. Without
+    it a second that also carried a drift correction spaced its 7 walk steps at 6144 frames, and
+    the next second's walk followed at once: 8 walk steps inside one bench second in the
+    growing-gap replay (review round 1). At -200 ppm the drift's ~10 corrections a second leave
+    room for ~3 walk steps: one block takes ~85 s there (a clean sender: 37 s).
+  - Visible on `/api/state` (review round 1): the jitter facet's `setpoint_frames` (where a walk
+    stands; `depth_frames` follows it, not `target_frames`) and `servo_walk_steps` (the share of
+    `servo_drops` + `servo_repeats` that walked a target change in).
   - The fill is judged against the window's MEAN setpoint, carried to its end point: a walk moves
     both during the window, and against the end point the walk's own progress reads as a ~3.5-frame
     error.
@@ -205,7 +217,9 @@ guard and one cap rule.
   - A prime, an underrun's re-prime and an overrun trim put the fill exactly at the target and
     end the walk there.
   - `set_target` keeps the window and its drift budget and drops only an unspent walk share.
-    Restarting the window paused a slow sender's repeats for a whole second.
+    Restarting the window paused a slow sender's repeats for a whole second. Without the drop, a
+    raise reversed in the middle of a second left 1-7 stray repeats after the reversal and ended
+    2-14 frames off the target (review round 1; now pinned).
 - **The starvation-only refill (`pipe_fill`).**
   - `pipe_fill_plan(fill, block, starved)`. `PipeFillControl` decides `starved`: the first write
     (the prime), or a fill under one block on EVERY reading for at least one hub period
@@ -230,22 +244,34 @@ guard and one cap rule.
     old 5-block headroom they reached the cap, the leg trimmed to its target and the caught-up pops
     then ran it dry.
 - **Tests** (all Tier-0 replicable):
-  - `tests/setpoint_walk_1401.rs` (new). It counts every correction by its output frame and bounds
-    them in EVERY 1 s span, not in a bench second that may straddle two servo windows. It covers:
-    - a raise and a lowering on a clean sender (<= 7, exactly one block, 36-40 s);
-    - the FOH burst pattern at a fixed 19.4 / 25 / 27.6 ms gap (<= 7);
+  - `tests/setpoint_walk_1401.rs` (new). It counts every correction by its output frame, tells a
+    walk step from a drift correction by `servo_walk_steps`, and bounds them in EVERY 1 s span,
+    not in a bench second that may straddle two servo windows. It covers:
+    - a raise and a lowering on a clean sender (<= 7, exactly one block, every one a walk step,
+      36-40 s);
+    - the FOH burst pattern at a fixed 19.4 / 25 / 27.6 / 31 / 35 ms gap, at the adaptive rule's
+      target and one or two blocks above (<= 7 walk steps; <= 7 corrections up to 25 ms, <= 8
+      from 27.6 ms; a 35 ms control with no move that still needs a drift correction);
     - the give-up carried by the setpoint (no correction against the walk);
+    - a raise reversed in the middle of a second (no repeat after it, the walked frames come back
+      out, the leg ends at the target);
     - +-200 ppm (depth within 147 of the setpoint, the drift error within 2 frames of its
-      pre-raise equilibrium, no pause in a slow sender's repeats at the raise);
+      pre-raise equilibrium while the walk runs, <= 7 walk steps a second, a second's
+      corrections never closer than 2000 frames, no pause in a slow sender's repeats at the
+      raise, the walk done within 100 s);
     - `set_target` / prime / trim / re-prime.
   - `hub_catchup_1401.rs`: the derived caps, the 21-24 ms and 26 ms rows.
   - `egress_servo_1401.rs`: the refill rule (one reading, a period short by 1 ns, a period, a good
     reading in between, a blocked pw-cat, the prime / trim / top-up).
   - `egress_fill_1401.rs`: the guard table with `starved`.
-  - `adaptive_target_1401.rs`: the replays' walk bound.
-  - A mutation pass over the walk, the refill and the caps (14 mutants) left no survivor. Three of
-    the pins above exist because the first test set let a mutant through: the band, the drift-first
-    order, and keeping the window at `set_target`.
+  - `adaptive_target_1401.rs`: the replays' walk bound (<= 7 walk steps a second, <= 8
+    corrections).
+  - `vban_jitter_state_1401.rs` (CI only): `setpoint_frames` and `servo_walk_steps` in the facet.
+  - A mutation pass over the walk, the refill and the caps (17 mutants) leaves no survivor. Several
+    pins exist because an earlier test set let a mutant through: the band, the drift-first order
+    and keeping the window at `set_target` (the lane's own pass), the cancel of the unspent walk
+    share (found by review round 1), and a second's corrections staying spread across it (an
+    uncapped walk plan otherwise bunched them at the 1000-frame spacing).
 
 ## Tier-0 verify (no cargo)
 
@@ -262,7 +288,7 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   the two real-pipe sink writers; the rest needs state / matrix) and `setpoint_walk_1401`, under
   `rustc --test` and `clippy-driver --test -D warnings`. Set
   `CARGO_MANIFEST_DIR=<worktree>/intercom/hub` at COMPILE time for the tests that read the unit and
-  main.rs. 109 tests, ~4 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
+  main.rs. 111 tests, ~4 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
   takes ~6 s and the growing-gap replay ~10 s.
 - **R2:** state.rs (serde stripped, its in-file tests cut) + inputs.rs over stub matrix /
   local_audio / janus_rtp / ndi_video modules. Since step 4 `vban_jitter` needs `block_clock`

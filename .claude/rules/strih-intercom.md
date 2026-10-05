@@ -340,7 +340,8 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     `CATCHUP_MAX_BLOCKS` (4) + 1 (the current tick) + `VBAN_CAP_HEADROOM_BLOCKS` (1). That is
     `VBAN_CAP_BLOCKS` 9 and `VBAN_PROGRAM_CAP_BLOCKS` 12, and `set_target` keeps the 6 blocks of
     headroom at every adaptive target. So what arrives while the block loop runs up to four ticks
-    late never trims a leg (with 5 blocks a cambox overran and then underran on most 26 ms stalls).
+    late never trims a leg (with 5 blocks a cambox overran and then underran on 24 of 57 stalls of
+    26 ms).
   - Local captures + Janus -> `local_capture` (unchanged).
   - Everything else (no ingress) -> the plain `new`.
   - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
@@ -407,7 +408,9 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     controller and was not taken.
 - **Observability.**
   - `/api/state` VBAN participants carry `jitter: {target_frames (live: a program feed's follows
-    its sender), depth_frames (1 s mean pre-pop fill), depth_min_frames (the 1 s low-water mark;
+    its sender), setpoint_frames + servo_walk_steps (where a target change's gentle walk stands
+    and how many of the corrections walked it, hub step 4), depth_frames (1 s mean pre-pop fill,
+    following the setpoint), depth_min_frames (the 1 s low-water mark;
     margin = this minus one block), servo_drops, servo_repeats, stalls, primed}`, and a program
     feed also `max_gap_ms_10min` (the largest gap its target follows, 0.1 ms resolution; omitted
     on a cambox).
