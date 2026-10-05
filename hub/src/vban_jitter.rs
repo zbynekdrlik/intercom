@@ -35,7 +35,10 @@
 //!   cap, where the next packet would overrun again).
 //! - **A live setpoint.** A program feed's target follows its sender's gaps
 //!   ([`crate::adaptive_target`]); [`NetworkFill::set_target`] moves the target and the cap with
-//!   it, and the servo walks the fill there.
+//!   it. The servo then walks its setpoint to the new target GENTLY, at most
+//!   [`SERVO_WALK_MAX_PER_WINDOW`] frames a second, on top of the drift correction's own budget
+//!   (design 5981457044): a one-block raise takes about 37 s, never a second of steep-zone
+//!   corrections.
 //!
 //! The same drift servo ([`NetworkFill::servo_step`]) also keeps the `pw-cat` egress pipes at their
 //! depth: there the fill is measured outside the controller ([`crate::pipe_fill`], issue 1401), so
@@ -65,9 +68,27 @@
 /// bursts past it, so since 4.10.2026 they target [`VBAN_PROGRAM_TARGET_BLOCKS`] instead.
 pub const VBAN_TARGET_BLOCKS: usize = 3;
 
-/// The cap of a VBAN network leg, in hub blocks (43 ms at 256 frames / 48 kHz): five blocks of
-/// headroom above the target for a late burst before anything is dropped.
-pub const VBAN_CAP_BLOCKS: usize = 8;
+/// The spare block of a VBAN leg's cap above what a covered stall can bring ([`vban_cap_blocks`]):
+/// the phase of the late wake inside its tick plus the arrival jitter.
+pub const VBAN_CAP_HEADROOM_BLOCKS: usize = 1;
+
+/// The cap of a VBAN network leg with a target of `target_blocks`, in hub blocks: the target, plus
+/// the blocks that arrive while the block loop is late but still catches up (its
+/// [`crate::block_clock::CATCHUP_MAX_BLOCKS`] late ticks and the current one), plus
+/// [`VBAN_CAP_HEADROOM_BLOCKS`] (design 5981457044).
+///
+/// The pop before a stall leaves the fill about one block under its target; while the loop is up
+/// to four ticks late, up to five more blocks plus the wake's phase and the jitter arrive before
+/// the catch-up pops start. Under this cap those arrivals never trim the leg, so the caught-up
+/// pops never run it dry (the step-3 bench: with 5 blocks of headroom a cambox leg overran and
+/// then underran on most 26 ms stalls).
+pub const fn vban_cap_blocks(target_blocks: usize) -> usize {
+    target_blocks + crate::block_clock::CATCHUP_MAX_BLOCKS as usize + 1 + VBAN_CAP_HEADROOM_BLOCKS
+}
+
+/// The cap of a cambox VBAN leg, in hub blocks: [`vban_cap_blocks`] of [`VBAN_TARGET_BLOCKS`]
+/// (9 blocks, 48 ms at 256 frames / 48 kHz).
+pub const VBAN_CAP_BLOCKS: usize = vban_cap_blocks(VBAN_TARGET_BLOCKS);
 
 /// The target fill of a PROGRAM feed (every VBAN leg that is not a cambox: the FOH `fohabl`, `lv1`,
 /// `mbc`), in hub blocks: 32 ms at 256 frames / 48 kHz. The camboxes keep [`VBAN_TARGET_BLOCKS`].
@@ -84,10 +105,11 @@ pub const VBAN_CAP_BLOCKS: usize = 8;
 /// target now follows the largest gap of the last 10 min between this and 64 ms.
 pub const VBAN_PROGRAM_TARGET_BLOCKS: usize = 6;
 
-/// The cap of a program-feed leg at its floor target, in hub blocks: the same five blocks of
-/// headroom above its target as [`VBAN_CAP_BLOCKS`] gives a cambox leg. The cap moves with the
-/// adaptive target ([`NetworkFill::set_target`]), so the headroom stays five blocks.
-pub const VBAN_PROGRAM_CAP_BLOCKS: usize = 11;
+/// The cap of a program-feed leg at its floor target, in hub blocks: [`vban_cap_blocks`] of
+/// [`VBAN_PROGRAM_TARGET_BLOCKS`] (12 blocks). The cap moves with the adaptive target
+/// ([`NetworkFill::set_target`] keeps the headroom), so at every target it is that target's
+/// [`vban_cap_blocks`].
+pub const VBAN_PROGRAM_CAP_BLOCKS: usize = vban_cap_blocks(VBAN_PROGRAM_TARGET_BLOCKS);
 
 /// The servo's averaging window in output frames: 1 s at the 48 kHz hub rate. Long enough that the
 /// packet ripple and the arrival jitter average out of the mean pre-pop fill.
@@ -120,6 +142,15 @@ pub const SERVO_MIN_SPACING_FRAMES: usize = 1_000;
 
 /// The most corrections one second can hold at that spacing.
 const SERVO_MAX_PER_WINDOW: usize = SERVO_WINDOW_FRAMES / SERVO_MIN_SPACING_FRAMES;
+
+/// How fast a setpoint change is walked in: at most this many frames a second, the gentle zone's
+/// own ceiling ([`servo_corrections`] at the knee: (128 - 16) / 16 = 7). A target that
+/// [`NetworkFill::set_target`] moves by one block (256 frames) is reached in about 37 s with at
+/// most 7 corrections a second, never at the steep zone's 48 (design 5981457044: the steep walk of
+/// a raise was the flutter review 1 rejected). Drift correction is measured against the walked
+/// setpoint and keeps its own full budget on top.
+pub const SERVO_WALK_MAX_PER_WINDOW: usize =
+    (SERVO_KNEE_FRAMES - SERVO_DEADBAND_FRAMES).div_ceil(SERVO_GENTLE_DIV);
 
 /// The servo's budget for the next second: how many single frames to drop or repeat for a mean
 /// pre-pop fill `error` frames away from the target. Zero inside the band, then the gentle slope up
@@ -200,8 +231,15 @@ enum Correction {
 pub struct NetworkFill {
     target: usize,
     cap: usize,
+    /// The fill the servo holds now: the target, except while a [`NetworkFill::set_target`]
+    /// change is being walked in ([`SERVO_WALK_MAX_PER_WINDOW`] frames a second at most).
+    setpoint: usize,
+    /// How many of this second's corrections are the walk's (they move the setpoint with them).
+    walk_budget: usize,
     primed: bool,
     win_sum: u64,
+    /// The setpoint summed over the window's pops: a walk moves it during the window.
+    win_setpoint_sum: u64,
     win_min: usize,
     win_pops: u64,
     win_frames: usize,
@@ -222,11 +260,15 @@ impl NetworkFill {
     /// target is clamped into `1..=cap`.
     pub fn new(target_frames: usize, cap_frames: usize) -> Self {
         let cap = cap_frames.max(1);
+        let target = target_frames.clamp(1, cap);
         NetworkFill {
-            target: target_frames.clamp(1, cap),
+            target,
             cap,
+            setpoint: target,
+            walk_budget: 0,
             primed: false,
             win_sum: 0,
+            win_setpoint_sum: 0,
             win_min: usize::MAX,
             win_pops: 0,
             win_frames: 0,
@@ -247,24 +289,42 @@ impl NetworkFill {
         self.target
     }
 
+    /// The fill the servo holds now: the target, or, while a [`NetworkFill::set_target`] change
+    /// is being walked in, the point the walk has reached.
+    pub fn setpoint(&self) -> usize {
+        self.setpoint
+    }
+
     /// Move the target to `target_frames` (at least 1), and the cap with it: the headroom above the
-    /// target stays what it was. Nothing is dropped or padded; the servo walks the fill to the new
-    /// target from its next full window (the current window and any pending corrections are
-    /// forgotten, they were measured against the old target). A leg that is priming primes to it.
+    /// target stays what it was (for a VBAN leg the [`vban_cap_blocks`] rule at every target).
+    /// Nothing is dropped or padded. The servo keeps holding its current setpoint and walks it to
+    /// the new target at most [`SERVO_WALK_MAX_PER_WINDOW`] frames a second, on top of the drift
+    /// correction (design 5981457044). The current window and its drift budget stay: they were
+    /// measured against that setpoint, which did not move; only an unspent part of this second's
+    /// walk toward an older target is cancelled. A leg that is priming primes to the new target.
     pub fn set_target(&mut self, target_frames: usize) {
         let headroom = self.cap - self.target;
         self.target = target_frames.max(1);
         self.cap = self.target.saturating_add(headroom);
-        self.restart_window();
+        if !self.primed {
+            self.setpoint = self.target;
+        }
+        self.budget = self.budget.saturating_sub(self.walk_budget);
+        self.walk_budget = 0;
+        if self.budget == 0 {
+            self.correction = Correction::None;
+        }
     }
 
     /// Called after a packet was appended, with the fill it left: `Some(keep)` = above the cap, drop
     /// the OLDEST audio down to `keep` frames (one overrun, counted by the caller). The servo
-    /// window restarts, so the high fill before the trim does not steer the next second.
+    /// window restarts, so the high fill before the trim does not steer the next second. The trim
+    /// leaves the fill exactly at the target, so a walk in progress ends there.
     pub fn overrun_keep(&mut self, fill: usize) -> Option<usize> {
         if fill <= self.cap {
             return None;
         }
+        self.setpoint = self.target;
         self.restart_window();
         Some(self.target)
     }
@@ -272,6 +332,7 @@ impl NetworkFill {
     /// The buffer was emptied (its channel layout changed): prime again from nothing.
     pub fn restart(&mut self) {
         self.primed = false;
+        self.setpoint = self.target;
         self.restart_window();
     }
 
@@ -320,6 +381,8 @@ impl NetworkFill {
                 return PopPlan::Silent { ran_dry: false };
             }
             self.primed = true;
+            // The prime starts exactly at the target: a walk in progress ends there.
+            self.setpoint = self.target;
             self.restart_window();
             skip = fill - prime;
         }
@@ -366,14 +429,30 @@ impl NetworkFill {
         if step != ServoStep::Keep {
             self.budget -= 1;
             self.since_correction = 0;
+            if self.budget < self.walk_budget {
+                // The drift's share of this second is spent first (so a correction it planned is
+                // never lost to the walk), then each walk frame done moves the setpoint with it.
+                self.walk_budget -= 1;
+                self.move_setpoint(1);
+            }
         }
         step
+    }
+
+    /// Move the setpoint up to `frames` toward the target, never past it.
+    fn move_setpoint(&mut self, frames: usize) {
+        self.setpoint = if self.target > self.setpoint {
+            self.setpoint.saturating_add(frames).min(self.target)
+        } else {
+            self.setpoint.saturating_sub(frames).max(self.target)
+        };
     }
 
     /// Add one primed pre-pop fill to the window; at the window's end plan the next second's
     /// corrections from the mean.
     fn observe(&mut self, fill: usize, frames: usize) {
         self.win_sum = self.win_sum.saturating_add(fill as u64);
+        self.win_setpoint_sum = self.win_setpoint_sum.saturating_add(self.setpoint as u64);
         self.win_min = self.win_min.min(fill);
         self.win_pops += 1;
         self.win_frames = self.win_frames.saturating_add(frames);
@@ -381,23 +460,71 @@ impl NetworkFill {
             return;
         }
         let mean = usize::try_from(self.win_sum / self.win_pops).unwrap_or(usize::MAX);
+        let setpoint_mean =
+            usize::try_from(self.win_setpoint_sum / self.win_pops).unwrap_or(usize::MAX);
         self.last_mean = mean;
         self.last_min = self.win_min;
-        let n = servo_corrections(mean.abs_diff(self.target));
-        if n > 0 {
-            // Spread evenly over the next second.
-            self.correction = if mean > self.target {
-                Correction::Drop
-            } else {
-                Correction::Repeat
-            };
-            self.budget = n;
-            self.interval = (SERVO_WINDOW_FRAMES / n).max(SERVO_MIN_SPACING_FRAMES);
+        self.plan_window(mean, setpoint_mean);
+        self.reset_window_sums();
+    }
+
+    /// Plan the next second's corrections from the window's mean fill and its mean setpoint.
+    ///
+    /// The fill is judged against where the setpoint WAS over the same window, then carried to the
+    /// setpoint's end point: a walk moves the setpoint (and the fill with it) during the window, and
+    /// against its end point the walk's own progress would read as an error and add a drift
+    /// correction to every walk second. Without a walk the two are the same number.
+    fn plan_window(&mut self, mean: usize, setpoint_mean: usize) {
+        let fill = (mean + self.setpoint).saturating_sub(setpoint_mean);
+        // A fill that sits more than the band past the setpoint toward the target (a sender drifting
+        // that way, a given-up block) has already done that part of the walk: the setpoint moves to
+        // the band behind it (never past the target) with no correction, and nothing pulls the fill
+        // back against the walk. Within the band the setpoint stays, so the 1 s mean's own wobble
+        // never ratchets it forward.
+        let ahead = if self.target > self.setpoint {
+            fill.saturating_sub(self.setpoint)
         } else {
+            self.setpoint.saturating_sub(fill)
+        };
+        self.move_setpoint(ahead.saturating_sub(SERVO_DEADBAND_FRAMES));
+        // Drift is measured against the setpoint, with its full budget. While a walk is left the
+        // fill sits inside the band past the setpoint (no drift correction) or on its far side, so
+        // the drift budget points the same way as the walk and the two simply add up.
+        let drift = servo_corrections(fill.abs_diff(self.setpoint));
+        // The walk toward a moved target: at most SERVO_WALK_MAX_PER_WINDOW corrections this
+        // second, and only what the 1 ms/s spacing leaves after the drift's budget.
+        let walk = self
+            .target
+            .abs_diff(self.setpoint)
+            .min(SERVO_WALK_MAX_PER_WINDOW)
+            .min(SERVO_MAX_PER_WINDOW - drift);
+        let n = drift + walk;
+        if n == 0 {
             self.correction = Correction::None;
             self.budget = 0;
+            self.walk_budget = 0;
+            return;
         }
+        let raise = if walk > 0 {
+            self.target > self.setpoint
+        } else {
+            fill < self.setpoint
+        };
+        self.correction = if raise {
+            Correction::Repeat
+        } else {
+            Correction::Drop
+        };
+        // Spread evenly over the next second.
+        self.budget = n;
+        self.walk_budget = walk;
+        self.interval = (SERVO_WINDOW_FRAMES / n).max(SERVO_MIN_SPACING_FRAMES);
+    }
+
+    /// Start the next window's sums.
+    fn reset_window_sums(&mut self) {
         self.win_sum = 0;
+        self.win_setpoint_sum = 0;
         self.win_min = usize::MAX;
         self.win_pops = 0;
         self.win_frames = 0;
@@ -405,12 +532,10 @@ impl NetworkFill {
 
     /// Forget the current window and any pending correction (priming, an underrun, an overrun trim).
     fn restart_window(&mut self) {
-        self.win_sum = 0;
-        self.win_min = usize::MAX;
-        self.win_pops = 0;
-        self.win_frames = 0;
+        self.reset_window_sums();
         self.correction = Correction::None;
         self.budget = 0;
+        self.walk_budget = 0;
     }
 
     /// The live numbers for `/api/state`.

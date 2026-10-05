@@ -155,12 +155,13 @@ pub struct PipeFillWriter<W> {
 }
 
 impl<W: Write + AsFd> PipeFillWriter<W> {
-    /// Guard `pipe`, which carries interleaved s16 frames of `channels` channels (2 bytes each).
-    pub fn new(pipe: W, channels: u8) -> Self {
+    /// Guard `pipe`, which carries interleaved s16 frames of `channels` channels (2 bytes each) at
+    /// `sample_rate` frames a second (the hub's rate, which pw-cat is spawned with).
+    pub fn new(pipe: W, channels: u8, sample_rate: u32) -> Self {
         PipeFillWriter {
             pipe,
             channels: usize::from(channels.max(1)),
-            control: PipeFillControl::new(),
+            control: PipeFillControl::new(sample_rate),
             epoch: Instant::now(),
         }
     }
@@ -500,7 +501,7 @@ impl PwCatSink {
             .ok_or_else(|| io::Error::other("pw-cat stdin not piped"))?;
         Ok(PwCatSink {
             child,
-            stdin: PipeFillWriter::new(stdin, channels),
+            stdin: PipeFillWriter::new(stdin, channels, rate),
         })
     }
 }

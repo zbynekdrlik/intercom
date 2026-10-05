@@ -6,9 +6,16 @@
 //! one 256-frame block per tick on its own clock. [`PipeFillControl`] decides every block write
 //! from the measured pipe fill:
 //!
-//! - **The guards (last resort, [`pipe_fill_plan`]).** Below one hub block the pipe is topped up
-//!   with silence to [`PIPE_TARGET_FRAMES`] before the block; above [`PIPE_HIGH_FRAMES`] the block
-//!   is dropped. The first write after a spawn reads 0 and gets the same top-up: the PRIME.
+//! - **The guards (last resort, [`pipe_fill_plan`]).** A STARVED pipe is topped up with silence to
+//!   [`PIPE_TARGET_FRAMES`] before the block; above [`PIPE_HIGH_FRAMES`] the block is dropped. The
+//!   first write after a spawn reads 0 and gets the same top-up: the PRIME. A running pipe counts
+//!   as starved only when its fill read under one hub block on consecutive readings for at least
+//!   one hub period ([`PipeFillControl::plan_block`], design 5981457044): during a catch-up stall
+//!   two of pw-cat's quantum reads can land in the write gap, and the pipe then reads low for a few
+//!   ms with the late blocks about to arrive. That is not starvation, and a top-up there was ~40 ms
+//!   of silence the pipe did not need. A pw-cat blocked in its `fread` swallows every block the
+//!   moment it lands, so a really starved pipe reads ~0 on every reading and is confirmed within
+//!   one period.
 //! - **The start hold.** pw-cat reads nothing until its stream runs, and the hub keeps writing
 //!   meanwhile. Until the fill first DROPS after the spawn (pw-cat consumed), a block that would
 //!   take the fill above [`PIPE_TARGET_FRAMES`] is dropped. So pw-cat's first read always finds
@@ -33,6 +40,7 @@
 
 use std::time::Duration;
 
+use crate::janus_pacing::hub_block_period;
 use crate::vban_jitter::{stretch_block, NetworkFill, ServoStep};
 
 /// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
@@ -76,8 +84,8 @@ pub const fn pipe_servo_setpoint(block_frames: usize) -> usize {
 /// What one block write does to a `pw-cat` playback pipe ([`PipeFillControl::plan_block`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeFillPlan {
-    /// The pipe holds less than one hub block: write `silence_frames` of silence (up to
-    /// [`PIPE_TARGET_FRAMES`]), then the block.
+    /// The pipe is starved (or freshly spawned) and holds less than one hub block: write
+    /// `silence_frames` of silence (up to [`PIPE_TARGET_FRAMES`]), then the block.
     TopUp { silence_frames: usize },
     /// The pipe holds more than [`PIPE_HIGH_FRAMES`]: drop the block (a trim).
     Drop,
@@ -106,16 +114,20 @@ impl PipeFillPlan {
 }
 
 /// The two guards of a block write from the pipe's measured fill (issue 1401). `fill_frames` is the
-/// fill before the write, `block_frames` the block being written (one hub block):
+/// fill before the write, `block_frames` the block being written (one hub block), `starved` whether
+/// the pipe is starved: the first write after a spawn (a fresh pipe reads 0), or a fill that read
+/// under one block on consecutive readings for at least one hub period
+/// ([`PipeFillControl::plan_block`] decides it, design 5981457044):
 ///
-/// - below one block: top up with silence to [`PIPE_TARGET_FRAMES`], then write the block. A
-///   fresh pipe (the first write after a spawn) reads 0 and gets the same top-up;
+/// - starved and below one block: top up with silence to [`PIPE_TARGET_FRAMES`], then write the
+///   block;
 /// - above [`PIPE_HIGH_FRAMES`]: drop the block;
-/// - otherwise: write it. A healthy steady state never triggers either guard.
+/// - otherwise (a momentary low included): write it. A healthy steady state never triggers either
+///   guard.
 ///
 /// [`PipeFillControl::plan_block`] adds the start hold and the drift servo to the `Write` case.
-pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize) -> PipeFillPlan {
-    if fill_frames < block_frames {
+pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize, starved: bool) -> PipeFillPlan {
+    if starved && fill_frames < block_frames {
         PipeFillPlan::TopUp {
             silence_frames: PIPE_TARGET_FRAMES.saturating_sub(fill_frames),
         }
@@ -149,8 +161,16 @@ pub struct PipeServoDepth {
 
 /// The fill controller of one `pw-cat` playback pipe from its spawn (see the module doc). A new
 /// pw-cat child gets a new controller.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PipeFillControl {
+    /// The pipe's sample rate (the hub's): one hub block's duration, the period a low fill must
+    /// last before it counts as starved.
+    sample_rate: u32,
+    /// The hub block, as of the last planned write (0 before the prime).
+    block_frames: usize,
+    /// When the current run of readings under one block began; `None` while the last reading held
+    /// at least one block.
+    low_since: Option<u64>,
     /// A block has been planned since the spawn (the next one is not the prime).
     primed: bool,
     /// pw-cat has read from the pipe since the spawn: the start hold is over.
@@ -166,9 +186,20 @@ pub struct PipeFillControl {
 }
 
 impl PipeFillControl {
-    /// A controller for a freshly spawned pipe.
-    pub fn new() -> Self {
-        Self::default()
+    /// A controller for a freshly spawned pipe of `sample_rate` frames a second (the hub's rate).
+    pub fn new(sample_rate: u32) -> Self {
+        PipeFillControl {
+            sample_rate,
+            block_frames: 0,
+            low_since: None,
+            primed: false,
+            started: false,
+            last_fill: 0,
+            last_at: 0,
+            area2: 0,
+            period_at: 0,
+            servo: None,
+        }
     }
 
     /// Whether pw-cat has read since the spawn (the start hold is over).
@@ -192,22 +223,39 @@ impl PipeFillControl {
         }
         self.last_fill = fill_frames;
         self.last_at = at;
+        if fill_frames < self.block_frames {
+            self.low_since.get_or_insert(at);
+        } else {
+            self.low_since = None;
+        }
+    }
+
+    /// Whether the fill has read under one block on every reading for at least one hub period up to
+    /// `at`: the pipe is starved, not just low for a moment between a pw-cat read and the next
+    /// write.
+    fn starved_at(&self, at: u64) -> bool {
+        let period = hub_block_period(self.block_frames, self.sample_rate);
+        self.low_since
+            .is_some_and(|since| u128::from(at - since) >= period.as_nanos())
     }
 
     /// Plan the write of one `block_frames`-frame block, with `fill_frames` read from the pipe at
     /// `at_ns` just before it. The guards come first, then the start hold, then the servo; a guard
-    /// restarts the servo's window (like the VBAN legs' underrun and overrun).
+    /// restarts the servo's window (like the VBAN legs' underrun and overrun). The top-up guard
+    /// fires only for the prime or a starved pipe (see [`pipe_fill_plan`]).
     pub fn plan_block(
         &mut self,
         at_ns: u64,
         fill_frames: usize,
         block_frames: usize,
     ) -> PipeWriteReport {
+        self.block_frames = block_frames;
         self.sample(at_ns, fill_frames);
         let at = self.last_at;
         let first = !self.primed;
         self.primed = true;
-        let plan = match pipe_fill_plan(fill_frames, block_frames) {
+        let starved = first || self.starved_at(at);
+        let plan = match pipe_fill_plan(fill_frames, block_frames, starved) {
             PipeFillPlan::Write if !self.started => {
                 if fill_frames + block_frames > PIPE_TARGET_FRAMES {
                     PipeFillPlan::StartHold
@@ -227,6 +275,12 @@ impl PipeFillControl {
         self.last_fill = fill_frames + plan.written_frames(block_frames);
         self.area2 = 0;
         self.period_at = at;
+        if matches!(plan, PipeFillPlan::TopUp { .. }) {
+            // The pipe now holds the target: any low run before it is over. A plain block write
+            // never ends one by itself, since a pw-cat blocked in its read swallows it at once;
+            // the next reading tells.
+            self.low_since = None;
+        }
         PipeWriteReport {
             fill_frames,
             plan,

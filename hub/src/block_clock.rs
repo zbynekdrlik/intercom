@@ -16,21 +16,22 @@
 //! has its own receive jitter buffer. Only the part beyond it is given up, through the VBAN legs'
 //! `skip_missed`, and counted (`lost_ticks`).
 //!
-//! What the two-clock bench (`tests/hub_catchup_1401.rs`) measured: a wake up to about 18 ms late
-//! costs nothing anywhere. Later than that a `pw-cat` pipe can fall under one block when two of its
-//! quantum reads land inside the write gap, and its guard tops it up with silence; past about
-//! 24 ms a cambox leg's cap can trim while the loop is late. Both are counted, never silent.
+//! What the two-clock bench (`tests/hub_catchup_1401.rs`) measured: a wake up to about 26 ms late
+//! (four ticks run late) costs nothing anywhere since step 4 (design 5981457044). A `pw-cat` pipe
+//! that reads under one block for a moment when two of its quantum reads land inside the write
+//! gap is no longer topped up (only a pipe starved for a whole hub period is), and every VBAN
+//! leg's cap holds what arrives while the loop is late ([`crate::vban_jitter::vban_cap_blocks`]).
+//! Past the catch-up a stall is a counted loss, never a silent one.
 //!
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557).
 
 use std::time::Duration;
 
 /// The most missed ticks one wake runs late: 4 blocks (21.3 ms at 256 frames / 48 kHz, design
-/// 5980775411). A cambox VBAN leg trims above its 3-block target plus 5 blocks of headroom; the
-/// pop of the last tick before a stall left it one block under the target, so the blocks that
-/// arrive while the loop is up to 4 ticks late (plus the current one) reach exactly that cap:
-/// arrival jitter can trim it from about 24 ms late (the bench). Beyond this the part past the
-/// first four is given up instead (`TickBatch::lost`).
+/// 5980775411). Every VBAN leg's cap is derived from it ([`crate::vban_jitter::vban_cap_blocks`]:
+/// the target + these ticks + the current one + one block of headroom), so the blocks that arrive
+/// while the loop is up to 4 ticks late never trim a leg. Beyond this the part past the first four
+/// is given up instead (`TickBatch::lost`).
 pub const CATCHUP_MAX_BLOCKS: u64 = 4;
 
 /// What one wake of the block loop does with the ticks that are due.
