@@ -27,3 +27,16 @@ pipewire_target = "strih-program"
 source_streams = ["stream"]
 in_channels = 0
 out_channels = 2
+
+# The program mix is summed through these points (source_streams only names the streams).
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "program_out"
+out_ch = 1
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "program_out"
+out_ch = 2
