@@ -32,7 +32,7 @@ fn assert_program_only(toml: &str, stream: &str) {
         .iter()
         .map(|p| (p.src, p.in_ch, p.dst, p.out_ch, p.gain_db))
         .collect();
-    routes.sort_by(|a, b| a.1.cmp(&b.1));
+    routes.sort_by_key(|r| r.1);
     assert_eq!(
         routes,
         [(src_id, 1, out_id, 1, 0.0), (src_id, 2, out_id, 2, 0.0)],
