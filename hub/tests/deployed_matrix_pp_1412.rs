@@ -1,6 +1,6 @@
 //! issue 1412: the Poprad strih's program-only matrix (`intercom/intercom.strih-pp.toml`) must LOAD
 //! through the same `Matrix::from_toml` the daemon runs, and carry exactly the program path:
-//! resolume-pp's VBAN `pp-strih` -> the `strih-program` PipeWire sink. No cambox, no Janus, no picture.
+//! lv1's VBAN `strih` -> the `strih-program` PipeWire sink. No cambox, no Janus, no picture.
 
 use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
@@ -9,18 +9,19 @@ const STREAM_PP_TOML: &str = include_str!("../../intercom.stream-pp.toml");
 
 #[test]
 fn strih_pp_matrix_loads_as_a_program_only_hub() {
-    assert_program_only(PP_TOML, "pp-strih");
+    assert_program_only(PP_TOML, "strih");
 }
 
-/// issue 1412 slice B: the Linux stream box takes its program audio as VBAN `pp-stream` from resolume-pp.
+/// issue 1412 slice B: the Linux stream box takes its program audio as VBAN `stream` from lv1
+/// (owner ROZHODNUTE 11.10.2026).
 #[test]
 fn stream_pp_matrix_loads_as_a_program_only_hub() {
-    assert_program_only(STREAM_PP_TOML, "pp-stream");
+    assert_program_only(STREAM_PP_TOML, "stream");
 }
 
 fn assert_program_only(toml: &str, stream: &str) {
     let m = Matrix::from_toml(toml).expect("the PP matrix must load through Matrix::from_toml");
-    assert_eq!(m.participants.len(), 2, "resolume-pp + program_out only");
+    assert_eq!(m.participants.len(), 2, "lv1 + program_out only");
     assert!(m.points.is_empty(), "no intercom routing points");
     assert!(m.janus.is_none(), "no Janus phones leg in PP yet");
     assert!(m.video.is_none(), "no Interkom picture in PP yet");
@@ -29,7 +30,7 @@ fn assert_program_only(toml: &str, stream: &str) {
         "the PP hub must never SEND VBAN (no cambox participant)"
     );
 
-    let src = &m.participants[m.id_of("resolume-pp").expect("resolume-pp")];
+    let src = &m.participants[m.id_of("lv1").expect("lv1")];
     assert_eq!(src.adapter, ADAPTER_VBAN);
     assert_eq!(src.role, "program_ref");
     assert_eq!(src.in_stream.as_deref(), Some(stream));
