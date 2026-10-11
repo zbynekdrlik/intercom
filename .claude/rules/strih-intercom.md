@@ -248,7 +248,7 @@ must reach the OPERATOR's PipeWire session, but a dynamic uid cannot traverse th
 `/run/user/<uid>` to reach `pipewire-0`. So step 12's drop-in
 (`/etc/systemd/system/intercom-hub.service.d/10-local-audio.conf`) OVERRIDES `DynamicUser=no` +
 `User=<operator>` + `XDG_RUNTIME_DIR=/run/user/<uid>` + `SupplementaryGroups=audio pipewire render`
-+ `After=user@<uid>.service` + `ProtectHome=read-only`, so the hub (and its pw-cat children) run in
++ `After=user@<uid>.service` (in the drop-in's `[Unit]` section: systemd ignores it in `[Service]`, issue 1412) + `ProtectHome=read-only`, so the hub (and its pw-cat children) run in
 the operator's audio session. Rejected alternatives: a `systemd --user` unit (changes the enable-only
 install + the #1345 provisioning contract) and a sidecar (a 2nd process + IPC socket). The base
 `systemd/intercom-hub.service` is unchanged except a comment; the VBAN-only M1 hub still runs under
