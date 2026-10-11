@@ -1,0 +1,30 @@
+# strih-pp intercom hub routing (issue 1412, the Poprad rework of 11.10.2026) -- PROGRAM-ONLY.
+# Hand-written (not generated from a VB-Matrix XML): the PP intercom stays VDO.Ninja for now, so the hub
+# carries only the program audio. resolume-pp sends the program mix as the VBAN stream `pp-strih` (owner
+# ROZHODNUTE 11.10.2026, the resampler on resolume-pp); the hub writes it to the `strih-program` PipeWire
+# sink, which OBS captures as its program audio input (the strih-lx program path, issue 1344).
+# Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
+
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "resolume-pp"
+role = "program_ref"
+adapter = "vban"
+host = "resolume-pp.lan"
+in_stream = "pp-strih"
+in_channels = 2
+out_channels = 0
+
+[[participant]]
+name = "program_out"
+role = "program_out"
+adapter = "pipewire"
+pipewire_target = "strih-program"
+source_streams = ["pp-strih"]
+in_channels = 0
+out_channels = 2
