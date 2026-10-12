@@ -76,8 +76,9 @@ Launching `intercom-hub` against the live rig SENDS VBAN back to the real cambox
 cut-over. So:
 
 - The systemd unit (`systemd/intercom-hub.service`) is installed by `setup-strih.sh` (step 13) —
-  enabled, and since issue 1418 STARTED on the strih role when it is not running (the interkom runs
-  on it since the cut-over); a running hub is never restarted by provisioning. `verify-strih.sh`
+  enabled, and since issue 1418 STARTED on the strih role when it is not running, right after step 14
+  writes the room secret its `LoadCredential` needs (the interkom runs on it since the cut-over); a
+  running hub is never restarted by provisioning. `verify-strih.sh`
   item 16 FAILs an inactive hub on the strih role and only reports it on the stream role. (The
   enable-only rule below was the parallel-run contract.)
 - **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
