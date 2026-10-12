@@ -5,7 +5,7 @@
 //! restarts a running one. `verify-strih.sh` FAILs an inactive hub on the strih role and only reports
 //! it on the stream role, and the `intercom-hub` CI job builds/tests/uploads it. These
 //! tests pin that wiring textually (same `read + .contains` convention as
-//! `tests/strih_provision_pure_functions.rs`), so a silent removal or a stray `systemctl start`
+//! `tests/strih_provision_pure_functions.rs`), so a silent removal, a restart or an ungated start
 //! surfaces on CI. Std-only — runs in the appliance `test` job (Tier-0 #557: CI is the first run).
 
 use std::path::PathBuf;
@@ -48,6 +48,12 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
     assert!(
         gate < active && active < start,
         "gate -> is-active -> start, in that order"
+    );
+    // The unit's LoadCredential needs the room secret step 14 writes: start only after it.
+    let step14 = s.find("step 14 ").expect("step 14");
+    assert!(
+        step14 < start,
+        "the hub starts after step 14 wrote its room secret"
     );
     assert!(
         !s.contains("systemctl restart intercom-hub"),
