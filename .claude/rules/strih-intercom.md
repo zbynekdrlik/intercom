@@ -75,9 +75,11 @@ Launching `intercom-hub` against the live rig SENDS VBAN back to the real cambox
 — which would collide with the Windows strih that is still their production hub until the M4
 cut-over. So:
 
-- The systemd unit (`systemd/intercom-hub.service`) is installed **ENABLE-ONLY** by
-  `setup-strih.sh` (step 13) — enabled, NEVER started/restarted. `verify-strih.sh` reports it
-  report-only (an installed+enabled but inactive unit is correct while parallel).
+- The systemd unit (`systemd/intercom-hub.service`) is installed by `setup-strih.sh` (step 13) —
+  enabled, and since issue 1418 STARTED on the strih role when it is not running (the interkom runs
+  on it since the cut-over); a running hub is never restarted by provisioning. `verify-strih.sh`
+  item 16 FAILs an inactive hub on the strih role and only reports it on the stream role. (The
+  enable-only rule below was the parallel-run contract.)
 - **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
   `scripts/strih-boxes/<box>.env` (strih-lx: `intercom/intercom.strih-lx.toml`). A second strih
   (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-lx
