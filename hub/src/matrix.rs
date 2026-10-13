@@ -26,6 +26,10 @@ pub const ADAPTER_JANUS: &str = "janus";
 /// The local PipeWire adapter (issue 1344): the `program_out` sink (egress) + the talkback capture
 /// (ingress) that replace the last VB-Matrix function on the strih-snv notebook.
 pub const ADAPTER_PIPEWIRE: &str = "pipewire";
+/// The hub's own HDMI audio leg (issue 1424 part 3): the participant's N-1 bus played straight into
+/// the ALSA hw PCM of a NAMED connector (`hdmi_connector`) by a supervised `aplay`, no PipeWire node
+/// (the strih-pp vestibule TV behind the HDMI-to-SDI converter on HDMI-1). An output only.
+pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
 
 /// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
 pub const JANUS_ONLY_ROLE: &str = "phones";
@@ -190,6 +194,11 @@ pub struct Participant {
     /// on and what `/api/state` reports — issue 1344.
     #[serde(default)]
     pub source_streams: Vec<String>,
+    /// The connector an `alsa_hdmi` participant plays on, as X RandR names it (`HDMI-1`); resolved
+    /// to its ALSA hw PCM by the connector's EDID against the PCMs' ELDs, never a card/device number
+    /// (issue 1424 part 3). Only on the `alsa_hdmi` adapter.
+    #[serde(default)]
+    pub hdmi_connector: Option<String>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -287,6 +296,7 @@ impl Matrix {
 
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
+        let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
@@ -295,8 +305,48 @@ impl Matrix {
                 && p.adapter != ADAPTER_NONE
                 && p.adapter != ADAPTER_JANUS
                 && p.adapter != ADAPTER_PIPEWIRE
+                && p.adapter != ADAPTER_ALSA_HDMI
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
+            }
+            // The HDMI leg (issue 1424 part 3): a named connector, an output only, one participant
+            // per connector (one aplay per hw PCM).
+            if p.adapter == ADAPTER_ALSA_HDMI {
+                let connector = p.hdmi_connector.as_deref().unwrap_or("");
+                if connector.is_empty() || connector.chars().any(char::is_whitespace) {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' needs an hdmi_connector (the X RandR output name, e.g. HDMI-1), got '{}'",
+                        p.name,
+                        connector
+                    );
+                }
+                if p.in_channels != 0 {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' is an output only (in_channels must be 0, got {})",
+                        p.name,
+                        p.in_channels
+                    );
+                }
+                if !(1..=8).contains(&p.out_channels) {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' needs 1..=8 out_channels, got {}",
+                        p.name,
+                        p.out_channels
+                    );
+                }
+                if !hdmi_connectors.insert(connector) {
+                    bail!(
+                        "participant '{}': hdmi_connector '{}' is already played by another participant",
+                        p.name,
+                        connector
+                    );
+                }
+            } else if p.hdmi_connector.is_some() {
+                bail!(
+                    "participant '{}': hdmi_connector is only for adapter 'alsa_hdmi' (got '{}')",
+                    p.name,
+                    p.adapter
+                );
             }
             if p.adapter == ADAPTER_VBAN && p.out_stream.is_some() && p.host.is_none() {
                 bail!(
@@ -581,6 +631,21 @@ impl Matrix {
                 } else {
                     None
                 }
+            })
+            .collect()
+    }
+
+    /// The hub's HDMI audio legs (issue 1424 part 3), as `(participant id, connector, out_channels)`:
+    /// every `alsa_hdmi` participant, fed from its OWN N-1 output bus.
+    pub fn alsa_hdmi_outputs(&self) -> Vec<(usize, String, usize)> {
+        self.participants
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.adapter == ADAPTER_ALSA_HDMI)
+            .filter_map(|(id, p)| {
+                p.hdmi_connector
+                    .clone()
+                    .map(|connector| (id, connector, p.out_channels))
             })
             .collect()
     }

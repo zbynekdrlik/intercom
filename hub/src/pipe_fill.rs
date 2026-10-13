@@ -78,7 +78,26 @@ pub const PIPE_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 /// servo (at most ~9 corrections a second, settled within ~60 s), and every restart then sits at
 /// the same depth.
 pub const fn pipe_servo_setpoint(block_frames: usize) -> usize {
-    (PIPE_TARGET_FRAMES + block_frames).saturating_sub(PW_GRAPH_BURST_FRAMES / 2)
+    pipe_servo_setpoint_for(block_frames, PW_GRAPH_BURST_FRAMES)
+}
+
+/// The fill a pipe whose reader takes `read_frames` at a time is primed to: two reads. pw-cat reads
+/// a whole graph quantum ([`PIPE_TARGET_FRAMES`]); `aplay` on an HDMI hw PCM reads one ALSA period
+/// (issue 1424 part 3: 256 frames, so 512 = 10.7 ms).
+pub const fn pipe_target_frames_for(read_frames: usize) -> usize {
+    2 * read_frames
+}
+
+/// The trim mark for that reader: the target + two more reads ([`PIPE_HIGH_FRAMES`] for pw-cat).
+pub const fn pipe_high_frames_for(read_frames: usize) -> usize {
+    pipe_target_frames_for(read_frames) + 2 * read_frames
+}
+
+/// The servo's setpoint for that reader, derived exactly like [`pipe_servo_setpoint`]: the prime
+/// minus half a read. pw-cat at the 256-frame hub block: 1792; aplay reading 256-frame periods: 640
+/// frames (13.3 ms).
+pub const fn pipe_servo_setpoint_for(block_frames: usize, read_frames: usize) -> usize {
+    (pipe_target_frames_for(read_frames) + block_frames).saturating_sub(read_frames / 2)
 }
 
 /// What one block write does to a `pw-cat` playback pipe ([`PipeFillControl::plan_block`]).
@@ -127,11 +146,22 @@ impl PipeFillPlan {
 ///
 /// [`PipeFillControl::plan_block`] adds the start hold and the drift servo to the `Write` case.
 pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize, starved: bool) -> PipeFillPlan {
+    pipe_fill_plan_for(fill_frames, block_frames, starved, PW_GRAPH_BURST_FRAMES)
+}
+
+/// [`pipe_fill_plan`] for a reader that takes `read_frames` at a time (its target and trim mark are
+/// [`pipe_target_frames_for`] / [`pipe_high_frames_for`]).
+pub fn pipe_fill_plan_for(
+    fill_frames: usize,
+    block_frames: usize,
+    starved: bool,
+    read_frames: usize,
+) -> PipeFillPlan {
     if starved && fill_frames < block_frames {
         PipeFillPlan::TopUp {
-            silence_frames: PIPE_TARGET_FRAMES.saturating_sub(fill_frames),
+            silence_frames: pipe_target_frames_for(read_frames).saturating_sub(fill_frames),
         }
-    } else if fill_frames > PIPE_HIGH_FRAMES {
+    } else if fill_frames > pipe_high_frames_for(read_frames) {
         PipeFillPlan::Drop
     } else {
         PipeFillPlan::Write
@@ -166,6 +196,12 @@ pub struct PipeFillControl {
     /// The pipe's sample rate (the hub's): one hub block's duration, the period a low fill must
     /// last before it counts as starved.
     sample_rate: u32,
+    /// How many frames the pipe's reader takes at a time: pw-cat's graph quantum, or aplay's ALSA
+    /// period (issue 1424). The prime, the trim mark and the servo setpoint follow it.
+    read_frames: usize,
+    /// The reader's own buffer a spawn fills before the pipe holds anything (aplay: its ALSA buffer
+    /// plus the period it holds while blocked on the PCM; 0 for pw-cat). Added to the prime only.
+    reader_buffer: usize,
     /// The hub block, as of the last planned write (0 before the prime).
     block_frames: usize,
     /// When the current run of readings under one block began; `None` while the last reading held
@@ -186,10 +222,19 @@ pub struct PipeFillControl {
 }
 
 impl PipeFillControl {
-    /// A controller for a freshly spawned pipe of `sample_rate` frames a second (the hub's rate).
+    /// A controller for a freshly spawned pw-cat pipe of `sample_rate` frames a second (the hub's
+    /// rate): pw-cat reads a whole graph quantum ([`PW_GRAPH_BURST_FRAMES`]).
     pub fn new(sample_rate: u32) -> Self {
+        Self::with_quantum(sample_rate, PW_GRAPH_BURST_FRAMES)
+    }
+
+    /// A controller for a pipe whose reader takes `read_frames` at a time (issue 1424: aplay on an
+    /// HDMI hw PCM reads one 256-frame ALSA period, so its pipe holds 640 frames, not 1792).
+    pub fn with_quantum(sample_rate: u32, read_frames: usize) -> Self {
         PipeFillControl {
             sample_rate,
+            read_frames: read_frames.max(1),
+            reader_buffer: 0,
             block_frames: 0,
             low_since: None,
             primed: false,
@@ -200,6 +245,15 @@ impl PipeFillControl {
             period_at: 0,
             servo: None,
         }
+    }
+
+    /// The same controller whose reader first fills `frames` of its own buffer (issue 1424: aplay
+    /// pulls its 1024-frame ALSA buffer + one period from the pipe the moment it starts). The prime
+    /// adds them, so the pipe still holds the target once the reader is full and the first reads
+    /// never starve it; every later top-up stays at the target.
+    pub fn with_reader_buffer(mut self, frames: usize) -> Self {
+        self.reader_buffer = frames;
+        self
     }
 
     /// Whether pw-cat has read since the spawn (the start hold is over).
@@ -255,9 +309,9 @@ impl PipeFillControl {
         let first = !self.primed;
         self.primed = true;
         let starved = first || self.starved_at(at);
-        let plan = match pipe_fill_plan(fill_frames, block_frames, starved) {
+        let plan = match pipe_fill_plan_for(fill_frames, block_frames, starved, self.read_frames) {
             PipeFillPlan::Write if !self.started => {
-                if fill_frames + block_frames > PIPE_TARGET_FRAMES {
+                if fill_frames + block_frames > pipe_target_frames_for(self.read_frames) {
                     PipeFillPlan::StartHold
                 } else {
                     PipeFillPlan::Write
@@ -270,6 +324,12 @@ impl PipeFillControl {
                 }
                 guard
             }
+        };
+        let plan = match plan {
+            PipeFillPlan::TopUp { silence_frames } if first => PipeFillPlan::TopUp {
+                silence_frames: silence_frames + self.reader_buffer,
+            },
+            other => other,
         };
         // The write is immediate: a new period starts with what it left in the pipe.
         self.last_fill = fill_frames + plan.written_frames(block_frames);
@@ -296,8 +356,12 @@ impl PipeFillControl {
             // The hold ended at this very reading: nothing measured since but the reading itself.
             None => fill_frames,
         };
+        let read_frames = self.read_frames;
         let servo = self.servo.get_or_insert_with(|| {
-            NetworkFill::new(pipe_servo_setpoint(block_frames), PIPE_HIGH_FRAMES)
+            NetworkFill::new(
+                pipe_servo_setpoint_for(block_frames, read_frames),
+                pipe_high_frames_for(read_frames),
+            )
         });
         match servo.servo_step(mean, block_frames) {
             ServoStep::Keep => PipeFillPlan::Write,

@@ -57,7 +57,7 @@ pub const PW_CAT_FORMAT: &str = "s16";
 /// The queue depth for the egress channel: ~64 blocks (~0.3 s at 256-frame blocks). When it is full
 /// the feeder's best-effort `try_send` DROPS THE NEW block (it never evicts a queued one and never
 /// blocks the mix loop) — a dropped ~5 ms block is tolerable program jitter; a stalled mix loop is not.
-const EGRESS_QUEUE_BLOCKS: usize = 64;
+pub(crate) const EGRESS_QUEUE_BLOCKS: usize = 64;
 
 /// The node latency (in frames at `--rate`) the capture child asks PipeWire for: the MiniFuse graph
 /// quantum itself ([`PW_GRAPH_BURST_FRAMES`], 1024). A smaller request pulls the WHOLE graph down to
@@ -158,10 +158,16 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
     /// Guard `pipe`, which carries interleaved s16 frames of `channels` channels (2 bytes each) at
     /// `sample_rate` frames a second (the hub's rate, which pw-cat is spawned with).
     pub fn new(pipe: W, channels: u8, sample_rate: u32) -> Self {
+        Self::with_control(pipe, channels, PipeFillControl::new(sample_rate))
+    }
+
+    /// The same guard with its own controller (issue 1424: `aplay` on an HDMI hw PCM reads one
+    /// 256-frame ALSA period, [`PipeFillControl::with_quantum`]).
+    pub fn with_control(pipe: W, channels: u8, control: PipeFillControl) -> Self {
         PipeFillWriter {
             pipe,
             channels: usize::from(channels.max(1)),
-            control: PipeFillControl::new(sample_rate),
+            control,
             epoch: Instant::now(),
         }
     }
@@ -439,6 +445,16 @@ impl LocalAudioStats {
         }
     }
 
+    /// Count one child spawn (issue 1424: the HDMI leg's aplay shares this facet).
+    pub(crate) fn record_spawn(&self) {
+        self.spawns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one child exit.
+    pub(crate) fn record_exit(&self) {
+        self.exits.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Publish the pipe servo's depth and setpoint. `None` (before pw-cat's first read) leaves the
     /// last published values.
     pub fn record_servo_depth(&self, depth: Option<PipeServoDepth>) {
@@ -665,7 +681,7 @@ fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<Loca
 /// pipe drained under a running pw-cat, issue 1401) as one warn line, a trim and a start-hold drop
 /// at debug (a stalled pw-cat trims every block; `pipe_trims` / `pipe_start_holds` count them). The
 /// servo's single-frame corrections are only counted (`pipe_servo_drops` / `_repeats`).
-fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport) {
+pub(crate) fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport) {
     match report.plan {
         PipeFillPlan::TopUp { silence_frames } if report.first => {
             tracing::info!(%target, silence_frames, "local-audio: {label} pipe primed to the fill target");

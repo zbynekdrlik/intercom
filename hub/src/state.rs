@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::hdmi_audio::HdmiLegFacet;
 use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
@@ -44,6 +45,41 @@ pub struct JitterFacet {
     /// camboxes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_gap_ms_10min: Option<f64>,
+}
+
+/// The hub's HDMI audio leg as `/api/state` shows it (issue 1424 part 3): the connector the matrix
+/// names, the hw PCM it resolved to (or why it is silent), whether aplay runs, and its xruns. The
+/// pipe's fill and depth are in the participant's `local_audio` facet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HdmiLegState {
+    pub connector: String,
+    /// The connector matched exactly one HDMI PCM.
+    pub resolved: bool,
+    /// `hw:<card>,<device>` once resolved, else null.
+    pub hw: Option<String>,
+    /// The named reason of the last resolve (`matched`, or why the leg is silent).
+    pub reason: &'static str,
+    /// aplay is running on `hw`.
+    pub running: bool,
+    /// Resolves since the hub started (one before every aplay spawn).
+    pub resolves: u64,
+    /// aplay's xruns (`underrun!!!`) since the hub started.
+    pub xruns: u64,
+}
+
+impl HdmiLegState {
+    fn new(connector: String, f: HdmiLegFacet) -> Self {
+        let hw = f.hw();
+        HdmiLegState {
+            connector,
+            resolved: hw.is_some(),
+            hw,
+            reason: f.reason(),
+            running: f.running,
+            resolves: f.resolves,
+            xruns: f.xruns,
+        }
+    }
 }
 
 impl From<NetworkFillStats> for JitterFacet {
@@ -89,6 +125,8 @@ pub struct RuntimeStats {
     pub local_audio: Option<LocalAudioFacet>,
     /// The VBAN leg's jitter-buffer facet (issue 1401), `None` for the other participants.
     pub jitter: Option<JitterFacet>,
+    /// The HDMI audio leg facet (issue 1424 part 3), `None` for every non-`alsa_hdmi` participant.
+    pub hdmi: Option<HdmiLegFacet>,
 }
 
 /// One participant's serialized state.
@@ -128,6 +166,9 @@ pub struct ParticipantState {
     /// only for a VBAN participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jitter: Option<JitterFacet>,
+    /// The HDMI audio leg (issue 1424 part 3), present only for an `alsa_hdmi` participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdmi: Option<HdmiLegState>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -184,6 +225,12 @@ impl HubState {
                     janus: s.janus,
                     local_audio: s.local_audio,
                     jitter: s.jitter.filter(|_| vban),
+                    hdmi: s
+                        .hdmi
+                        .filter(|_| p.adapter == crate::matrix::ADAPTER_ALSA_HDMI)
+                        .map(|f| {
+                            HdmiLegState::new(p.hdmi_connector.clone().unwrap_or_default(), f)
+                        }),
                 }
             })
             .collect();
@@ -264,8 +311,24 @@ impl HubState {
         } else {
             String::new()
         };
+        // The HDMI audio legs (issue 1424 part 3): where each plays, its pipe depth and its xruns,
+        // or that it is silent (the reason is on /api/state and in the leg's own log line).
+        let hdmi: String = self
+            .participants
+            .iter()
+            .filter_map(|p| p.hdmi.as_ref().map(|h| (p, h)))
+            .map(|(p, h)| match &h.hw {
+                Some(hw) => format!(
+                    " hdmi={}:{hw}:depth={}:xruns={}",
+                    p.name,
+                    p.local_audio.map_or(0, |l| l.pipe_depth_frames),
+                    h.xruns
+                ),
+                None => format!(" hdmi={}:silent", p.name),
+            })
+            .collect();
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
@@ -274,6 +337,7 @@ impl HubState {
             tx_dropped,
             servo,
             rejects,
+            hdmi,
             levels.join(" ")
         )
     }
@@ -346,6 +410,7 @@ out_channels = 4
                 janus: None,
                 local_audio: None,
                 jitter: None,
+                hdmi: None,
             },
             RuntimeStats::default(),
         ];

@@ -17,8 +17,14 @@
 
 pub mod adaptive_target;
 pub mod block_clock;
+// The part-1 connector -> HDMI PCM matcher (issue 1424), shared with the appliance crate by path so
+// the hub's HDMI leg and the OBS output module pick the PCM by ONE rule. std-only.
+#[path = "../../../src/drm_output_audio_match.rs"]
+pub mod drm_output_audio_match;
 pub mod engine;
 pub mod fir;
+pub mod hdmi_audio;
+pub mod hdmi_leg;
 pub mod http;
 pub mod inputs;
 pub mod janus_codec;

@@ -3,7 +3,7 @@
 # the scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak.
 #
 # scripts/lib/strih-intercom-hub-unit.sh -- issue 1412: the intercom-hub unit per box ROLE, and verify
-# item 16's crash-loop grade.
+# item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs.
 #
 # The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
@@ -125,4 +125,54 @@ strih_intercom_hub_crash_loop() {
       s2="$(systemctl "${q[@]}" 2>/dev/null || true)" ;;
   esac
   strih_intercom_hub_loop_verdict "$s1" "$s2"
+}
+
+# strih_intercom_hub_hdmi_leg_grade STATE_URL -> verify item 9's rows for the hub's HDMI audio legs
+# (issue 1424 part 3, the strih-pp vestibule on HDMI-1) through the caller's ok / bad / note: one row per
+# `alsa_hdmi` participant on the hub's /api/state. PASS = resolved to its hw PCM, aplay running, blocks
+# written; FAIL names why the leg is silent (the hub's own reason). A hub without such a participant
+# prints nothing; an unreadable hub is a NOTE (item 16 FAILs a dead hub). STRIH_HUB_HDMI_STATE_FILE reads
+# the JSON from a file instead (the test seam). Always rc 0.
+strih_intercom_hub_hdmi_leg_grade() {
+  local url="${1:?hub state url required}" json rows row
+  if [ -n "${STRIH_HUB_HDMI_STATE_FILE:-}" ]; then
+    json="$(cat -- "$STRIH_HUB_HDMI_STATE_FILE" 2>/dev/null || true)"
+  else
+    json="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$json" ]; then
+    note "(hdmi-leg) the intercom hub state at ${url} is not readable -- the HDMI audio legs are graded when the hub answers"
+    return 0
+  fi
+  rows="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    ps = json.load(sys.stdin).get("participants", [])
+except Exception as e:
+    print("FAIL\tthe intercom hub state is not JSON (%s)" % e)
+    sys.exit(0)
+for p in ps:
+    if p.get("adapter") != "alsa_hdmi":
+        continue
+    h = p.get("hdmi") or {}
+    la = p.get("local_audio") or {}
+    name, conn = p.get("name", "?"), h.get("connector", "?")
+    if not h.get("resolved"):
+        print("FAIL\t%s on %s is silent: %s -- journalctl -u intercom-hub names it (issue 1424)" % (name, conn, h.get("reason", "no hdmi facet")))
+    elif not h.get("running"):
+        print("FAIL\t%s on %s resolved to %s but aplay is not running (a busy PCM?) -- journalctl -u intercom-hub (issue 1424)" % (name, conn, h.get("hw")))
+    elif not la.get("tx_blocks"):
+        print("FAIL\t%s on %s (%s): aplay runs but no audio block was written yet" % (name, conn, h.get("hw")))
+    else:
+        print("OK\t%s on %s plays on %s (pipe %s frames, xruns %s)" % (name, conn, h.get("hw"), la.get("pipe_depth_frames", 0), h.get("xruns", 0)))
+' 2>&1 || true)"
+  while IFS= read -r row; do
+    case "$row" in
+      OK$'\t'*) ok "(hdmi-leg) ${row#*$'\t'}" ;;
+      FAIL$'\t'*) bad "(hdmi-leg) ${row#*$'\t'}" ;;
+      '') ;;
+      *) bad "(hdmi-leg) grading the hub state failed: ${row}" ;;
+    esac
+  done <<<"$rows"
+  return 0
 }

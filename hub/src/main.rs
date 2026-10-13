@@ -19,6 +19,8 @@ use std::sync::mpsc::SyncSender;
 
 use intercom_hub::block_clock::{run_batch, BlockGrid};
 use intercom_hub::engine::{Engine, InputBlock};
+use intercom_hub::hdmi_audio::HdmiLegStats;
+use intercom_hub::hdmi_leg::{spawn_alsa_hdmi_sink, AlsaHdmiSinkConfig};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
@@ -422,6 +424,7 @@ fn run_block_loop(bl: BlockLoop) {
         program_out_report,
         reports: local_audio_reports,
         local_sinks,
+        hdmi_reports,
     } = local_audio;
     let n = matrix.participants.len();
     let sample_rate = matrix.hub.sample_rate;
@@ -581,6 +584,12 @@ fn run_block_loop(bl: BlockLoop) {
                         s.local_audio = Some(lstats.snapshot());
                     }
                 }
+                // The HDMI audio legs' resolve + aplay facet (issue 1424 part 3).
+                for (pid, hstats) in &hdmi_reports {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.hdmi = Some(hstats.snapshot());
+                    }
+                }
                 let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
                 // The run's late ticks (issue 1401): a caught-up one is no loss, a lost one is a
                 // block lost on every output.
@@ -611,8 +620,11 @@ struct LocalAudioWiring {
     /// Every capture / talkback-playback participant + its facet counters (one entry per
     /// participant; a participant that both captures and plays shares one).
     reports: Vec<(usize, Arc<LocalAudioStats>)>,
-    /// Every talkback playback sink's feed, by participant (fed from its OWN N-1 output bus).
+    /// Every talkback playback sink's feed, by participant (fed from its OWN N-1 output bus); the
+    /// HDMI audio legs' feeds too (issue 1424 part 3).
     local_sinks: Vec<(usize, SyncSender<Vec<i16>>)>,
+    /// Every HDMI audio leg's resolve + aplay counters, by participant.
+    hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)>,
 }
 
 /// Spawn every local PipeWire bridge the matrix declares (issues 1344 + 1345). None of them ever
@@ -679,7 +691,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
     // its OWN N-1 output bus (the cutters' 4 channels -> the MiniFuse AUX0..3). A participant that is
     // also a capture shares one stats facet (rx from the capture, tx from the sink).
     let mut local_output_reports: Vec<(usize, Arc<LocalAudioStats>)> = Vec::new();
-    let local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
+    let mut local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
         .local_outputs()
         .into_iter()
         .map(|(pid, target, chans, channel_map)| {
@@ -712,6 +724,34 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         })
         .collect();
 
+    // --- The hub's own HDMI audio legs (issue 1424 part 3): an `alsa_hdmi` participant's N-1 bus is
+    // played straight into its NAMED connector's ALSA hw PCM by a supervised aplay (the strih-pp
+    // vestibule: lv1's program on HDMI-1), no PipeWire node and no OBS in between. The leg resolves
+    // the connector itself and stays silent with one named log line while it cannot.
+    let mut hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)> = Vec::new();
+    for (pid, connector, chans) in matrix.alsa_hdmi_outputs() {
+        let stats = Arc::new(LocalAudioStats::default());
+        let hdmi = Arc::new(HdmiLegStats::default());
+        tracing::info!(
+            %connector,
+            participant = pid,
+            channels = chans,
+            "local-audio: HDMI leg (aplay on the connector's hw PCM) enabled from the participant's N-1 bus"
+        );
+        let tx = spawn_alsa_hdmi_sink(
+            AlsaHdmiSinkConfig {
+                connector,
+                rate: sample_rate,
+                channels: chans.clamp(1, u8::MAX as usize) as u8,
+            },
+            stats.clone(),
+            hdmi.clone(),
+        );
+        local_output_reports.push((pid, stats));
+        hdmi_reports.push((pid, hdmi));
+        local_sinks.push((pid, tx));
+    }
+
     let mut reports = local_input_reports;
     reports.extend(local_output_reports);
     LocalAudioWiring {
@@ -719,6 +759,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         program_out_report,
         reports,
         local_sinks,
+        hdmi_reports,
     }
 }
 

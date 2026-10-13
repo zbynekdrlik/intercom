@@ -6,6 +6,10 @@
 # cutters. The PP router has no camN.lan names, so the cameras are their venue IPs (each cambox sends to
 # strih.lan, which the PP router resolves to this box). The cutters' sound card is the Yamaha MG-XU USB
 # card (2 in / 2 out, connected 13.10.2026), not the SNV MiniFuse 4: one stereo pair, so out 1/2 only.
+# 13.10.2026 (issue 1424 part 3, owner: "mozme to tak spravit"): the vestibule TV (strih-pp HDMI-1 ->
+# the Blackmagic HDMI-to-SDI converter) hears the lv1 program straight from this hub, no PipeWire and no
+# OBS in between (zero latency; audio never behind the picture). The connector is named, the hub
+# resolves it to its hw PCM by EDID vs ELD; nothing found = the leg stays silent and says why.
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
@@ -102,6 +106,14 @@ source_streams = ["strih"]
 in_channels = 0
 out_channels = 2
 
+[[participant]]
+name = "vestibule"
+role = "program_monitor"
+adapter = "alsa_hdmi"
+hdmi_connector = "HDMI-1"
+in_channels = 0
+out_channels = 2
+
 # --- the program path (unchanged since 11.10.2026)
 
 [[point]]
@@ -114,6 +126,20 @@ out_ch = 1
 src = "lv1"
 in_ch = 2
 dst = "program_out"
+out_ch = 2
+
+# --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3)
+
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "vestibule"
+out_ch = 1
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "vestibule"
 out_ch = 2
 
 # --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points)
