@@ -278,6 +278,15 @@ impl PipeFillControl {
         pipe_high_frames_for(self.read_frames) + self.reader_buffer
     }
 
+    /// Make the next write a prime again (issue 1424: after the reader's own xrun it refills its
+    /// whole buffer from the pipe, which then reads near empty; one prime top-up lands inside the gap
+    /// the xrun already made, instead of a servo walk of the whole level at the steep rate). The start
+    /// hold and the servo stay as they are; the top-up still fires only when the pipe holds under one
+    /// block.
+    pub fn rearm_prime(&mut self) {
+        self.primed = false;
+    }
+
     /// Whether pw-cat has read since the spawn (the start hold is over).
     pub fn started(&self) -> bool {
         self.started

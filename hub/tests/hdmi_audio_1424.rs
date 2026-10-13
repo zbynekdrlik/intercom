@@ -349,9 +349,43 @@ fn before_aplays_first_read_a_block_is_held_never_trimmed() {
             silence_frames: 512 + 1024 + 256
         }
     );
-    // aplay has not read: 2048 frames sit above the 1024 trim mark, yet it is the start hold
+    // aplay has not read: the prime still sits in the pipe, the block is the start hold
     assert_eq!(
         c.plan_block(5_333_333, 2048, 256).plan,
         PipeFillPlan::StartHold
+    );
+    // even above the trim mark (2304 = 1024 + aplay's buffer) it is the start hold, never a trim
+    assert_eq!(
+        c.plan_block(10_666_666, 2400, 256).plan,
+        PipeFillPlan::StartHold
+    );
+}
+
+#[test]
+fn an_aplay_xrun_rearms_one_prime_and_otherwise_never_tops_up() {
+    use intercom_hub::hdmi_leg::aplay_pipe_control;
+    let mut c = aplay_pipe_control(48000);
+    let _ = c.plan_block(0, 0, 256);
+    c.sample(1_000_000, 0); // aplay's first read
+    assert!(c.started());
+    // a pipe left near empty for a long time is NOT topped up: aplay's ALSA buffer is the reserve
+    for k in 1..20u64 {
+        c.sample(k * 5_333_333 - 1_000_000, 10);
+        let r = c.plan_block(k * 5_333_333, 10, 256);
+        assert!(
+            !matches!(r.plan, PipeFillPlan::TopUp { .. }),
+            "{k}: {:?}",
+            r.plan
+        );
+    }
+    // after aplay's own xrun the next write is a prime again (inside the gap that already happened)
+    c.rearm_prime();
+    let r = c.plan_block(20 * 5_333_333, 10, 256);
+    assert!(r.first);
+    assert_eq!(
+        r.plan,
+        PipeFillPlan::TopUp {
+            silence_frames: 512 - 10 + 1024 + 256
+        }
     );
 }

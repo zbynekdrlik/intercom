@@ -219,6 +219,11 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
     pub fn started(&self) -> bool {
         self.control.started()
     }
+
+    /// Make the next write a prime again ([`PipeFillControl::rearm_prime`]).
+    pub fn rearm_prime(&mut self) {
+        self.control.rearm_prime();
+    }
 }
 
 /// Build the `pw-cat` PLAYBACK argv for the program sink (egress), with no channel map. See

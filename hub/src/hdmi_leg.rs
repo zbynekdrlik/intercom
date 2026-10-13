@@ -4,10 +4,11 @@
 //! The same egress shape as the pw-cat playback legs ([`crate::local_audio`]): an OS thread owns the
 //! child, the block loop `try_send`s one interleaved PCM16 block per tick, and every write goes
 //! through the pipe fill guard ([`PipeFillWriter`]: FIONREAD before every block and about every
-//! millisecond between them, the starvation top-up, the start hold and the drift servo, since the
-//! HDMI PCM runs on the GPU's audio clock, not the hub's). aplay reads one 256-frame ALSA period at
-//! a time, so the guard is built for that read size: 640 frames held in the pipe (13.3 ms) plus the
-//! 1024-frame ALSA buffer, where a pw-cat pipe holds 1792.
+//! millisecond between them, the prime, the start hold and the drift servo, since the HDMI PCM
+//! runs on the GPU's audio clock, not the hub's). aplay reads one 256-frame ALSA period at a time,
+//! so the guard is built for that read size: 640 frames held in the pipe (13.3 ms) plus the
+//! 1024-frame ALSA buffer, where a pw-cat pipe holds 1792. Its ALSA buffer is the reserve, so after
+//! the prime the pipe is never topped up with silence; only an aplay xrun re-arms one prime.
 //!
 //! Before every spawn the leg resolves the connector again ([`resolve_connector`]): no match, an
 //! ambiguous one or no EDID keeps the leg silent and logs why ONCE per change, and a busy or vanished
@@ -109,8 +110,9 @@ impl AplaySink {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("aplay stderr not piped"))?;
-        // Ends at aplay's exit (EOF on its stderr).
-        let stderr_reader = thread::Builder::new()
+        // Ends at aplay's exit (EOF on its stderr). A failed thread spawn ends aplay here: no
+        // AplaySink owns it yet, so its Drop would not.
+        let spawned = thread::Builder::new()
             .name("hdmi-leg-stderr".into())
             .spawn(move || {
                 let mut last = String::new();
@@ -122,27 +124,45 @@ impl AplaySink {
                     }
                 }
                 last
-            })?;
+            });
+        let stderr_reader = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
         let pcm_moved = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        if let Some(want) = watch {
-            let (moved, stop) = (pcm_moved.clone(), stop.clone());
-            thread::Builder::new()
-                .name("hdmi-leg-eld".into())
-                .spawn(move || eld_watch(card, device, &want, &moved, &stop))?;
-        }
-        Ok(AplaySink {
+        let mut sink = AplaySink {
             child,
             stdin: PipeFillWriter::with_control(stdin, channels, aplay_pipe_control(rate)),
             stderr_reader: Some(stderr_reader),
             pcm_moved,
             stop,
-        })
+        };
+        if let Some(want) = watch {
+            let (moved, stop) = (sink.pcm_moved.clone(), sink.stop.clone());
+            if let Err(e) = thread::Builder::new()
+                .name("hdmi-leg-eld".into())
+                .spawn(move || eld_watch(card, device, &want, &moved, &stop))
+            {
+                sink.finish();
+                return Err(e);
+            }
+        }
+        Ok(sink)
     }
 
     /// aplay has read from the pipe since its spawn: it is playing.
     pub fn playing(&self) -> bool {
         self.stdin.started()
+    }
+
+    /// Re-arm one prime top-up (after aplay's own xrun refilled its buffer from the pipe).
+    pub fn rearm_prime(&mut self) {
+        self.stdin.rearm_prime();
     }
 
     /// The ELD watcher saw the PCM stop carrying the matched monitor.
@@ -306,6 +326,7 @@ fn alsa_hdmi_sink_loop(
         stats.record_spawn();
         let started = Instant::now();
         let mut playing = false;
+        let mut xruns_seen = hdmi.snapshot().xruns;
         let label = "HDMI leg";
         // The feed loop of `local_audio::local_sink_loop`, kept as a copy: anchor tests pin that
         // function's body text, so it is not factored out. Plus the playing flag and the ELD watch.
@@ -334,6 +355,12 @@ fn alsa_hdmi_sink_loop(
             if !playing && sink.playing() {
                 playing = true;
                 hdmi.set_running(true);
+            }
+            // aplay xrun'd and refills its whole buffer from the pipe: one prime, not a servo walk.
+            let xruns = hdmi.snapshot().xruns;
+            if xruns != xruns_seen {
+                xruns_seen = xruns;
+                sink.rearm_prime();
             }
         };
         hdmi.set_running(false);
