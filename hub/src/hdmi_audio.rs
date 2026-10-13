@@ -12,7 +12,8 @@
 //! shared by path): the connector's EDID vendor bytes against every HDMI/DP PCM's ELD. The inputs
 //! come from the tools on the box, read bounded (`timeout`), so a hung X server never hangs the leg:
 //!
-//! - the EDID from `xrandr --props` (NVIDIA publishes no connector EDID in `/sys/class/drm`);
+//! - the EDID from `xrandr --current --props` (NVIDIA publishes no connector EDID in
+//!   `/sys/class/drm`);
 //! - the cards from `/proc/asound/cards`, each card's ELD PCMs from `amixer -c N controls`, each ELD
 //!   from `amixer -c N cget iface=PCM,name=ELD,device=D`.
 //!
@@ -26,7 +27,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use crate::drm_output_audio_match::{
-    edid_monitor_id, eld_monitor_id, iec958_index, pick_pcm, reason, AudioPcm, MATCH, NO_EDID,
+    edid_monitor_id, eld_monitor_id, iec958_index, pick_pcm, reason, AudioPcm, MonitorId, MATCH,
+    NO_EDID,
 };
 
 /// The ALSA period `aplay` asks the HDMI PCM for: one hub block (5.33 ms). aplay reads its stdin one
@@ -196,10 +198,13 @@ pub fn iec958_on_argv(
 
 /// The `aplay` argv for the resolved hw PCM: raw PCM16 on stdin, the short buffer of
 /// [`ALSA_HDMI_BUFFER_FRAMES`]. The hw PCM itself, never `plughw`/`default`/a dmix: nothing
-/// converts or mixes, and a busy PCM fails instead of sharing.
+/// converts or mixes. `-N` opens it non-blocking, so a PCM another process holds fails the open at
+/// once (without it aplay waits in the open forever and reads as playing); aplay still waits for
+/// room on every write.
 pub fn aplay_argv(card: i32, device: i32, rate: u32, channels: u8) -> Vec<String> {
     vec![
         "aplay".into(),
+        "-N".into(),
         "-D".into(),
         format!("hw:{card},{device}"),
         "-t".into(),
@@ -221,26 +226,65 @@ pub fn is_xrun_line(line: &str) -> bool {
     line.contains("underrun!!!")
 }
 
-/// One tool call of a resolve, bounded by `timeout`; its stdout on success.
-fn run_bounded(argv: &[String]) -> Option<String> {
+/// Whether an aplay stderr line is its start banner (`Playing raw data 'stdin' : ...`), never the
+/// reason it exited.
+pub fn is_banner_line(line: &str) -> bool {
+    line.starts_with("Playing ")
+}
+
+/// The xrandr argv the EDID is read with. `--current` reads the server's state without making it
+/// re-probe every output (DDC reads on every connector); the driver keeps the EDID property current.
+pub fn xrandr_argv() -> Vec<String> {
+    args(&["xrandr", "--current", "--props"])
+}
+
+/// The PCM still carries the monitor it was matched to: its ELD reads that monitor's vendor bytes
+/// and name. An empty ELD (the converter unplugged) or another monitor does not.
+pub fn eld_still_matches(want: &MonitorId, eld: &[u8]) -> bool {
+    let id = eld_monitor_id(eld);
+    id.valid && id.vendor == want.vendor && id.name == want.name
+}
+
+/// One tool call of a resolve, bounded by `timeout`: its stdout on success, else a short reason
+/// (the tool and its first stderr line, or how it ended) for the leg's log line.
+fn run_bounded(argv: &[String]) -> Result<String, String> {
+    let tool = argv.first().map(String::as_str).unwrap_or("?");
     let mut cmd = Command::new("timeout");
     cmd.arg(RESOLVE_TIMEOUT_S.to_string()).args(argv);
-    if argv.first().map(String::as_str) == Some("xrandr") && std::env::var_os("DISPLAY").is_none() {
+    if tool == "xrandr" && std::env::var_os("DISPLAY").is_none() {
         cmd.env("DISPLAY", DEFAULT_X_DISPLAY);
     }
-    let out = cmd.output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let out = cmd.output().map_err(|e| format!("{tool}: {e}"))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    Err(match out.status.code() {
+        Some(124) => format!("{tool}: no answer within {RESOLVE_TIMEOUT_S} s"),
+        _ if !first.is_empty() => format!("{tool}: {}", first.trim()),
+        _ => format!("{tool}: {}", out.status),
+    })
 }
 
 fn args(argv: &[&str]) -> Vec<String> {
     argv.iter().map(|a| a.to_string()).collect()
 }
 
-/// The connector's EDID read from the X server.
-pub fn read_connector_edid(connector: &str) -> Option<Vec<u8>> {
-    xrandr_connector_edid(&run_bounded(&args(&["xrandr", "--props"]))?, connector)
+/// The connector's EDID read from the X server; `Err` names why X could not be read.
+pub fn read_connector_edid(connector: &str) -> Result<Option<Vec<u8>>, String> {
+    Ok(xrandr_connector_edid(
+        &run_bounded(&xrandr_argv())?,
+        connector,
+    ))
+}
+
+/// The ELD one PCM reports now (`None` when amixer cannot read it).
+pub fn read_pcm_eld(card: i32, device: i32) -> Option<Vec<u8>> {
+    let id = format!("iface=PCM,name=ELD,device={device}");
+    run_bounded(&args(&["amixer", "-c", &card.to_string(), "cget", &id]))
+        .ok()
+        .and_then(|t| amixer_bytes(&t))
 }
 
 /// Every HDMI/DP PCM of every card with the monitor its ELD reports (an empty ELD is recorded as no
@@ -250,14 +294,11 @@ pub fn read_pcm_elds() -> Vec<AudioPcm> {
     let mut pcms = Vec::new();
     for card in asound_card_numbers(&cards) {
         let c = card.to_string();
-        let Some(controls) = run_bounded(&args(&["amixer", "-c", &c, "controls"])) else {
+        let Ok(controls) = run_bounded(&args(&["amixer", "-c", &c, "controls"])) else {
             continue;
         };
         for device in amixer_eld_devices(&controls) {
-            let id = format!("iface=PCM,name=ELD,device={device}");
-            let bytes = run_bounded(&args(&["amixer", "-c", &c, "cget", &id]))
-                .and_then(|t| amixer_bytes(&t))
-                .unwrap_or_default();
+            let bytes = read_pcm_eld(card, device).unwrap_or_default();
             pcms.push(AudioPcm {
                 card,
                 device,
@@ -268,11 +309,36 @@ pub fn read_pcm_elds() -> Vec<AudioPcm> {
     pcms
 }
 
-/// Resolve `connector` on this box, with the PCMs it read (for the IEC958 switch).
-pub fn resolve_connector(connector: &str) -> (HdmiResolution, Vec<AudioPcm>) {
-    let edid = read_connector_edid(connector);
+/// One resolve of a connector on this box.
+pub struct ConnectorResolve {
+    pub res: HdmiResolution,
+    /// Every HDMI PCM read (for the IEC958 switch rank).
+    pub pcms: Vec<AudioPcm>,
+    /// The monitor the matched PCM reports, which the leg keeps checking while aplay plays.
+    pub matched: Option<MonitorId>,
+    /// Why X could not be read, when it could not (an EDID-less connector reads `None` here).
+    pub x_error: Option<String>,
+}
+
+/// Resolve `connector` on this box.
+pub fn resolve_connector(connector: &str) -> ConnectorResolve {
+    let (edid, x_error) = match read_connector_edid(connector) {
+        Ok(edid) => (edid, None),
+        Err(e) => (None, Some(e)),
+    };
     let pcms = read_pcm_elds();
-    (resolve_from(edid.as_deref(), &pcms), pcms)
+    let res = resolve_from(edid.as_deref(), &pcms);
+    let matched = res.pcm.and_then(|(card, device)| {
+        pcms.iter()
+            .find(|p| p.card == card && p.device == device)
+            .map(|p| p.id.clone())
+    });
+    ConnectorResolve {
+        res,
+        pcms,
+        matched,
+        x_error,
+    }
 }
 
 /// Turn on the IEC958 switch of the resolved PCM. Returns a short note for the leg's log line.
@@ -282,8 +348,7 @@ pub fn iec958_on(card: i32, device: i32, pcms: &[AudioPcm]) -> String {
         .filter(|p| p.card == card)
         .map(|p| p.device)
         .collect();
-    let Some(controls) = run_bounded(&args(&["amixer", "-c", &card.to_string(), "controls"]))
-    else {
+    let Ok(controls) = run_bounded(&args(&["amixer", "-c", &card.to_string(), "controls"])) else {
         return "IEC958 switch not readable".into();
     };
     let switches = amixer_iec958_switch_count(&controls);
@@ -293,8 +358,8 @@ pub fn iec958_on(card: i32, device: i32, pcms: &[AudioPcm]) -> String {
             devices.len()
         ),
         Some(argv) => match run_bounded(&argv) {
-            Some(_) => "IEC958 switch on".into(),
-            None => "IEC958 switch write FAILED".into(),
+            Ok(_) => "IEC958 switch on".into(),
+            Err(e) => format!("IEC958 switch write FAILED ({e})"),
         },
     }
 }
@@ -307,7 +372,8 @@ pub struct HdmiLegFacet {
     /// The resolved card and device, -1 while unresolved.
     pub card: i32,
     pub device: i32,
-    /// aplay is running on the resolved PCM.
+    /// aplay is playing on the resolved PCM: it has read from the pipe since its spawn (a process
+    /// that started but never read, e.g. one stuck before the PCM, is not playing).
     pub running: bool,
     /// Resolves since the hub started (one per spawn attempt).
     pub resolves: u64,
@@ -384,7 +450,7 @@ impl HdmiLegStats {
         self.xruns.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// aplay started (`true`) or exited (`false`).
+    /// aplay started playing (`true`, its first read from the pipe) or exited (`false`).
     pub fn set_running(&self, running: bool) {
         self.running.store(running, Ordering::Relaxed);
     }

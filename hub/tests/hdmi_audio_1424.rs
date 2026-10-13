@@ -293,3 +293,65 @@ fn the_aplay_leg_holds_its_pipe_at_its_own_read_size_and_pw_cat_keeps_1024() {
         }
     );
 }
+
+// --- review round 1 (issue 1424 part 3) ----------------------------------------------------------
+
+#[test]
+fn aplay_opens_non_blocking_and_xrandr_never_reprobes() {
+    use intercom_hub::hdmi_audio::xrandr_argv;
+    // a PCM another process holds must fail the open at once, never hang it (aplay -N)
+    assert_eq!(aplay_argv(0, 7, 48000, 2)[1], "-N");
+    // the EDID is read from the server's state, without a re-probe of every output
+    assert_eq!(xrandr_argv(), ["xrandr", "--current", "--props"]);
+}
+
+#[test]
+fn aplays_start_banner_is_never_its_exit_reason() {
+    use intercom_hub::hdmi_audio::is_banner_line;
+    assert!(is_banner_line(
+        "Playing raw data 'stdin' : Signed 16 bit Little Endian, Rate 48000 Hz, Stereo"
+    ));
+    assert!(!is_banner_line(
+        "aplay: main:850: audio open error: Device or resource busy"
+    ));
+}
+
+#[test]
+fn the_eld_watch_ends_aplay_once_the_pcm_carries_another_monitor() {
+    use intercom_hub::hdmi_audio::eld_still_matches;
+    use intercom_hub::hdmi_leg::{eld_watch_step, ELD_WATCH_MISSES};
+    let blackmagic = eld_monitor_id(&amixer_bytes(ELD7).unwrap());
+    assert!(eld_still_matches(&blackmagic, &amixer_bytes(ELD7).unwrap()));
+    assert!(
+        !eld_still_matches(&blackmagic, &amixer_bytes(ELD3).unwrap()),
+        "the BenQ moved onto the PCM"
+    );
+    assert!(
+        !eld_still_matches(&blackmagic, &[]),
+        "the converter unplugged (empty ELD)"
+    );
+    // two readings in a row end it; one odd reading, or an unreadable ELD, never does
+    assert_eq!(ELD_WATCH_MISSES, 2);
+    assert_eq!(eld_watch_step(0, Some(false)), (1, false));
+    assert_eq!(eld_watch_step(1, Some(true)), (0, false));
+    assert_eq!(eld_watch_step(1, None), (1, false));
+    assert_eq!(eld_watch_step(1, Some(false)), (2, true));
+}
+
+#[test]
+fn before_aplays_first_read_a_block_is_held_never_trimmed() {
+    use intercom_hub::hdmi_leg::aplay_pipe_control;
+    let mut c = aplay_pipe_control(48000);
+    // the prime: pipe target + aplay's ALSA buffer + the period it holds
+    assert_eq!(
+        c.plan_block(0, 0, 256).plan,
+        PipeFillPlan::TopUp {
+            silence_frames: 512 + 1024 + 256
+        }
+    );
+    // aplay has not read: 2048 frames sit above the 1024 trim mark, yet it is the start hold
+    assert_eq!(
+        c.plan_block(5_333_333, 2048, 256).plan,
+        PipeFillPlan::StartHold
+    );
+}

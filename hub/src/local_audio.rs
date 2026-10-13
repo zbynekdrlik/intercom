@@ -214,6 +214,11 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
     pub fn servo_depth(&self) -> Option<PipeServoDepth> {
         self.control.servo_depth()
     }
+
+    /// The reader has read from the pipe since its spawn (the start hold is over).
+    pub fn started(&self) -> bool {
+        self.control.started()
+    }
 }
 
 /// Build the `pw-cat` PLAYBACK argv for the program sink (egress), with no channel map. See

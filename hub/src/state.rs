@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 
-use crate::hdmi_audio::HdmiLegFacet;
+use crate::hdmi_audio::{HdmiLegFacet, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES};
 use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
@@ -59,12 +59,17 @@ pub struct HdmiLegState {
     pub hw: Option<String>,
     /// The named reason of the last resolve (`matched`, or why the leg is silent).
     pub reason: &'static str,
-    /// aplay is running on `hw`.
+    /// aplay is playing on `hw` (it has read from the pipe since its spawn).
     pub running: bool,
     /// Resolves since the hub started (one before every aplay spawn).
     pub resolves: u64,
     /// aplay's xruns (`underrun!!!`) since the hub started.
     pub xruns: u64,
+    /// The leg's fixed delay after the pipe: aplay's ALSA buffer (kept full) and the period it holds.
+    /// The leg's total added delay = `local_audio.pipe_depth_frames` + these two (frames at the hub
+    /// rate), on top of the program feed's jitter target.
+    pub alsa_buffer_frames: usize,
+    pub alsa_period_frames: usize,
 }
 
 impl HdmiLegState {
@@ -78,6 +83,8 @@ impl HdmiLegState {
             running: f.running,
             resolves: f.resolves,
             xruns: f.xruns,
+            alsa_buffer_frames: ALSA_HDMI_BUFFER_FRAMES,
+            alsa_period_frames: ALSA_HDMI_PERIOD_FRAMES,
         }
     }
 }

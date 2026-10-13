@@ -327,9 +327,10 @@ impl Matrix {
                         p.in_channels
                     );
                 }
-                if !(1..=8).contains(&p.out_channels) {
+                // An HDA HDMI PCM opens with 2..=8 channels only (hw:0,7 on strih-pp: CHANNELS [2 8]).
+                if !(2..=8).contains(&p.out_channels) {
                     bail!(
-                        "participant '{}': adapter 'alsa_hdmi' needs 1..=8 out_channels, got {}",
+                        "participant '{}': adapter 'alsa_hdmi' needs 2..=8 out_channels, got {}",
                         p.name,
                         p.out_channels
                     );

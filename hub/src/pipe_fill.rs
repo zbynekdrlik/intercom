@@ -146,22 +146,29 @@ impl PipeFillPlan {
 ///
 /// [`PipeFillControl::plan_block`] adds the start hold and the drift servo to the `Write` case.
 pub fn pipe_fill_plan(fill_frames: usize, block_frames: usize, starved: bool) -> PipeFillPlan {
-    pipe_fill_plan_for(fill_frames, block_frames, starved, PW_GRAPH_BURST_FRAMES)
+    pipe_fill_plan_marks(
+        fill_frames,
+        block_frames,
+        starved,
+        PIPE_TARGET_FRAMES,
+        PIPE_HIGH_FRAMES,
+    )
 }
 
-/// [`pipe_fill_plan`] for a reader that takes `read_frames` at a time (its target and trim mark are
-/// [`pipe_target_frames_for`] / [`pipe_high_frames_for`]).
-pub fn pipe_fill_plan_for(
+/// [`pipe_fill_plan`] with its own top-up target and trim mark (a [`PipeFillControl`] built for
+/// another reader, issue 1424).
+pub fn pipe_fill_plan_marks(
     fill_frames: usize,
     block_frames: usize,
     starved: bool,
-    read_frames: usize,
+    target_frames: usize,
+    high_frames: usize,
 ) -> PipeFillPlan {
     if starved && fill_frames < block_frames {
         PipeFillPlan::TopUp {
-            silence_frames: pipe_target_frames_for(read_frames).saturating_sub(fill_frames),
+            silence_frames: target_frames.saturating_sub(fill_frames),
         }
-    } else if fill_frames > pipe_high_frames_for(read_frames) {
+    } else if fill_frames > high_frames {
         PipeFillPlan::Drop
     } else {
         PipeFillPlan::Write
@@ -250,10 +257,25 @@ impl PipeFillControl {
     /// The same controller whose reader first fills `frames` of its own buffer (issue 1424: aplay
     /// pulls its 1024-frame ALSA buffer + one period from the pipe the moment it starts). The prime
     /// adds them, so the pipe still holds the target once the reader is full and the first reads
-    /// never starve it; every later top-up stays at the target.
+    /// never starve it. The trim mark rises by the same amount: after a block-loop stall the catch-up
+    /// burst lands in the pipe before aplay has moved it on into its drained buffer, and a trim there
+    /// would cut real audio.
+    ///
+    /// After the prime such a pipe is never topped up with silence: the reader's own buffer is the
+    /// reserve. A pipe left low (a block-loop stall the ALSA buffer rode out leaves aplay taking
+    /// each block the moment it lands, the pipe under one block on every reading while ALSA stays
+    /// full) is walked back up by the drift servo, never by a silent gap written in front of the
+    /// audio; a reserve that really runs dry is the reader's own xrun, which aplay reports. pw-cat
+    /// (no reader buffer) keeps the starvation top-up: it reads a whole graph quantum or xruns.
     pub fn with_reader_buffer(mut self, frames: usize) -> Self {
         self.reader_buffer = frames;
         self
+    }
+
+    /// The trim mark: the target + two reads, plus the reader's own buffer
+    /// ([`PipeFillControl::with_reader_buffer`]).
+    fn high_frames(&self) -> usize {
+        pipe_high_frames_for(self.read_frames) + self.reader_buffer
     }
 
     /// Whether pw-cat has read since the spawn (the start hold is over).
@@ -286,8 +308,12 @@ impl PipeFillControl {
 
     /// Whether the fill has read under one block on every reading for at least one hub period up to
     /// `at`: the pipe is starved, not just low for a moment between a pw-cat read and the next
-    /// write.
+    /// write. A reader with its own buffer is never starved after the prime (see
+    /// [`PipeFillControl::with_reader_buffer`]).
     fn starved_at(&self, at: u64) -> bool {
+        if self.reader_buffer > 0 {
+            return false;
+        }
         let period = hub_block_period(self.block_frames, self.sample_rate);
         self.low_since
             .is_some_and(|since| u128::from(at - since) >= period.as_nanos())
@@ -309,7 +335,13 @@ impl PipeFillControl {
         let first = !self.primed;
         self.primed = true;
         let starved = first || self.starved_at(at);
-        let plan = match pipe_fill_plan_for(fill_frames, block_frames, starved, self.read_frames) {
+        let plan = match pipe_fill_plan_marks(
+            fill_frames,
+            block_frames,
+            starved,
+            pipe_target_frames_for(self.read_frames),
+            self.high_frames(),
+        ) {
             PipeFillPlan::Write if !self.started => {
                 if fill_frames + block_frames > pipe_target_frames_for(self.read_frames) {
                     PipeFillPlan::StartHold
@@ -318,6 +350,9 @@ impl PipeFillControl {
                 }
             }
             PipeFillPlan::Write => self.servo_plan(at, fill_frames, block_frames),
+            // Before the reader's first read a block over the trim mark is the start hold, not a
+            // trim (issue 1424: an aplay prime holds the ALSA buffer too, above its 1024 mark).
+            PipeFillPlan::Drop if !self.started => PipeFillPlan::StartHold,
             guard => {
                 if let Some(servo) = &mut self.servo {
                     servo.restart();
@@ -356,12 +391,9 @@ impl PipeFillControl {
             // The hold ended at this very reading: nothing measured since but the reading itself.
             None => fill_frames,
         };
-        let read_frames = self.read_frames;
+        let (read_frames, high) = (self.read_frames, self.high_frames());
         let servo = self.servo.get_or_insert_with(|| {
-            NetworkFill::new(
-                pipe_servo_setpoint_for(block_frames, read_frames),
-                pipe_high_frames_for(read_frames),
-            )
+            NetworkFill::new(pipe_servo_setpoint_for(block_frames, read_frames), high)
         });
         match servo.servo_step(mean, block_frames) {
             ServoStep::Keep => PipeFillPlan::Write,

@@ -160,12 +160,16 @@ for p in ps:
     if not h.get("resolved"):
         print("FAIL\t%s on %s is silent: %s -- journalctl -u intercom-hub names it (issue 1424)" % (name, conn, h.get("reason", "no hdmi facet")))
     elif not h.get("running"):
-        print("FAIL\t%s on %s resolved to %s but aplay is not running (a busy PCM?) -- journalctl -u intercom-hub (issue 1424)" % (name, conn, h.get("hw")))
+        print("FAIL\t%s on %s resolved to %s but aplay is not playing (a busy PCM, or it never read) -- journalctl -u intercom-hub (issue 1424)" % (name, conn, h.get("hw")))
     elif not la.get("tx_blocks"):
-        print("FAIL\t%s on %s (%s): aplay runs but no audio block was written yet" % (name, conn, h.get("hw")))
+        print("FAIL\t%s on %s (%s): aplay plays but no audio block was written yet" % (name, conn, h.get("hw")))
     else:
         print("OK\t%s on %s plays on %s (pipe %s frames, xruns %s)" % (name, conn, h.get("hw"), la.get("pipe_depth_frames", 0), h.get("xruns", 0)))
 ' 2>&1 || true)"
+  # The leg runs aplay + amixer (alsa-utils, setup-strih step 4b): a box without them never plays.
+  if [ -n "$rows" ] && ! { command -v aplay && command -v amixer; } >/dev/null 2>&1; then
+    bad "(hdmi-leg) aplay/amixer missing -- apt-get install alsa-utils (setup-strih.sh step 4b, issue 1424)"
+  fi
   while IFS= read -r row; do
     case "$row" in
       OK$'\t'*) ok "(hdmi-leg) ${row#*$'\t'}" ;;
