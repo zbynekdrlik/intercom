@@ -4,8 +4,8 @@
 # 13.10.2026 (owner ROZHODNUTE: "prehod to"): the Poprad camera intercom moves here from VDO.Ninja, the
 # SNV shape (intercom/intercom.strih-snv.toml) for the PP cameras cam1/4/6/7 + the phones (Janus) + the
 # cutters. The PP router has no camN.lan names, so the cameras are their venue IPs (each cambox sends to
-# strih.lan, which the PP router resolves to this box). The cutters' sound card is not the SNV MiniFuse 4;
-# until the owner connects it (13.10.2026 evening) the cutters leg is `none` (mixed, not delivered).
+# strih.lan, which the PP router resolves to this box). The cutters' sound card is the Yamaha MG-XU USB
+# card (2 in / 2 out, connected 13.10.2026), not the SNV MiniFuse 4: one stereo pair, so out 1/2 only.
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
@@ -79,9 +79,12 @@ out_channels = 0
 [[participant]]
 name = "cutters"
 role = "cutters"
-adapter = "none"
+adapter = "pipewire"
+pipewire_target = "alsa_output.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
+pipewire_source = "alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
+pipewire_channel_map = "FL,FR"
 in_channels = 2
-out_channels = 4
+out_channels = 2
 
 [[participant]]
 name = "phones"
@@ -124,28 +127,12 @@ gain_db = -8.0
 
 [[point]]
 src = "lv1"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-gain_db = -8.0
-
-[[point]]
-src = "lv1"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
 gain_db = -8.0
 
 [[point]]
-src = "lv1"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
-gain_db = -8.0
-
-# --- every camera hears every other camera, the cutters and the phones (N-1)
-
-[[point]]
 src = "cam1"
 in_ch = 1
 dst = "cam4"
@@ -189,21 +176,9 @@ out_ch = 1
 
 [[point]]
 src = "cam1"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-
-[[point]]
-src = "cam1"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-[[point]]
-src = "cam1"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
 
 [[point]]
 src = "cam1"
@@ -261,21 +236,9 @@ out_ch = 1
 
 [[point]]
 src = "cam4"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-
-[[point]]
-src = "cam4"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-[[point]]
-src = "cam4"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
 
 [[point]]
 src = "cam4"
@@ -333,21 +296,9 @@ out_ch = 1
 
 [[point]]
 src = "cam6"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-
-[[point]]
-src = "cam6"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-[[point]]
-src = "cam6"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
 
 [[point]]
 src = "cam6"
@@ -405,21 +356,9 @@ out_ch = 1
 
 [[point]]
 src = "cam7"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-
-[[point]]
-src = "cam7"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-[[point]]
-src = "cam7"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
 
 [[point]]
 src = "cam7"
@@ -613,18 +552,6 @@ out_ch = 1
 
 [[point]]
 src = "phones"
-in_ch = 1
-dst = "cutters"
-out_ch = 3
-
-[[point]]
-src = "phones"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-[[point]]
-src = "phones"
-in_ch = 2
-dst = "cutters"
-out_ch = 4
