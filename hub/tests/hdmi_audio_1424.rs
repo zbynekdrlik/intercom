@@ -13,8 +13,8 @@ use intercom_hub::drm_output_audio_match::{
 };
 use intercom_hub::hdmi_audio::{
     amixer_bytes, amixer_eld_devices, amixer_iec958_switch_count, aplay_argv, asound_card_numbers,
-    iec958_on_argv, is_xrun_line, resolve_from, xrandr_connector_edid, HdmiLegStats, HdmiResolution,
-    ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES,
+    iec958_on_argv, is_xrun_line, resolve_from, xrandr_connector_edid, HdmiLegStats,
+    HdmiResolution, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES,
 };
 use intercom_hub::pipe_fill::{
     pipe_servo_setpoint, pipe_servo_setpoint_for, PipeFillControl, PipeFillPlan, PIPE_HIGH_FRAMES,
@@ -61,13 +61,22 @@ fn strih_pp_pcms() -> Vec<AudioPcm> {
 fn xrandr_props_give_each_connectors_own_edid() {
     let hdmi1 = xrandr_connector_edid(XRANDR, "HDMI-1").expect("HDMI-1 carries an EDID");
     assert_eq!(hdmi1.len(), 256, "base block + one CEA extension");
-    assert_eq!(&hdmi1[..8], &[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
+    assert_eq!(
+        &hdmi1[..8],
+        &[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]
+    );
     // EDID bytes 8..11 = the Blackmagic converter's vendor bytes (the ELD's 16..19)
     assert_eq!(&hdmi1[8..12], &[0x09, 0xa4, 0x0c, 0xbe]);
     let hdmi0 = xrandr_connector_edid(XRANDR, "HDMI-0").expect("HDMI-0 carries an EDID");
-    assert_eq!(&hdmi0[8..12], &[0x09, 0xd1, 0x24, 0x80], "the BenQ, a different monitor");
-    // a connected output with no EDID property, a disconnected one, an unknown name
-    assert_eq!(xrandr_connector_edid(XRANDR, "DP-2"), None);
+    assert_eq!(
+        &hdmi0[8..12],
+        &[0x09, 0xd1, 0x24, 0x80],
+        "the BenQ, a different monitor"
+    );
+    // the panel on DP-2 (an NEC): its own block, never a neighbour's
+    let dp2 = xrandr_connector_edid(XRANDR, "DP-2").expect("DP-2 carries an EDID");
+    assert_eq!(&dp2[8..12], &[0x38, 0xa3, 0x4f, 0x68]);
+    // a disconnected output (no EDID property), an unknown name
     assert_eq!(xrandr_connector_edid(XRANDR, "DP-0"), None);
     assert_eq!(xrandr_connector_edid(XRANDR, "HDMI-9"), None);
     // a prefix of a real name never matches it
@@ -77,9 +86,17 @@ fn xrandr_props_give_each_connectors_own_edid() {
 #[test]
 fn xrandr_edid_parse_refuses_a_broken_hex_block() {
     let odd = "HDMI-1 connected 1920x1080+0+0\n\tEDID: \n\t\t00ffffffffffff0\n\tCTM: 1\n";
-    assert_eq!(xrandr_connector_edid(odd, "HDMI-1"), None, "an odd hex length");
+    assert_eq!(
+        xrandr_connector_edid(odd, "HDMI-1"),
+        None,
+        "an odd hex length"
+    );
     let empty = "HDMI-1 connected 1920x1080+0+0\n\tEDID: \n\tCTM: 1\n";
-    assert_eq!(xrandr_connector_edid(empty, "HDMI-1"), None, "an EDID line with no bytes");
+    assert_eq!(
+        xrandr_connector_edid(empty, "HDMI-1"),
+        None,
+        "an EDID line with no bytes"
+    );
 }
 
 #[test]
@@ -87,12 +104,22 @@ fn asound_cards_and_amixer_controls_parse_the_live_text() {
     assert_eq!(asound_card_numbers(CARDS), [0, 1, 2]);
     assert_eq!(amixer_eld_devices(CONTROLS0), [3, 7, 8, 9]);
     assert_eq!(amixer_iec958_switch_count(CONTROLS0), 4);
-    assert!(amixer_eld_devices(CONTROLS1).is_empty(), "the analog card has no HDMI PCM");
+    assert!(
+        amixer_eld_devices(CONTROLS1).is_empty(),
+        "the analog card has no HDMI PCM"
+    );
     let eld7 = amixer_bytes(ELD7).expect("device 7 values");
     assert_eq!(eld7.len(), 95);
     assert_eq!(&eld7[16..20], &[0x09, 0xa4, 0x0c, 0xbe]);
-    assert_eq!(amixer_bytes(ELD8), Some(Vec::new()), "an empty ELD is no bytes, not no line");
-    assert_eq!(amixer_bytes("numid=12,iface=PCM,name='ELD',device=7\n"), None);
+    assert_eq!(
+        amixer_bytes(ELD8),
+        Some(Vec::new()),
+        "an empty ELD is no bytes, not no line"
+    );
+    assert_eq!(
+        amixer_bytes("numid=12,iface=PCM,name='ELD',device=7\n"),
+        None
+    );
     assert_eq!(amixer_bytes("  : values=0x10,zz\n"), None, "a garbled byte");
 }
 
@@ -109,7 +136,10 @@ fn the_vestibule_connector_resolves_to_its_own_hdmi_pcm() {
     );
     // HDMI-0's own monitor never lands on the vestibule PCM
     let benq = xrandr_connector_edid(XRANDR, "HDMI-0").unwrap();
-    assert_eq!(resolve_from(Some(&benq), &strih_pp_pcms()).pcm, Some((0, 3)));
+    assert_eq!(
+        resolve_from(Some(&benq), &strih_pp_pcms()).pcm,
+        Some((0, 3))
+    );
 }
 
 #[test]
@@ -165,9 +195,17 @@ fn aplay_plays_s16_stereo_48k_on_the_resolved_hw_pcm_with_a_short_buffer() {
     let a = aplay_argv(0, 7, 48000, 2);
     assert_eq!(a[0], "aplay");
     let pos = |k: &str| a.iter().position(|x| x == k).unwrap();
-    assert_eq!(a[pos("-D") + 1], "hw:0,7", "the hw PCM itself, never a plug/dmix/default device");
+    assert_eq!(
+        a[pos("-D") + 1],
+        "hw:0,7",
+        "the hw PCM itself, never a plug/dmix/default device"
+    );
     assert_eq!(a[pos("-t") + 1], "raw");
-    assert_eq!(a[pos("-f") + 1], "S16_LE", "the hub's own sample format, accepted by hw:0,7");
+    assert_eq!(
+        a[pos("-f") + 1],
+        "S16_LE",
+        "the hub's own sample format, accepted by hw:0,7"
+    );
     assert_eq!(a[pos("-r") + 1], "48000");
     assert_eq!(a[pos("-c") + 1], "2");
     assert!(a.contains(&format!("--period-size={ALSA_HDMI_PERIOD_FRAMES}")));

@@ -67,7 +67,10 @@ fn an_alsa_hdmi_participant_without_a_connector_is_refused() {
     let err = load(&no_conn).unwrap_err().to_string();
     assert!(err.contains("hdmi_connector"), "got: {err}");
     let spaced = VESTIBULE.replace("\"HDMI-1\"", "\"HDMI 1\"");
-    assert!(load(&spaced).is_err(), "a connector name never holds whitespace");
+    assert!(
+        load(&spaced).is_err(),
+        "a connector name never holds whitespace"
+    );
 }
 
 #[test]
