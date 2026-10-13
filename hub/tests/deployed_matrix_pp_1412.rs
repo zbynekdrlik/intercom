@@ -84,3 +84,32 @@ fn assert_program_only(toml: &str, stream: &str) {
     assert_eq!(target, "strih-program");
     assert_eq!(streams, [stream.to_string()]);
 }
+
+/// issue 1424 part 3 (owner 13.10.2026, "mozme to tak spravit"): the PP vestibule TV hears the lv1
+/// program straight from the hub on strih-pp's HDMI-1 (the Blackmagic HDMI-to-SDI converter), both
+/// channels at unity and nothing else; the connector is named, never a card/device number.
+#[test]
+fn strih_pp_vestibule_hears_the_lv1_program_on_hdmi_1() {
+    use intercom_hub::matrix::ADAPTER_ALSA_HDMI;
+    let m = Matrix::from_toml(PP_TOML).expect("the PP matrix must load through Matrix::from_toml");
+    let lv1 = m.id_of("lv1").expect("lv1");
+    let ves = m.id_of("vestibule").expect("the vestibule participant");
+    let p = &m.participants[ves];
+    assert_eq!(p.adapter, ADAPTER_ALSA_HDMI);
+    assert_eq!(p.role, "program_monitor");
+    assert_eq!(p.hdmi_connector.as_deref(), Some("HDMI-1"));
+    assert_eq!((p.in_channels, p.out_channels), (0, 2));
+    assert_eq!(m.alsa_hdmi_outputs(), [(ves, "HDMI-1".to_string(), 2)]);
+    let mut to_ves: Vec<(usize, usize, usize, f32)> = m
+        .points
+        .iter()
+        .filter(|pt| pt.dst == ves)
+        .map(|pt| (pt.src, pt.in_ch, pt.out_ch, pt.gain_db))
+        .collect();
+    to_ves.sort_by_key(|r| r.1);
+    assert_eq!(to_ves, [(lv1, 1, 1, 0.0), (lv1, 2, 2, 0.0)]);
+    assert!(
+        m.points.iter().all(|pt| pt.src != ves),
+        "the vestibule is an output only"
+    );
+}

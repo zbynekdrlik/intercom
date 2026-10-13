@@ -1,0 +1,6 @@
+ 0 [NVidia         ]: HDA-Intel - HDA NVidia
+                      HDA NVidia at 0xfc080000 irq 135
+ 1 [Generic        ]: HDA-Intel - HD-Audio Generic
+                      HD-Audio Generic at 0xfcb00000 irq 137
+ 2 [MGXU           ]: USB-Audio - MG-XU
+                      Yamaha Corporation MG-XU at usb-0000:0c:00.3-4.1, high speed
