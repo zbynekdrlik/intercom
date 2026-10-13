@@ -2,7 +2,7 @@
 //!
 //! The hub mixes in 256-frame (5.33 ms) blocks. The old Janus sender emitted a 20 ms packet whenever
 //! 960 frames had piled up, i.e. every 3.75 blocks. Packets therefore left on a 16/21 ms beat
-//! (measured on strih-lx: sd 2.29 ms, min 15.3, max 22.4 ms). The Janus audiobridge mixes each
+//! (measured on strih-snv: sd 2.29 ms, min 15.3, max 22.4 ms). The Janus audiobridge mixes each
 //! participant every 20 ms from a small buffer, so that beat made it conceal.
 //!
 //! Now the block loop only feeds a [`PacedRing`], and a sender with its own monotonic

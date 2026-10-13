@@ -1,6 +1,6 @@
 //! Issue 1401, design 5980775411: the block loop runs on ONE real-time OS thread, "hub-mix".
 //!
-//! Live on strih-lx (4.10.2026) the loop, a tokio task woken on SCHED_OTHER workers that the kernel
+//! Live on strih-snv (4.10.2026) the loop, a tokio task woken on SCHED_OTHER workers that the kernel
 //! put on the busy E-cores, missed ticks in clusters, several right on the dantesync NTP bursts.
 //! The mix thread asks for SCHED_FIFO 10 on itself only (above every SCHED_OTHER task, below
 //! dantesync's 50), the unit grants it with `LimitRTPRIO=10`, and a refused request falls back to

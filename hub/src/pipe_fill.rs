@@ -43,7 +43,7 @@ use std::time::Duration;
 use crate::janus_pacing::hub_block_period;
 use crate::vban_jitter::{stretch_block, NetworkFill, ServoStep};
 
-/// The PipeWire graph quantum the MiniFuse drives on strih-lx (`clock.quantum 1024`, ALSA
+/// The PipeWire graph quantum the MiniFuse drives on strih-snv (`clock.quantum 1024`, ALSA
 /// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
 /// bursts of this many frames, whatever block size the hub pops, and a `pw-cat --playback` child
 /// reads its stdin pipe in quanta of this size.

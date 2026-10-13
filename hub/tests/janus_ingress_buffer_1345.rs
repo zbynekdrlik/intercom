@@ -13,7 +13,7 @@ use intercom_hub::vban_io::BufferKind;
 
 #[test]
 fn janus_participants_get_the_target_fill_ring() {
-    let m = Matrix::from_toml(include_str!("../../intercom.strih-lx.toml")).unwrap();
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     let janus: Vec<usize> = m
         .participants

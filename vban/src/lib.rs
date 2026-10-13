@@ -5,7 +5,7 @@
 //!
 //! This crate is the ONE source of truth for the VBAN wire format across the repo: the
 //! camera-box appliance re-exports it verbatim (`src/vban.rs` is now `pub use intercom_vban::*;`,
-//! so `src/intercom.rs` and its tests are behaviourally untouched) and the strih-lx intercom hub
+//! so `src/intercom.rs` and its tests are behaviourally untouched) and the strih-snv intercom hub
 //! (`intercom/hub`) speaks the identical bytes to the 7 camboxes. Moved out of `src/vban.rs`
 //! unchanged (the codec + its unit tests), so the cambox contract stays byte-identical.
 
@@ -440,7 +440,7 @@ mod tests {
     }
 
     /// issue 1345 M1: a full PACKET round-trip (header + PCM16 payload) — the exact wire path the
-    /// strih-lx hub's `vban_io` sender/receiver walk. Build a `camN`-named stereo PCM16 packet the
+    /// strih-snv hub's `vban_io` sender/receiver walk. Build a `camN`-named stereo PCM16 packet the
     /// way the cambox does (header::encode + little-endian i16 samples), then decode it back and
     /// recover the stream name, channel count, sample count and every sample byte-exactly. This is
     /// the byte-compatibility proof the extracted crate must uphold for the 7 camboxes.

@@ -1,5 +1,5 @@
 //! The local PipeWire program-audio matrix rules (issue 1344): the `program_out` sink + the talkback
-//! capture input the hub gains to replace the last VB-Matrix function on the strih-lx notebook.
+//! capture input the hub gains to replace the last VB-Matrix function on the strih-snv notebook.
 //!
 //! These exercise the Rust `Matrix::from_toml` validation the daemon runs (the Python converter's
 //! byte-parity test does not check the role/adapter rules), plus the `program_out()` / `local_inputs()`

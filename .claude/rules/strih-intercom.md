@@ -5,10 +5,10 @@ paths:
   - "systemd/intercom-hub.service"
 ---
 
-# strih-lx intercom hub (issue 1345)
+# strih-snv intercom hub (issue 1345)
 
 The strih intercom is migrating off the Windows **VB-Audio Matrix** (a GUI-only static N-1 grid) +
-**VDO.Ninja** onto a Rust mix-minus hub on the strih-lx Linux notebook (`intercom/hub`), with Janus
+**VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`intercom/hub`), with Janus
 as the only WebRTC code and our own phone PWA. This rule covers the M1 core (the VBAN leg + engine +
 converter). Design: issue 1345 comment "Design (main, 19.9.2026)"; the VB-Matrix read-out: issue
 1344 comment "VB-Matrix setup READ".
@@ -45,7 +45,7 @@ adding/regenerating the matrix, never hand-add a self-route — it will fail to 
 
 ## The converter + the fixture-parity rule
 
-`scripts/vbmatrix_to_intercom_toml.py` parses the VB-Matrix XML into `intercom/intercom.strih-lx.toml`
+`scripts/vbmatrix_to_intercom_toml.py` parses the VB-Matrix XML into `intercom/intercom.strih-snv.toml`
 (the checked-in live matrix). Slot roles are DERIVED from the XML's own attributes, not hard-coded:
 an active `VBANStreamOut` (`status=1`) makes a slot a `cambox` (cam1..7), else a `program_ref`
 (fohabl/lv1/mbc = the stream name minus `-strih`); `AMDevice` type 256/4/1 → cutters/speakers/line34;
@@ -62,11 +62,11 @@ strih), regenerate + re-commit BOTH the fixture and the TOML together:
 
 ```
 python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml \
-  > intercom/intercom.strih-lx.toml
+  > intercom/intercom.strih-snv.toml
 python3 -m pytest -q tests/python/test_vbmatrix_to_intercom_toml_1345.py
 ```
 
-Never hand-edit `intercom.strih-lx.toml` — the parity test will go red; edit the converter (or the
+Never hand-edit `intercom.strih-snv.toml` — the parity test will go red; edit the converter (or the
 fixture) instead.
 
 ## NEVER send VBAN to a real cambox while the Windows strih is its live hub
@@ -82,11 +82,11 @@ cut-over. So:
   item 16 FAILs an inactive hub on the strih role and only reports it on the stream role. (The
   enable-only rule below was the parallel-run contract.)
 - **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
-  `scripts/strih-boxes/<box>.env` (strih-lx: `intercom/intercom.strih-lx.toml`). A second strih
-  (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-lx
+  `scripts/strih-boxes/<box>.env` (strih-snv: `intercom/intercom.strih-snv.toml`). A second strih
+  (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-snv
   file. The fact is shape-checked at load; the file's existence is checked by step 13 itself.
 - Never run `intercom-hub` from a dev lane. M1b (the supervisor) does the first live test by
-  repointing ONLY dev cambox cam1 at strih-lx via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
+  repointing ONLY dev cambox cam1 at strih-snv via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
   per the design) — cam2-7 stay on the Windows strih until M4.
 
 ## M1b — repointing ONE cambox at the Linux hub (`CAMERA_BOX_INTERCOM_TARGET`)
@@ -105,8 +105,8 @@ the intercom target host. camera-box therefore honours an env override:
   `scripts/lib/intercom-target-dropin.sh` builds the remote bash.
   `INTERCOM_TARGET_DROPIN` defaults to `/run/systemd/system/camera-box.service.d/zz-intercom-target.conf`
   — under `/run` (tmpfs), so a **reboot auto-reverts** to the deployed Windows-strih target.
-  - **Set** (repoint cam1 at strih-lx): `intercom_target_dropin_set_cmds strih-lx.lan` prints remote
-    text that writes `[Service]\nEnvironment=CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan`, `daemon-reload`s,
+  - **Set** (repoint cam1 at strih-snv): `intercom_target_dropin_set_cmds strih-snv.lan` prints remote
+    text that writes `[Service]\nEnvironment=CAMERA_BOX_INTERCOM_TARGET=strih-snv.lan`, `daemon-reload`s,
     `restart`s camera-box, then reads `systemctl show -p Environment --value camera-box` back and greps
     the var (fails loud if the override did not take). The host is validated (non-empty, no
     whitespace/quote) before any text is emitted.
@@ -115,10 +115,10 @@ the intercom target host. camera-box therefore honours an env override:
   - Every emitted statement is `;`-terminated (the `$(...)` trailing-newline-strip gotcha).
 
 This lib is a **supervisor tool** — it is deliberately NOT wired into `recording-e2e.sh` / `rig-mode.sh`.
-The supervisor uses it by hand at the M1b live step (repoint cam1, run a cam1 ↔ strih-lx loopback with a
+The supervisor uses it by hand at the M1b live step (repoint cam1, run a cam1 ↔ strih-snv loopback with a
 real headset, then clear).
 
-**NEVER repoint cam2-7** at strih-lx before the M4 cut-over — those camboxes are on the LIVE Windows
+**NEVER repoint cam2-7** at strih-snv before the M4 cut-over — those camboxes are on the LIVE Windows
 strih, and a second hub sending VBAN back to them is double talkback.
 
 ### The M1b live-loopback recipe (ran 19.9.2026 — what actually worked)
@@ -126,7 +126,7 @@ strih, and a second hub sending VBAN back to them is double talkback.
 - **Never start the enabled `intercom-hub.service` with the full checked-in matrix while the Windows
   strih is the live hub** — the hub SENDS `camN` to every `vban` participant with `out_channels > 0`,
   i.e. cam1–7. Run the test hub as a TRANSIENT unit on a cam1-only matrix instead: filter
-  `intercom/intercom.strih-lx.toml` down to participants `{cam1, cutters}` + the points between them
+  `intercom/intercom.strih-snv.toml` down to participants `{cam1, cutters}` + the points between them
   (a 20-line `tomllib` script), install it as `/etc/intercom-hub/intercom.m1b-cam1.toml`, then
   `systemd-run --unit intercom-hub-m1b --property=DynamicUser=yes --property=Restart=no
   /usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.m1b-cam1.toml`; `systemctl stop
@@ -162,7 +162,7 @@ strih, and a second hub sending VBAN back to them is double talkback.
 
 ## M2 — the local PipeWire audio bridge (issue 1344, DONE)
 
-The last VB-Matrix function the strih-lx notebook lacked: local audio I/O. Two directions behind one
+The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
 `pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
 hub stays Tier-0 / CI-buildable; a native `pipewire-rs` impl is a later 2nd impl of the SAME
 `LocalAudioSink`/`LocalAudioSource` trait). Design: issue 1344 comment 5750031080, Prístup 1.
@@ -303,9 +303,9 @@ What was wrong live, and how the code now handles it. Read this before touching 
   - The old one-pole let a 6 kHz tone through at -6 dB, and it restarted every 20 ms chunk.
 - **Talkback gain.** `TALKBACK_MAKEUP_DB` (converter, +12 dB) is added to every cutters →
   phones/camN point. Tune it ONLY there, and regenerate the TOML.
-  - Changing the TOML also changes the strih-lx golden sha (`tests/fixtures/strih_box_1361/strih-lx.golden`,
+  - Changing the TOML also changes the strih-snv golden sha (`tests/fixtures/strih_box_1361/strih-snv.golden`,
     `section intercom-toml`). Update that sha in the same commit.
-  - Check it with `bash tests/fixtures/strih_box_1361/render.sh <root> strih-lx | cmp - <golden>`.
+  - Check it with `bash tests/fixtures/strih_box_1361/render.sh <root> strih-snv | cmp - <golden>`.
 - **Stale streams.** Once a stream has had no packet for > `STALE_STREAM_MS` (500 ms), it stops
   counting underruns, and its `level_dbfs` reads -120. A muted cambox used to add 187 underruns/s
   forever and show its last level.
@@ -440,7 +440,7 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
   1401 designs accepted these delays knowingly.
 - **Supervisor live check after a hub deploy:**
-  - `curl -s http://strih-lx:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
+  - `curl -s http://strih-snv:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
     `target_frames` 1536..3072 (a cambox: 768) matching `max_gap_ms_10min` by the adaptive rule,
     `depth_frames` within +-16 of it once walked in, `depth_min_frames` well above 256,
     `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
@@ -560,7 +560,7 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   - The live `sysctl -w net.ipv4.neigh.<rig nic>.unres_qlen_bytes=16384` mitigation is no longer
     needed and was never persisted (it lapses at the next reboot, harmlessly).
   - **Supervisor live check after the deploy (no FIONREAD needed):**
-    - `pw-top -b` on strih-lx: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
+    - `pw-top -b` on strih-snv: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
       row's driver (the MiniFuse for the cans);
     - `/api/state` -> `program_out` and `cutters` `local_audio` (egress step 2):
       `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-70 of it on the cans (a 50 ppm
@@ -725,7 +725,7 @@ Interkom picture = M3c — both out of this lane).
 ### Topology
 
 ```
-phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ Janus WS :8188 (strih-lx)
+phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ Janus WS :8188 (strih-snv)
                                                                        │  audiobridge room "interkom" (id 1000)
                                                           plain RTP PCMU (8 kHz, PT 0)
                                                                        ▼
@@ -798,7 +798,7 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
 
 - **M1 (this lane):** the vban crate extraction + hub engine + VBAN adapter + converter + TOML +
   `/api/state` + CI + unit + the enable-only systemd unit. Zero production impact.
-- **M1b (supervisor):** the cam1 env override on the appliance + the live cam1 ↔ strih-lx loopback.
+- **M1b (supervisor):** the cam1 env override on the appliance + the live cam1 ↔ strih-snv loopback.
 - **M2 (issue 1344, DONE — this lane):** the local PipeWire audio bridge — the `program_out` sink
   (the OBS `ASIO zvuk` program capture) + the MiniFuse talkback capture into the N-1 mix. **The
   root cause corrected the M1-era framing:** the OBS program (`ASIO zvuk` = VASIO8) is a NETWORK
@@ -806,11 +806,11 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   talkback mic (design 20.9., comment 5750031080). See the "M2 — the local PipeWire audio bridge"
   section below. (The cutters' cans / speakers / −8/−10 dB monitor outputs remain a later
   local-monitor lane — the same `LocalAudioSink` trait serves them.)
-- **M3:** Janus (apt) audiobridge/streaming + the phone PWA + the Interkom video (`STRIH-LX (interkom)`
+- **M3:** Janus (apt) audiobridge/streaming + the phone PWA + the Interkom video (`STRIH-SNV (interkom)`
   NDI republish, issue 1347). **M3a (the audio edge: `mulaw` + `janus_rtp` + `[janus]` config +
   converter + setup/verify) is DONE** — see the "M3a — the Janus audio edge" section above; M3b (PWA
   + TLS front) + M3c (MJPEG video) remain.
-- **M4:** the cut-over — repoint the 7 camboxes + fohabl/lv1/mbc VBAN targets to strih-lx, retire
+- **M4:** the cut-over — repoint the 7 camboxes + fohabl/lv1/mbc VBAN targets to strih-snv, retire
   VB-Matrix + the OBS browser source.
 
 ## Gotchas folded from the M1 review
@@ -823,7 +823,7 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   VB-Matrix routes fohabl + lv1 as program refs but not mbc, and the parity test pins that fidelity.
   If mbc should carry program audio, re-capture the VB-Matrix XML when it is active, then regenerate.
 - **The deployed matrix is load-tested through the REAL `Matrix::from_toml`** (not just tomllib) by
-  `intercom/hub/tests/deployed_matrix.rs` (`include_str!("../../intercom.strih-lx.toml")`) — so a
+  `intercom/hub/tests/deployed_matrix.rs` (`include_str!("../../intercom.strih-snv.toml")`) — so a
   future converter/XML change that produces a byte-parity-passing but daemon-REJECTED TOML fails at
   CI, not at rig startup. Keep that test's expected shape (15 participants / 216 points) in sync.
 
@@ -873,8 +873,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   - One packet per tick keeps the RTP timestamps contiguous (+960 Opus, +160 PCMU).
   - A stall over 100 ms restarts the grid instead of bursting the missed packets.
   - It is an OS thread, not a tokio task: the tokio timer wheel rounds to whole ms.
-    `std::thread::sleep` on strih-lx wakes with sd 0.027 ms / max 0.29 ms (measured 25.9.).
-    dev1 under load 10 on 4 cores measures sd 0.7-2 ms, so judge pacing ON strih-lx, not dev1.
+    `std::thread::sleep` on strih-snv wakes with sd 0.027 ms / max 0.29 ms (measured 25.9.).
+    dev1 under load 10 on 4 cores measures sd 0.7-2 ms, so judge pacing ON strih-snv, not dev1.
   - The async session task (`run_janus_participant`) keeps the HTTP session, the keepalive (its own
     spawned task, so a slow POST never holds up receive) and the decoder. It points the sender at
     each session via `PacedSenderShared::set_target`. A failed send sets a flag the task checks
@@ -934,7 +934,7 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
     cmake.
 - **`/api/state` janus facet** also carries `codec`, `tx_interval_ms_sd`, `tx_interval_ms_max`
   (last 5 s of real send spacing), `tx_underflows`, `tx_overflow_trims` and `rx_lost_frames`.
-  - Acceptance after deploy: `codec: "opus"`, sd < 0.5, max < 21 on strih-lx.
+  - Acceptance after deploy: `codec: "opus"`, sd < 0.5, max < 21 on strih-snv.
   - Then a udp 6990 capture: spacing sd < 0.5 ms, max < 21 ms.
 - **Tier-0 verify without cargo.**
   - `janus_pacing` is std-only: a rustc `--test` replica + `clippy-driver`.
@@ -959,7 +959,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 
 - **Embedded, self-contained** (the bkshading model): the hub serves every asset via
   `include_str!`/`include_bytes!` from `../../web/…` (relative to `intercom/hub/src/` →
-  `intercom/web/`), so the binary is self-contained on strih-lx with no runtime file/CDN
+  `intercom/web/`), so the binary is self-contained on strih-snv with no runtime file/CDN
   dependency. The M1 plain-text `/` index is REPLACED by the PWA index; `/api/version`,
   `/api/state`, `/ws` stay byte-identical. Each asset has a pure `*_asset()` fn + a
   `*_CONTENT_TYPE` const so the route tests (`intercom/hub/tests/webui_assets_1345.rs`) pin the
@@ -1188,19 +1188,19 @@ build swaps the real receiver for the stub test-pattern source so the libndi-fre
 ### Config (`[video]` table) + the dev source pointer
 
 `matrix.rs` gains an optional `[video]` table (`VideoConfig`): `ndi_source_name` (default
-`STRIH-LX (interkom)`), `fps` (default 10, validated **1..=30**), `jpeg_quality` (default 70,
+`STRIH-SNV (interkom)`), `fps` (default 10, validated **1..=30**), `jpeg_quality` (default 70,
 validated **30..=95**), `enabled` (default true). `Matrix::from_toml` validates the bounds at load
 (fail-closed). The converter (`scripts/vbmatrix_to_intercom_toml.py`) emits the `[video]` table with
 defaults; the byte-parity fixture test is regenerated in the SAME commit (never hand-edit the TOML).
-**Until issue 1347 builds the `STRIH-LX (interkom)` NDI republish output, the supervisor points
+**Until issue 1347 builds the `STRIH-SNV (interkom)` NDI republish output, the supervisor points
 `ndi_source_name` at `CAM1 (usb)`** (a config edit on the box — no code change, no re-generate).
 Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 
 ### How to verify
 
 - Curl-able liveness once the hub runs against a live NDI source:
-  `curl -o f.jpg http://strih-lx:8790/interkom.jpg` (200 + a JPEG when a frame is flowing; 503 until
-  the first frame). The `video` facet is on `curl http://strih-lx:8790/api/state`.
+  `curl -o f.jpg http://strih-snv:8790/interkom.jpg` (200 + a JPEG when a frame is flowing; 503 until
+  the first frame). The `video` facet is on `curl http://strih-snv:8790/api/state`.
 - **Tier-0 (locally, no cargo):** `cargo fmt --all --check`; a standalone `rustc --edition 2021
   --test` replica of the pure pieces (framing / stale / decimator / BGRX→RGB) run RED→GREEN; the
   converter pytest; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`; the
@@ -1294,11 +1294,11 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   2104, WebKit 18.2) is already in `~/.cache/ms-playwright`. Run the script-file wrapper with
   `--project=iphone-webkit`.
 - **After merge (supervisor).** The web assets are embedded, so the new `sw.js` ships with the hub
-  binary. Redeploy the hub on strih-lx with `install`, keeping the old binary. Then read `/sw.js`
+  binary. Redeploy the hub on strih-snv with `install`, keeping the old binary. Then read `/sw.js`
   from the public URL and confirm it carries `Worker version: 2`. The real-iPhone check is passive:
   the owner's next use.
 
-## M3 live findings on strih-lx / dev1 (19.9.2026) — read before the phone test or the M4 cut-over
+## M3 live findings on strih-snv / dev1 (19.9.2026) — read before the phone test or the M4 cut-over
 
 - **Janus picks a plain-RTP participant's codec from the join request's TOP-LEVEL `codec`
   (`"pcmu"`/`"pcma"`/`"opus"`, default opus) — NOT from `rtp.payload_type`.** Without it Janus 1.1.2
@@ -1351,6 +1351,6 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   not a JS error) — expected.
 - **The live M3 test shape that worked:** transient `intercom-hub-m3` unit (NO DynamicUser, so the
   room-secret file is readable) on a cam1 + cutters + phones(janus) matrix with
-  `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-LX (interkom)`); the PWA
+  `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-SNV (interkom)`); the PWA
   showed the live cam1 picture through the HTTPS front at ~9.3 fps; stop the transient hub right
   after — it is a second sender of stream `cam1` into cam1's headset.

@@ -2,7 +2,7 @@
 //!
 //! The block loop used to be a tokio task with `MissedTickBehavior::Skip`: a wake more than a
 //! period late skipped the missed ticks, and every output lost those blocks (live 4.10.2026: 18
-//! missed ticks in one hour, in clusters of 1-5, several right on the strih-lx dantesync NTP
+//! missed ticks in one hour, in clusters of 1-5, several right on the strih-snv dantesync NTP
 //! bursts). Now the loop sleeps to absolute deadlines on the exact block grid ([`BlockGrid`]) and
 //! a wake that finds k missed ticks runs them all at once, in order, before the current one, up to
 //! [`CATCHUP_MAX_BLOCKS`] ([`catch_up_plan`], [`run_batch`]). Only the part beyond that is lost.

@@ -4,7 +4,7 @@
 //! The block loop pops one block from every input, mixes N-1 and writes every output once per
 //! tick (256 frames = 5.33 ms at 48 kHz). It used to be a tokio task on `tokio::time::interval`
 //! with `MissedTickBehavior::Skip`: a wake more than a period late (a few ms of contention on the
-//! strih-lx E-cores, the dantesync NTP bursts) skipped the missed ticks, and every output lost
+//! strih-snv E-cores, the dantesync NTP bursts) skipped the missed ticks, and every output lost
 //! those blocks, a click in the program audio, the operator's cans and every cambox headset (18
 //! missed ticks in one hour, 4.10.2026).
 //!

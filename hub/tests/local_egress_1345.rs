@@ -175,7 +175,7 @@ fn the_playback_argv_carries_the_aux_channel_map_only_when_given() {
 fn the_record_child_asks_for_the_1024_frame_graph_quantum() {
     // pw-cat takes the latency as direct SAMPLES at `--rate` (or a time unit): `--latency 1024` with
     // `--rate 48000` sets `node.latency = "1024/48000"`. The literal `1024/48000` is REJECTED by
-    // pw-cat 1.6.2 ("bad latency value ... (bad unit)", live-verified on strih-lx).
+    // pw-cat 1.6.2 ("bad latency value ... (bad unit)", live-verified on strih-snv).
     //
     // 24.9.2026 (owner accepted 25.9): the capture child asked `--latency 256` and pulled the whole
     // graph down to quantum 256 while the MiniFuse playback ran period 1024 -- the cameraman sounded

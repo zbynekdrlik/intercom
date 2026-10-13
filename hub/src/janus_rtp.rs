@@ -157,7 +157,7 @@ impl RtpPacketizer {
 /// Whether a datagram from `from` belongs to the current session's Janus endpoint `peer`. Any other
 /// host or port is ignored, so a stray datagram cannot feed or lock out the room mix. When Janus
 /// advertised an unspecified address only the port is compared. NOTE: Janus reuses the SAME rtp
-/// port for every new session (live strih-lx, 24./25.9.2026), so this does NOT separate an old
+/// port for every new session (live strih-snv, 24./25.9.2026), so this does NOT separate an old
 /// session from a new one; the SSRC restart (`RxDecoder::observe_ssrc`), `MAX_MISORDER` and the
 /// socket drain before a new session do that.
 pub fn is_session_peer(from: SocketAddr, peer: SocketAddr) -> bool {
@@ -249,7 +249,7 @@ pub fn build_join(transaction: &str, spec: &JoinSpec<'_>) -> Value {
         "room": spec.room,
         "display": spec.display,
         // The plain-RTP leg's codec is selected HERE (top-level `codec`), not by `rtp.payload_type`:
-        // without it Janus 1.1.2 defaults the participant to Opus and discards PCMU (live strih-lx
+        // without it Janus 1.1.2 defaults the participant to Opus and discards PCMU (live strih-snv
         // finding, 19.9.2026).
         "codec": spec.codec.as_str(),
         "rtp": rtp,

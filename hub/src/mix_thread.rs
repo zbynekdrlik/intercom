@@ -6,7 +6,7 @@
 //! - **SCHED_FIFO [`MIX_RT_PRIORITY`] on this thread only** ([`set_realtime_fifo`]). It is above
 //!   every SCHED_OTHER task, so a few ms of contention on the box no longer makes the loop more
 //!   than a period late (live 4.10.2026: the tokio workers sat on the busy E-cores and the loop
-//!   missed ticks in clusters, several right on the strih-lx dantesync NTP bursts). It stays below
+//!   missed ticks in clusters, several right on the strih-snv dantesync NTP bursts). It stays below
 //!   dantesync (50) and PipeWire's own real-time threads. The tokio runtime (HTTP, the Janus
 //!   session, the VBAN receive task) and the picture thread stay SCHED_OTHER.
 //! - The unit grants it with `LimitRTPRIO=10` (`systemd/intercom-hub.service`). Refused (no grant,

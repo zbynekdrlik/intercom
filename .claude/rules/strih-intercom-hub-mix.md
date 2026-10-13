@@ -30,7 +30,7 @@ refill rule in `pipe_fill`, or the program legs in `inputs` / `vban_io`. The VBA
 
 ## The hub-mix thread: catch-up instead of skip
 
-Live: 18 missed ticks in one hour, in clusters of 1-5, several on the strih-lx dantesync NTP
+Live: 18 missed ticks in one hour, in clusters of 1-5, several on the strih-snv dantesync NTP
 bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, and
 `MissedTickBehavior::Skip` gave every missed block up on every output.
 
@@ -160,13 +160,13 @@ minute.
   - a sudden 19 -> 35 ms jump: exactly one underrun, at the first 35 ms gap (pinned `== 1`), and the
     re-prime goes straight to 9 blocks.
 
-## Reading it on strih-lx after a hub deploy (the supervisor)
+## Reading it on strih-snv after a hub deploy (the supervisor)
 
 - Step 3 changed the base unit, so on a box still on a pre-step-3 unit reinstall it before the
   restart: `install -Dm644 systemd/intercom-hub.service /etc/systemd/system/intercom-hub.service`
   (or setup-strih step 13) + `systemctl daemon-reload`. Then `systemctl show intercom-hub -p
   LimitRTPRIO` must print `LimitRTPRIO=10`. Step 4 changes the binary only (no unit, no config).
-- `curl -s http://strih-lx:8790/api/state | jq -r .mix_thread_sched` -> `SCHED_FIFO 10`.
+- `curl -s http://strih-snv:8790/api/state | jq -r .mix_thread_sched` -> `SCHED_FIFO 10`.
 - On the box: `ps -L -o tid,cls,rtprio,comm -p "$(pidof intercom-hub)"` -> the `hub-mix` row
   `FF 10`, every other row `TS -` (the tokio workers, `janus-paced-tx`, the local-audio sink
   threads, `interkom-video` / `ndir:*`). Or `chrt -p <hub-mix tid>` -> `SCHED_FIFO`, priority 10.

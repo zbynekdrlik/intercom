@@ -21,7 +21,7 @@ pub const DEFAULT_TARGET_FPS: u32 = 10;
 /// `last_error` render as `null` until there is a frame / an error.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct VideoStats {
-    /// The configured NDI source name the receiver looks for (e.g. `STRIH-LX (interkom)`).
+    /// The configured NDI source name the receiver looks for (e.g. `STRIH-SNV (interkom)`).
     pub source: String,
     /// Whether the NDI receiver is currently connected to the source.
     pub connected: bool,

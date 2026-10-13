@@ -1,6 +1,6 @@
-# strih-lx intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).
+# strih-snv intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).
 # DO NOT EDIT BY HAND. Regenerate:
-#   python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-lx.toml
+#   python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-snv.toml
 # The byte-for-byte parity is pinned by tests/python/test_vbmatrix_to_intercom_toml_1345.py.
 
 [hub]
@@ -17,7 +17,7 @@ rtp_bind = "0.0.0.0:6990"
 codec = "opus"
 
 [video]
-ndi_source_name = "STRIH-LX (interkom)"
+ndi_source_name = "STRIH-SNV (interkom)"
 fps = 10
 jpeg_quality = 70
 enabled = true

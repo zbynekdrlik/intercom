@@ -15,7 +15,7 @@ use serde_json::json;
 fn spec<'a>(codec: JanusCodec, secret: Option<&'a str>, pin: Option<&'a str>) -> JoinSpec<'a> {
     JoinSpec {
         room: 1000,
-        display: "strih-lx-hub",
+        display: "strih-snv-hub",
         local_ip: "10.77.9.203",
         local_port: 6990,
         codec,
@@ -124,11 +124,11 @@ fn build_join_plain_rtp_participant_shape() {
     let body = &v["body"];
     assert_eq!(body["request"], "join");
     assert_eq!(body["room"], 1000);
-    assert_eq!(body["display"], "strih-lx-hub");
+    assert_eq!(body["display"], "strih-snv-hub");
     assert_eq!(body["rtp"]["ip"], "10.77.9.203");
     assert_eq!(body["rtp"]["port"], 6990);
     assert_eq!(body["rtp"]["payload_type"], PCMU_PAYLOAD_TYPE);
-    // Live finding (strih-lx Janus 1.1.2, 19.9.2026): the plain-RTP leg's CODEC is chosen by the
+    // Live finding (strih-snv Janus 1.1.2, 19.9.2026): the plain-RTP leg's CODEC is chosen by the
     // top-level `codec` field of the join request, NOT by `rtp.payload_type` -- without it Janus
     // defaults the participant to Opus (its `joined` reply carried payload_type 100) and silently
     // discards the PCMU the hub sends (hub rx stayed 0 while a second participant was mixing). With

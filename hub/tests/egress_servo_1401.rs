@@ -33,7 +33,7 @@ use intercom_hub::pipe_fill::{
 };
 use intercom_hub::vban_jitter::{NetworkFill, PopPlan, ServoStep};
 
-/// The hub block on strih-lx (`[hub].block_frames`).
+/// The hub block on strih-snv (`[hub].block_frames`).
 const BLOCK: usize = 256;
 /// The hub's (and every pw-cat pipe's) sample rate.
 const RATE: u32 = 48_000;

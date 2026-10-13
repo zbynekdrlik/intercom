@@ -1,4 +1,4 @@
-//! The checked-in strih-lx matrix must LOAD through the same `Matrix::from_toml` the daemon runs
+//! The checked-in strih-snv matrix must LOAD through the same `Matrix::from_toml` the daemon runs
 //! (issue 1345 M1, review F2). The Python converter pytest pins byte-for-byte parity + parses the
 //! TOML with `tomllib`, but it does NOT exercise the Rust role/adapter/channel-range/self-route
 //! rules — so a future converter/XML change could produce a syntactically-valid TOML the daemon
@@ -7,12 +7,12 @@
 use intercom_hub::janus_rtp::JanusCodec;
 use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
-const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-lx.toml");
+const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-snv.toml");
 
 #[test]
 fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     let m = Matrix::from_toml(DEPLOYED_TOML)
-        .expect("the deployed intercom.strih-lx.toml must load through Matrix::from_toml");
+        .expect("the deployed intercom.strih-snv.toml must load through Matrix::from_toml");
 
     assert_eq!(m.participants.len(), 15, "expected 15 participants");
     assert_eq!(m.points.len(), 216, "expected the 216-point VB-Matrix grid");

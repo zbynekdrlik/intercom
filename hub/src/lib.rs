@@ -1,6 +1,6 @@
-//! `intercom-hub` — the strih-lx intercom mix-minus (N-1) hub (issue 1345 M1).
+//! `intercom-hub` — the strih-snv intercom mix-minus (N-1) hub (issue 1345 M1).
 //!
-//! One tokio daemon on the strih-lx Linux notebook that replaces the Windows VB-Matrix's static
+//! One tokio daemon on the strih-snv Linux notebook that replaces the Windows VB-Matrix's static
 //! N-1 intercom for the VBAN world (the 7 camboxes) FIRST. It loads a declarative routing
 //! [`matrix::Matrix`] from `intercom.toml` (GENERATED from the live VB-Matrix XML by
 //! `scripts/vbmatrix_to_intercom_toml.py`, never a GUI); runs the [`engine::Engine`] N-1 mixer (for

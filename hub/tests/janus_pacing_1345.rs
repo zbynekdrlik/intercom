@@ -1,6 +1,6 @@
 //! The Janus leg's own 20 ms clock (issue 1345, 25.9.2026: the phone voice sounds robotic).
 //!
-//! Measured on strih-lx: hub → Janus packets left on a 16/21 ms beat (sd 2.29 ms, min 15.3, max
+//! Measured on strih-snv: hub → Janus packets left on a 16/21 ms beat (sd 2.29 ms, min 15.3, max
 //! 22.4 ms), because a packet went out whenever 960 frames had piled up from 256-frame (5.33 ms)
 //! mix blocks. The Janus audiobridge mixes every 20 ms from a small buffer, so that beat made it
 //! conceal. The fix: the block loop only FEEDS a ring, and a sender on its own monotonic clock pops

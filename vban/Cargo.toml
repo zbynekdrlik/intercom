@@ -3,7 +3,7 @@ name = "intercom-vban"
 version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
-description = "Shared VBAN codec — the one wire format for the appliance + the strih-lx intercom hub (issue 1345)"
+description = "Shared VBAN codec — the one wire format for the appliance + the strih-snv intercom hub (issue 1345)"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
 

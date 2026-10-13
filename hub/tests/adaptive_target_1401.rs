@@ -478,7 +478,7 @@ fn a_gap_that_jumps_from_19_to_35ms_underruns_once_and_never_again() {
 
 #[test]
 fn the_deployed_matrix_gives_only_the_program_feeds_an_adaptive_target() {
-    let m = Matrix::from_toml(include_str!("../../intercom.strih-lx.toml")).unwrap();
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     for (p, b) in m.participants.iter().zip(&buffers) {
         if p.adapter != ADAPTER_VBAN {

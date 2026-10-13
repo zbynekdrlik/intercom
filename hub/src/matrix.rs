@@ -24,7 +24,7 @@ pub const ADAPTER_VBAN: &str = "vban";
 pub const ADAPTER_NONE: &str = "none";
 pub const ADAPTER_JANUS: &str = "janus";
 /// The local PipeWire adapter (issue 1344): the `program_out` sink (egress) + the talkback capture
-/// (ingress) that replace the last VB-Matrix function on the strih-lx notebook.
+/// (ingress) that replace the last VB-Matrix function on the strih-snv notebook.
 pub const ADAPTER_PIPEWIRE: &str = "pipewire";
 
 /// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
@@ -108,11 +108,11 @@ pub fn resolve_secret_path(
 
 /// The Interkom picture (MJPEG) config (the optional `[video]` table, M3c). Absent → the hub serves no
 /// picture; present + `enabled` → the hub runs the NDI low-bandwidth receiver → decimate → JPEG →
-/// `/interkom.mjpeg` pipe. Until issue 1347 builds the `STRIH-LX (interkom)` NDI output, a dev override
+/// `/interkom.mjpeg` pipe. Until issue 1347 builds the `STRIH-SNV (interkom)` NDI output, a dev override
 /// points `ndi_source_name` at `CAM1 (usb)`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoConfig {
-    /// The NDI source name the receiver looks for (default `STRIH-LX (interkom)`).
+    /// The NDI source name the receiver looks for (default `STRIH-SNV (interkom)`).
     #[serde(default = "default_video_source")]
     pub ndi_source_name: String,
     /// Target picture rate, frames/sec (validated 1..=30 at load).
@@ -127,7 +127,7 @@ pub struct VideoConfig {
 }
 
 fn default_video_source() -> String {
-    "STRIH-LX (interkom)".to_string()
+    "STRIH-SNV (interkom)".to_string()
 }
 fn default_video_fps() -> u32 {
     10

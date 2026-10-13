@@ -107,7 +107,7 @@ fn bgrx_to_rgb_on_a_2x2_fixture() {
 
 #[test]
 fn video_slot_publishes_only_on_a_new_frame() {
-    let state = VideoState::new("STRIH-LX (interkom)");
+    let state = VideoState::new("STRIH-SNV (interkom)");
     // Nothing published yet.
     assert_eq!(state.frame_counter(), 0);
     assert!(state.latest_frame().is_none());
@@ -190,7 +190,7 @@ out_channels = 2
 fn video_table_defaults_when_empty() {
     let m = Matrix::from_toml(&toml_with_video("\n[video]")).unwrap();
     let v = m.video.expect("[video] present");
-    assert_eq!(v.ndi_source_name, "STRIH-LX (interkom)");
+    assert_eq!(v.ndi_source_name, "STRIH-SNV (interkom)");
     assert_eq!(v.fps, 10);
     assert_eq!(v.jpeg_quality, 70);
     assert!(v.enabled);

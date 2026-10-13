@@ -1,5 +1,5 @@
 [Unit]
-Description=strih-lx intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
+Description=strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # Ordered after the network is up so the VBAN receive socket (:6980) binds cleanly.
 After=network-online.target
@@ -40,7 +40,7 @@ PrivateTmp=true
 # (/etc/systemd/system/intercom-hub.service.d/10-local-audio.conf) that OVERRIDES DynamicUser=no +
 # User=<operator> + the operator's XDG_RUNTIME_DIR, so the hub's pw-cat program-sink + talkback
 # children reach the operator's PipeWire session (DynamicUser cannot traverse the operator's 0700
-# /run/user/<uid>). So on a provisioned strih-lx the hub runs as the operator, NOT DynamicUser; this
+# /run/user/<uid>). So on a provisioned strih-snv the hub runs as the operator, NOT DynamicUser; this
 # base unit's DynamicUser=yes is only the standalone default for a hub run without that drop-in.
 
 [Install]

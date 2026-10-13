@@ -3,7 +3,7 @@ name = "intercom-hub"
 version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
-description = "strih-lx intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
+description = "strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
 
@@ -55,7 +55,7 @@ jpeg-encoder = "0.7"
 # The phones leg's Opus codec (issue 1345, 25.9.2026: 48 kHz mono, 20 ms, in-band FEC). `opus` 0.4
 # links libopus through `opusic-sys`, whose DEFAULT `bundled` feature builds the vendored libopus
 # source with cmake and links it statically — no libopus-dev at build time, no libopus.so on
-# strih-lx at run time (the CI `intercom-hub` job checks cmake is present).
+# strih-snv at run time (the CI `intercom-hub` job checks cmake is present).
 opus = "0.4"
 tokio-stream = "0.1"
 libloading = { version = "0.8", optional = true }

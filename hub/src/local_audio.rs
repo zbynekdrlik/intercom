@@ -1,4 +1,4 @@
-//! The local PipeWire audio bridge (issue 1344): the last VB-Matrix function the strih-lx notebook
+//! The local PipeWire audio bridge (issue 1344): the last VB-Matrix function the strih-snv notebook
 //! lacked.
 //!
 //! Two directions, one shape (`pw-cat` supervised children — the SAME shell-out-over-FFI rationale

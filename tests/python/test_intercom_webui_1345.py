@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interkom phone PWA structural tests (issue 1345 M3b).
 
-The strih-lx intercom hub serves an installable phone web app (PWA) at `/`. Owner ruling 25.9.2026
+The strih-snv intercom hub serves an installable phone web app (PWA) at `/`. Owner ruling 25.9.2026
 (the phone UX rework): opening the link CONNECTS immediately, receive-only, with the microphone OFF
 (no connect button). The page shows three live answers: the connection state, a live level meter of
 the incoming audio ("Strihač / réžia") and one huge mic toggle with a live meter of my own mic. The

@@ -24,7 +24,7 @@ use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{classify_send, SendOutcome};
 
-/// The hub block (`[hub].block_frames` on strih-lx).
+/// The hub block (`[hub].block_frames` on strih-snv).
 const BLOCK: usize = 256;
 /// The hub's (and the pw-cat pipes') sample rate.
 const RATE: u32 = 48_000;

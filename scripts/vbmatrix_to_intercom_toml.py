@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Convert a VB-Audio Matrix settings XML into the strih-lx intercom hub's intercom.toml (issue 1345).
+"""Convert a VB-Audio Matrix settings XML into the strih-snv intercom hub's intercom.toml (issue 1345).
 
 The Windows strih runs VB-Audio Matrix as a static N-1 intercom: a 216-cell routing grid over the
 7 cambox VBAN streams, the 2 cutter mics + 2 stereo cans on the MiniFuse (ASIO32), the phones
 (VAIO1), the line-3/4 mic (WIN1.IN), the local speakers (WIN1.OUT), an OBS program-monitor sink
-(VASIO8) and the attenuated program references (fohabl/lv1). The strih-lx Linux hub replaces that
+(VASIO8) and the attenuated program references (fohabl/lv1). The strih-snv Linux hub replaces that
 GUI matrix with a DECLARATIVE `intercom.toml` GENERATED from this XML by THIS converter, so the
 routing (incl. the −8/−10 dB program refs + the small asymmetries) is reproduced with fidelity and
 lives in git, never a GUI.
@@ -25,7 +25,7 @@ operator talkback mic). The remaining interface participants (speakers/line34) s
 until a later local-monitor lane wires them.
 
 Usage:
-    python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-lx.toml
+    python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-snv.toml
 """
 
 import sys
@@ -54,12 +54,12 @@ JANUS = {
 }
 
 # The Interkom picture (MJPEG) config emitted into the `[video]` table (issue 1345 M3c). The hub
-# receives the `STRIH-LX (interkom)` NDI source in LOW-bandwidth mode, decimates to `fps`, JPEG-encodes
+# receives the `STRIH-SNV (interkom)` NDI source in LOW-bandwidth mode, decimates to `fps`, JPEG-encodes
 # at `jpeg_quality`, and serves it as `multipart/x-mixed-replace` at `/interkom.mjpeg`. Until issue
-# 1347 builds the `STRIH-LX (interkom)` NDI output, the supervisor points `ndi_source_name` at
+# 1347 builds the `STRIH-SNV (interkom)` NDI output, the supervisor points `ndi_source_name` at
 # `CAM1 (usb)` (a config edit on the box, no code change / no re-generate).
 VIDEO = {
-    "ndi_source_name": "STRIH-LX (interkom)",
+    "ndi_source_name": "STRIH-SNV (interkom)",
     "fps": 10,
     "jpeg_quality": 70,
     "enabled": True,
@@ -78,7 +78,7 @@ _ROLE_ORDER = {
 
 _STRIH_SUFFIX = "-strih"
 
-# issue 1344: the local PipeWire nodes the strih-lx audio graph binds.
+# issue 1344: the local PipeWire nodes the strih-snv audio graph binds.
 # - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures the loopback
 #   republish node strih-program-source (issue 1344 follow-up, 20.9.2026 live diagnosis --
 #   strih-program.monitor itself is NOT pulse-visible to OBS on this box).
@@ -92,7 +92,7 @@ _MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 
 # issue 1345 (24.9.2026): the MiniFuse 4 PLAYBACK node the cutters' N-1 mix is played to, so the
 # operator hears the cams + phones in the headphones (on Linux the cutters were capture-only).
-# Live-read on strih-lx: a pro-audio node with 6 ports `playback_AUX0..5`. The cutters' 4 output
+# Live-read on strih-snv: a pro-audio node with 6 ports `playback_AUX0..5`. The cutters' 4 output
 # channels map onto AUX0..AUX3 via an explicit pw-cat channel map (an unmapped 4-ch stream defaults
 # to FL/FR/RL/RR and never lands on the AUX ports).
 _MINIFUSE_PLAYBACK_NODE = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
@@ -291,11 +291,11 @@ def render(model):
     """Render (hub, participants, points) into the intercom.toml text (deterministic)."""
     hub, participants, points = model
     out = []
-    out.append("# strih-lx intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).")
+    out.append("# strih-snv intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).")
     out.append("# DO NOT EDIT BY HAND. Regenerate:")
     out.append(
         "#   python3 scripts/vbmatrix_to_intercom_toml.py "
-        "intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-lx.toml"
+        "intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-snv.toml"
     )
     out.append("# The byte-for-byte parity is pinned by tests/python/test_vbmatrix_to_intercom_toml_1345.py.")
     out.append("")

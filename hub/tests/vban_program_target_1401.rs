@@ -1,5 +1,5 @@
 //! Issue 1401, live 4.10.2026: the FOH program feed (`fohabl`, a Windows VBAN sender) does not send
-//! evenly. A 12 s capture on strih-lx: 932 packets/s in bursts about every 6 ms, and a gap of up to
+//! evenly. A 12 s capture on strih-snv: 932 packets/s in bursts about every 6 ms, and a gap of up to
 //! 19.4 ms (30 gaps over 12 ms in those 12 s). With the 3-block (16 ms) VBAN target the leg ran dry
 //! about every 2-3 s (`underruns=26(fohabl)` -> `48(fohabl)` in one minute, no missed hub tick), so
 //! the strih program audio still dropped out. The program feeds (every VBAN leg that is not a
@@ -125,7 +125,7 @@ fn the_program_feed_leg_rides_out_the_measured_fohabl_pattern_without_an_underru
 
 #[test]
 fn the_deployed_matrix_gives_program_feeds_the_larger_target_and_camboxes_the_small_one() {
-    let m = Matrix::from_toml(include_str!("../../intercom.strih-lx.toml")).unwrap();
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     let mut program_feeds = 0;
     let mut camboxes = 0;

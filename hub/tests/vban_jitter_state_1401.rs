@@ -250,10 +250,10 @@ fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
 
 #[test]
 fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
-    // The checked-in strih-lx routing, through the real loader: every VBAN participant (the
+    // The checked-in strih-snv routing, through the real loader: every VBAN participant (the
     // camboxes and the program feeds) gets the VBAN-leg buffer; the Janus phones and the local
     // capture keep the local-capture ring; the program sink and the `none` slots the plain one.
-    let m = Matrix::from_toml(include_str!("../../intercom.strih-lx.toml")).unwrap();
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     assert_eq!(buffers.len(), m.participants.len());
     let local_inputs: Vec<usize> = m.local_inputs().into_iter().map(|(id, _, _)| id).collect();

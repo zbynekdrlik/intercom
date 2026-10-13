@@ -98,7 +98,7 @@ async fn establish_session_joins_as_opus_and_keeps_the_answered_payload_type() {
 fn spec(codec: JanusCodec) -> JoinSpec<'static> {
     JoinSpec {
         room: 1000,
-        display: "strih-lx-hub",
+        display: "strih-snv-hub",
         local_ip: "127.0.0.1",
         local_port: 6990,
         codec,

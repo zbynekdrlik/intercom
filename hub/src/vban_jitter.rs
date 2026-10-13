@@ -93,7 +93,7 @@ pub const VBAN_CAP_BLOCKS: usize = vban_cap_blocks(VBAN_TARGET_BLOCKS);
 /// The target fill of a PROGRAM feed (every VBAN leg that is not a cambox: the FOH `fohabl`, `lv1`,
 /// `mbc`), in hub blocks: 32 ms at 256 frames / 48 kHz. The camboxes keep [`VBAN_TARGET_BLOCKS`].
 ///
-/// Measured live on strih-lx, 4.10.2026: the Windows FOH sender does not pace its packets. 932
+/// Measured live on strih-snv, 4.10.2026: the Windows FOH sender does not pace its packets. 932
 /// packets/s arrive in bursts (median gap 0, p90 5.94 ms, p99.9 17.64 ms) with gaps up to 19.4 ms
 /// (30 gaps over 12 ms in 12 s), and with the 16 ms target the leg ran dry about every 2-3 s
 /// without one missed hub tick. 32 ms covers the 19.4 ms gap plus one block plus the burst's own

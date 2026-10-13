@@ -1,4 +1,4 @@
-//! Static-anchor wiring tests for the strih-lx intercom hub provisioning (issue 1345 M1).
+//! Static-anchor wiring tests for the strih-snv intercom hub provisioning (issue 1345 M1).
 //!
 //! The hub's systemd unit + routing TOML are installed by `setup-strih.sh`, which also STARTS a
 //! stopped hub on the strih role (issue 1418: the interkom runs on it since the M4 cut-over) and never
@@ -128,7 +128,7 @@ fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
 }
 
 /// Issue 1401 (design 5980775411): the hub's block loop runs on one thread, "hub-mix", at
-/// SCHED_FIFO 10. The unit that strih-lx runs (the base unit plus the step-12 local-audio drop-in)
+/// SCHED_FIFO 10. The unit that strih-snv runs (the base unit plus the step-12 local-audio drop-in)
 /// must let it: `LimitRTPRIO=10` in the base unit's `[Service]`, and the drop-in neither lowers nor
 /// forbids it.
 #[test]

@@ -688,7 +688,7 @@ pub fn classify_send(sent: io::Result<usize>) -> io::Result<SendOutcome> {
 /// Resolve one VBAN destination (`host`, `port`) to its first address — a ONE-SHOT lookup the send
 /// loop performs at startup and refreshes off the hot path. NEVER hand a host STRING to the
 /// per-block send: `ToSocketAddrs` on a string is a synchronous getaddrinfo per call (~20 ms via
-/// systemd-resolved on strih-lx), which at 187.5 blocks/s halved the hub's send rate and overran
+/// systemd-resolved on strih-snv), which at 187.5 blocks/s halved the hub's send rate and overran
 /// every jitter buffer in the M1b live loopback (19.9.2026). `None` = unresolvable right now (the
 /// caller keeps its last-known-good address).
 pub fn resolve_vban_addr(host: &str, port: u16) -> Option<SocketAddr> {
@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn resolve_vban_addr_is_a_one_shot_lookup_with_the_vban_port() {
         // M1b live finding (19.9.2026): a `ToSocketAddrs` STRING on the per-block send path meant one
-        // synchronous getaddrinfo per 5.33 ms block (~20 ms via systemd-resolved on strih-lx), which
+        // synchronous getaddrinfo per 5.33 ms block (~20 ms via systemd-resolved on strih-snv), which
         // halved the hub's send rate and overran every jitter buffer. Destinations are resolved once,
         // off the hot path, into a SocketAddr.
         let a = resolve_vban_addr("127.0.0.1", intercom_vban::VBAN_PORT).expect("literal resolves");

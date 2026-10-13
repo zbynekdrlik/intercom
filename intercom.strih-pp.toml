@@ -2,7 +2,7 @@
 # The Poprad strih carries only the program audio. lv1 sends the program mix as the VBAN stream
 # `strih` (owner ROZHODNUTE 11.10.2026, replacing the earlier resolume-pp + resampler plan); the hub
 # writes it to the `strih-program` PipeWire sink, which OBS captures as its program audio input
-# (the strih-lx program path, issue 1344). The hub matches the inbound stream by name; `host` is
+# (the strih-snv program path, issue 1344). The hub matches the inbound stream by name; `host` is
 # only a send target, and this leg sends nothing.
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
