@@ -743,6 +743,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
                 connector,
                 rate: sample_rate,
                 channels: chans.clamp(1, u8::MAX as usize) as u8,
+                delay_ms: matrix.alsa_hdmi_delay_ms(pid),
             },
             stats.clone(),
             hdmi.clone(),

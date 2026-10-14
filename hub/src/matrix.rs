@@ -31,6 +31,10 @@ pub const ADAPTER_PIPEWIRE: &str = "pipewire";
 /// (the strih-pp vestibule TV behind the HDMI-to-SDI converter on HDMI-1). An output only.
 pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
 
+/// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
+/// could ever need; a bigger value is a typo.
+pub const HDMI_DELAY_MAX_MS: u32 = 1000;
+
 /// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
 pub const JANUS_ONLY_ROLE: &str = "phones";
 
@@ -199,6 +203,10 @@ pub struct Participant {
     /// (issue 1424 part 3). Only on the `alsa_hdmi` adapter.
     #[serde(default)]
     pub hdmi_connector: Option<String>,
+    /// A fixed lip-sync delay of an `alsa_hdmi` leg in ms, 0..=1000 (issue 1424, 14.10.2026: the
+    /// vestibule heard the program ~170-210 ms before the picture). Absent = 0. Only on `alsa_hdmi`.
+    #[serde(default)]
+    pub hdmi_delay_ms: Option<u32>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -342,6 +350,20 @@ impl Matrix {
                         connector
                     );
                 }
+                if p.hdmi_delay_ms.is_some_and(|ms| ms > HDMI_DELAY_MAX_MS) {
+                    bail!(
+                        "participant '{}': hdmi_delay_ms must be 0..={}, got {}",
+                        p.name,
+                        HDMI_DELAY_MAX_MS,
+                        p.hdmi_delay_ms.unwrap_or(0)
+                    );
+                }
+            } else if p.hdmi_delay_ms.is_some() {
+                bail!(
+                    "participant '{}': hdmi_delay_ms is only for adapter 'alsa_hdmi' (got '{}')",
+                    p.name,
+                    p.adapter
+                );
             } else if p.hdmi_connector.is_some() {
                 bail!(
                     "participant '{}': hdmi_connector is only for adapter 'alsa_hdmi' (got '{}')",
@@ -649,6 +671,14 @@ impl Matrix {
                     .map(|connector| (id, connector, p.out_channels))
             })
             .collect()
+    }
+
+    /// The lip-sync delay of the `alsa_hdmi` participant `id` in ms (0 when absent).
+    pub fn alsa_hdmi_delay_ms(&self, id: usize) -> u32 {
+        self.participants
+            .get(id)
+            .and_then(|p| p.hdmi_delay_ms)
+            .unwrap_or(0)
     }
 
     /// Participants that receive a VBAN output from us (adapter `vban`, an `out_stream` + `host`),

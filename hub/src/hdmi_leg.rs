@@ -22,6 +22,7 @@
 //! carries another screen. The audio queued while the leg was silent is dropped right before a
 //! spawn, so it never plays late.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -228,12 +229,58 @@ impl Drop for AplaySink {
     }
 }
 
+/// A fixed lip-sync delay line in samples (issue 1424, 14.10.2026): the vestibule picture runs
+/// ~250-290 ms behind the stage, the hub's audio path ~75-80 ms, so the program was heard ~170-210 ms
+/// early. The leg delays its N-1 bus by `hdmi_delay_ms` BEFORE the aplay pipe, so the pipe servo's
+/// depth (and every guard) is untouched. One block in, one block out; while it fills it plays
+/// silence. A reset (every aplay spawn) refills it with silence, so audio queued before a gap never
+/// plays late.
+pub struct SampleDelay {
+    buf: VecDeque<i16>,
+    delay_samples: usize,
+}
+
+impl SampleDelay {
+    /// A line of `delay_frames` frames of `channels` interleaved samples each.
+    pub fn new(delay_frames: usize, channels: usize) -> Self {
+        let delay_samples = delay_frames.saturating_mul(channels.max(1));
+        let mut d = SampleDelay {
+            buf: VecDeque::with_capacity(delay_samples + 4096),
+            delay_samples,
+        };
+        d.reset();
+        d
+    }
+
+    /// Refill the line with silence (the start of every aplay run).
+    pub fn reset(&mut self) {
+        self.buf.clear();
+        self.buf.resize(self.delay_samples, 0);
+    }
+
+    /// Push `block` in and return the same number of samples, `delay_frames` older.
+    pub fn process(&mut self, block: &[i16]) -> Vec<i16> {
+        if self.delay_samples == 0 {
+            return block.to_vec();
+        }
+        self.buf.extend(block.iter().copied());
+        self.buf.drain(..block.len()).collect()
+    }
+}
+
+/// The frames a delay of `ms` milliseconds spans at `rate`.
+pub fn delay_frames(ms: u32, rate: u32) -> usize {
+    (u64::from(ms) * u64::from(rate) / 1000) as usize
+}
+
 /// The parameters of one HDMI leg ([`spawn_alsa_hdmi_sink`]).
 pub struct AlsaHdmiSinkConfig {
     /// The X RandR output name (`HDMI-1`), resolved to its hw PCM before every spawn.
     pub connector: String,
     pub rate: u32,
     pub channels: u8,
+    /// The fixed lip-sync delay ahead of the pipe (`hdmi_delay_ms`, 0 = none).
+    pub delay_ms: u32,
 }
 
 /// Spawn the supervised HDMI leg thread (`hdmi-leg`) and return the feed the block loop `try_send`s
@@ -273,7 +320,12 @@ fn alsa_hdmi_sink_loop(
         connector,
         rate,
         channels,
+        delay_ms,
     } = cfg;
+    let mut delay = SampleDelay::new(delay_frames(delay_ms, rate), usize::from(channels));
+    if delay_ms > 0 {
+        tracing::info!(%connector, delay_ms, "local-audio: HDMI leg {connector} plays its program {delay_ms} ms late (lip-sync with the picture)");
+    }
     let mut failures: u32 = 0;
     let mut logged: Option<(HdmiResolution, Option<String>)> = None;
     loop {
@@ -308,6 +360,7 @@ fn alsa_hdmi_sink_loop(
         if !drop_stale(&rx) {
             return;
         }
+        delay.reset();
         let mut sink = match AplaySink::spawn(
             card,
             device,
@@ -332,7 +385,7 @@ fn alsa_hdmi_sink_loop(
         // function's body text, so it is not factored out. Plus the playing flag and the ELD watch.
         let err = loop {
             match rx.recv_timeout(PIPE_SAMPLE_INTERVAL) {
-                Ok(block) => match sink.write_block(&block) {
+                Ok(block) => match sink.write_block(&delay.process(&block)) {
                     Ok(report) => {
                         stats.record_write(&report);
                         stats.record_servo_depth(sink.servo_depth());

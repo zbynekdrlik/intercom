@@ -111,6 +111,10 @@ name = "vestibule"
 role = "program_monitor"
 adapter = "alsa_hdmi"
 hdmi_connector = "HDMI-1"
+# 14.10.2026 (issue 1424): the picture reaches the TV ~263 ms after the stage (camera -> strih render
+# p50 117 ms + the HDMI-1 output 171 ms measured on cam1, less ~25 ms of cam1's own grabber); this
+# leg's path is ~80 ms. Delay the program so it lands with the picture, never before or after it.
+hdmi_delay_ms = 180
 in_channels = 0
 out_channels = 2
 
