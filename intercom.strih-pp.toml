@@ -398,103 +398,120 @@ in_ch = 2
 dst = "phones"
 out_ch = 2
 
-# --- the cutters talk to every camera and the phones, on both ears
+# --- the cutters talk to every camera and the phones, on both ears (+6 dB into the cameras: owner
+# 14.10.2026, "kameramani pocuju potichu strihaca"; the phones stay at 0 dB)
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 1
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 2
+gain_db = 6.0
 
 [[point]]
 src = "cutters"
