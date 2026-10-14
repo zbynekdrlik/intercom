@@ -111,6 +111,31 @@ fn hdmi_connector_is_refused_on_any_other_adapter() {
     assert!(Matrix::from_toml(&on_vban).is_err());
 }
 
+/// issue 1424 (14.10.2026): the vestibule heard the program ~170-210 ms before the picture, so the
+/// leg carries a fixed lip-sync delay. Absent = 0 (the pre-delay behaviour).
+#[test]
+fn hdmi_delay_ms_is_read_validated_and_only_for_alsa_hdmi() {
+    let m = load(VESTIBULE).unwrap();
+    let id = m.id_of("vestibule").unwrap();
+    assert_eq!(m.alsa_hdmi_delay_ms(id), 0, "absent = no delay");
+    let delayed = VESTIBULE.replace(
+        "hdmi_connector = \"HDMI-1\"\n",
+        "hdmi_connector = \"HDMI-1\"\nhdmi_delay_ms = 180\n",
+    );
+    let m = load(&delayed).expect("a delayed vestibule loads");
+    let id = m.id_of("vestibule").unwrap();
+    assert_eq!(m.alsa_hdmi_delay_ms(id), 180);
+    let too_long = delayed.replace("hdmi_delay_ms = 180", "hdmi_delay_ms = 1001");
+    let err = load(&too_long).unwrap_err().to_string();
+    assert!(err.contains("hdmi_delay_ms"), "got: {err}");
+    let on_vban = HEAD.replace(
+        "in_stream = \"strih\"",
+        "in_stream = \"strih\"\nhdmi_delay_ms = 50",
+    );
+    let err = Matrix::from_toml(&on_vban).unwrap_err().to_string();
+    assert!(err.contains("hdmi_delay_ms"), "got: {err}");
+}
+
 #[test]
 fn the_leg_shows_its_resolved_hw_on_api_state_and_the_status_line() {
     let m = load(VESTIBULE).unwrap();
