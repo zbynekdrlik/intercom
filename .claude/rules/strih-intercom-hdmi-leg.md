@@ -54,14 +54,14 @@ Design: issue 1424 comment 6151522810 (Approach 1).
   ONE prime (`rearm_prime`): aplay refills its whole buffer from the pipe, and one top-up inside the
   gap that already happened beats a ~13 s steep servo walk. A block before the reader's first read
   is the start hold, never a trim. pw-cat (reader buffer 0) is byte-for-byte unchanged.
-- **Lip-sync delay `hdmi_delay_ms` (14.10.2026):** an optional fixed delay (0..=1000 ms, only on
-  `alsa_hdmi`) applied by `hdmi_leg::SampleDelay` BEFORE the aplay pipe, so the pipe servo's depth is
-  untouched; the line is refilled with silence at every aplay spawn. strih-pp = 180 ms: the vestibule
-  picture runs ~263 ms behind the stage (camera -> strih p50 117 ms + the HDMI-1 output 171 ms
-  measured with a QR burn captured on cam1, minus ~25 ms grabber), this leg ~80 ms. Re-measure after
-  any change to the output path (the 29.97 Hz FIFO queue is most of the 171 ms) and refine with a
-  stage clap test recorded on cam1. Tests: `intercom/hub/tests/hdmi_delay_1424.rs` (std-only) + the
-  matrix case in `hdmi_matrix_1424.rs`.
+- **Lip-sync delay `hdmi_delay_ms` -- NEVER on the vestibule (owner ruling 14.10.2026):** an
+  optional fixed delay (0..=1000 ms, only on `alsa_hdmi`) applied by `hdmi_leg::SampleDelay` BEFORE
+  the aplay pipe (the pipe servo's depth untouched, the line refilled with silence at every aplay
+  spawn). The vestibule also hears the hall acoustically, so delaying its program audio makes an
+  echo: `intercom.strih-pp.toml` carries NO `hdmi_delay_ms`, and an A/V gap there is fixed on the
+  PICTURE side (the HDMI-1 output measured 171 ms render -> cam1 capture with a QR burn, issue 1424).
+  The knob stays dormant for a future output that is not room-adjacent. Tests:
+  `intercom/hub/tests/hdmi_delay_1424.rs` (std-only) + the matrix case in `hdmi_matrix_1424.rs`.
 - **Delay budget:** program-feed jitter target (32-64 ms) + pipe ~13 ms + ALSA buffer 21 ms + the
   held period 5 ms. `/api/state` carries `alsa_buffer_frames` / `alsa_period_frames` next to
   `local_audio.pipe_depth_frames`, so the sum is readable.
