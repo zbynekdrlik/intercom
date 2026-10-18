@@ -256,13 +256,20 @@ async fn janus_ws(
     };
     let peer = phone_peer(&headers);
     let Some(slot) = relay.try_reserve() else {
-        tracing::warn!(peer = %peer, "janus relay: every relay slot is in use -- 503");
+        if relay.mark_full() {
+            tracing::warn!(peer = %peer, "janus relay: every relay slot is in use -- 503 until one frees");
+        } else {
+            tracing::debug!(peer = %peer, "janus relay: every relay slot is in use -- 503");
+        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "interkom: too many phones connected",
         )
             .into_response();
     };
+    if relay.mark_free() {
+        tracing::info!(peer = %peer, "janus relay: a relay slot is free again");
+    }
     match relay.connect().await {
         Ok(janus) => ws
             .protocols([JANUS_WS_PROTOCOL])

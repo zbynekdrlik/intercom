@@ -21,6 +21,7 @@
 //!
 //! The hub's own audiobridge leg (`janus_rtp`) uses Janus's loopback HTTP API, never this path.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +60,8 @@ pub struct JanusWsRelay {
     ws_url: String,
     room: u64,
     slots: Arc<Semaphore>,
+    /// Whether the last reservation found every slot in use (the cap warning fires on a change only).
+    full: Arc<AtomicBool>,
 }
 
 impl JanusWsRelay {
@@ -68,7 +71,19 @@ impl JanusWsRelay {
             ws_url: ws_url.to_string(),
             room,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RELAYS)),
+            full: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Record that a phone found every slot in use. True only on the change from "a slot was
+    /// free" (the caller warns once per episode, not once per refused phone).
+    pub fn mark_full(&self) -> bool {
+        !self.full.swap(true, Ordering::Relaxed)
+    }
+
+    /// Record that a phone got a slot. True only on the change from "every slot was in use".
+    pub fn mark_free(&self) -> bool {
+        self.full.swap(false, Ordering::Relaxed)
     }
 
     /// The same relay with `max` slots (at least one).
