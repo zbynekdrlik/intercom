@@ -16,6 +16,10 @@ Serves the REAL embedded client (`intercom/web/*`) exactly the way the hub's `ht
   quality 90, 4:4:4); stdlib Python has no JPEG encoder, so they are committed files.
 - `/__test/legacy-sw/on` | `/__test/legacy-sw/off` -> switch `/sw.js` to the pre-issue-1379 worker
   (`LEGACY_SW`, proxies every request) and back, for the worker-upgrade test.
+- `/api/ice`     -> the hub's TURN servers (issue 1453), by the mode `/__test/ice/<mode>` sets:
+  `off` (the default, like a box without a TURN key: 200 turn=off, empty list), `on` (200 turn=on
+  with a stun + a turn url on an unused loopback port), `hang` (answers only after
+  `ICE_HANG_S`, longer than the page's fetch bound) and `garbage` (200 with a non-JSON body).
 - `/janus.js`    -> the REAL vendored janus.js. The external Janus SERVER is faked inside the page
   by the spec's init script `fake-janus-server.js` (a WebSocket double with a real in-page
   RTCPeerConnection), so the page's own code AND the library run unmodified.
@@ -43,6 +47,17 @@ STATIC = {
 
 
 MJPEG_FPS = 10
+ICE_HANG_S = 8
+ICE_MODES = ("off", "on", "hang", "garbage")
+# The `on` answer: an unused loopback port, so Chromium's TURN allocation fails fast and offline.
+ICE_ON = {
+    "turn": "on",
+    "iceServers": [{
+        "urls": ["stun:127.0.0.1:3479", "turn:127.0.0.1:3479?transport=udp"],
+        "username": "stub-user",
+        "credential": "stub-credential",
+    }],
+}
 FIXTURES = os.path.join(HERE, "fixtures")
 
 
@@ -79,7 +94,7 @@ self.addEventListener("fetch", (event) => {
 
 def make_handler(version):
     frames = picture_frames()
-    serve = {"legacy_sw": False}
+    serve = {"legacy_sw": False, "ice": "off", "ice_hits": 0}
 
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.1 like the hub (axum): every fixed response carries Content-Length, the MJPEG
@@ -123,6 +138,27 @@ def make_handler(version):
             if path in ("/__test/legacy-sw/on", "/__test/legacy-sw/off"):
                 serve["legacy_sw"] = path.endswith("/on")
                 return self._send(200, "text/plain", b"ok")
+            if path.startswith("/__test/ice/") and path.rsplit("/", 1)[1] in ICE_MODES:
+                serve["ice"] = path.rsplit("/", 1)[1]
+                serve["ice_hits"] = 0
+                return self._send(200, "text/plain", b"ok")
+            if path == "/__test/ice-hits":
+                return self._send(200, "application/json", json.dumps(serve["ice_hits"]).encode())
+            if path == "/api/ice":
+                serve["ice_hits"] += 1
+                mode = serve["ice"]
+                if mode == "on":
+                    return self._send(200, "application/json", json.dumps(ICE_ON).encode())
+                if mode == "garbage":
+                    return self._send(200, "application/json", b"<html>not json")
+                if mode == "hang":
+                    time.sleep(ICE_HANG_S)
+                off = {"turn": "off", "reason": "no TURN key file at /etc/intercom-hub/turn.toml", "iceServers": []}
+                try:
+                    return self._send(200, "application/json", json.dumps(off).encode())
+                except OSError:
+                    self.close_connection = True  # the page gave up waiting (hang mode)
+                    return None
             if path == "/sw.js" and serve["legacy_sw"]:
                 return self._send(200, "text/javascript; charset=utf-8", LEGACY_SW)
             if path == "/":

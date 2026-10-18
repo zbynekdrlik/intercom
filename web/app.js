@@ -29,6 +29,9 @@ const RECONNECT_MAX_MS = 15000; // … up to this cap.
 const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebuilt.
 const ICE_GRACE_MS = 5000; // a "disconnected" ICE state gets this long to recover by itself.
 const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebuilds the session.
+// issue 1453: the hub's TURN servers are fetched before each session; a slow hub never holds the
+// join longer than this (then the session starts with janus.js's default ICE servers).
+const ICE_FETCH_TIMEOUT_MS = 3000;
 const METER_FLOOR_DB = -60; // the meters' left edge.
 const VOICE_DB = -45; // above this the meter counts as "voice present".
 const VOICE_HOLD_MS = 600; // keep "hovorí" this long after the level drops.
@@ -53,6 +56,30 @@ function janusWsUrl() {
   if (override) return override;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/janus`;
+}
+
+// The ICE servers the hub minted (issue 1453: Cloudflare TURN, so a phone on mobile data gets a
+// media relay). `/api/ice` always answers 200; `turn` other than "on", an empty list, a non-200, a
+// network error or a timeout all mean "no TURN": resolve null and the session uses janus.js's own
+// default. Never rejects, never logs. An EMPTY list must never reach janus.js: it reads
+// `iceServers || default`, and [] would drop even the default STUN server.
+function usableIceServers(body) {
+  if (!body || body.turn !== "on" || !Array.isArray(body.iceServers)) return null;
+  const servers = body.iceServers.filter((s) => s && (typeof s.urls === "string" || Array.isArray(s.urls)));
+  return servers.length > 0 ? servers : null;
+}
+async function fetchIceServers() {
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), ICE_FETCH_TIMEOUT_MS) : null;
+  try {
+    const r = await fetch("/api/ice", { cache: "no-store", signal: ctl ? ctl.signal : undefined });
+    if (!r.ok) return null;
+    return usableIceServers(await r.json());
+  } catch (e) {
+    return null; // hub down, aborted, or not JSON: the default ICE servers.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---- DOM handles -------------------------------------------------------------------------
@@ -202,10 +229,11 @@ function startSession() {
   watchdogTimer = setTimeout(() => {
     if (my === gen && !mediaUp) scheduleReconnect();
   }, CONNECT_TIMEOUT_MS);
-  const begin = () => {
+  const begin = (iceServers) => {
     if (my !== gen) return;
     janus = new Janus({
       server: janusWsUrl(),
+      ...(iceServers ? { iceServers } : {}),
       dependencies: janusDeps(),
       success: () => {
         if (my === gen) attachBridge(my);
@@ -218,8 +246,10 @@ function startSession() {
       },
     });
   };
+  // The TURN servers first (issue 1453), bounded by ICE_FETCH_TIMEOUT_MS; any failure joins anyway.
+  const go = () => fetchIceServers().then(begin);
   if (janusReady) {
-    begin();
+    go();
   } else {
     // debug:false -> Janus.log/warn/error are all no-ops, so janus.js never writes to the console.
     Janus.init({
@@ -227,7 +257,7 @@ function startSession() {
       dependencies: janusDeps(),
       callback: () => {
         janusReady = true;
-        begin();
+        go();
       },
     });
   }
