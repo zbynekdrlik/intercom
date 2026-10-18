@@ -139,7 +139,20 @@ pub fn resolve_turn_path(credentials_dir: Option<&str>, configured: &Path) -> Pa
 
 /// Read + check the key file. `Err` is the reason TURN stays off (named, never the token).
 pub fn load_turn_key(path: &Path) -> Result<TurnKey, String> {
+    load_turn_key_at(path, None)
+}
+
+/// [`load_turn_key`] for a file that may be the systemd credential copy. systemd exposes a
+/// `LoadCredential=` copy as mode 0440 inside the unit's own 0500 credentials directory, so a file
+/// in `credentials_dir` may be group-readable (live strih-snv 18.10.2026: the hub refused that
+/// copy and TURN stayed off); an other-readable copy, and any group-readable file elsewhere, are
+/// still refused.
+pub fn load_turn_key_at(path: &Path, credentials_dir: Option<&str>) -> Result<TurnKey, String> {
     use std::os::unix::fs::PermissionsExt;
+    let in_credentials = credentials_dir
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .is_some_and(|d| path.parent() == Some(Path::new(d)));
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -148,7 +161,8 @@ pub fn load_turn_key(path: &Path) -> Result<TurnKey, String> {
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
     let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
+    let forbidden = if in_credentials { 0o037 } else { 0o077 };
+    if mode & forbidden != 0 {
         return Err(format!(
             "{} is readable by group/others (mode {mode:o}) -- chmod 600 it",
             path.display()
@@ -387,7 +401,7 @@ impl TurnMinter {
     /// log line naming why) when it is not usable. Never fails the hub.
     pub fn load(credentials_dir: Option<&str>, configured: &Path, api_base: &str) -> Self {
         let path = resolve_turn_path(credentials_dir, configured);
-        let minter = load_turn_key(&path).and_then(|key| {
+        let minter = load_turn_key_at(&path, credentials_dir).and_then(|key| {
             let hint = key.id_hint();
             Self::new(key, api_base, TURN_TTL_S).map(|m| (m, hint))
         });
