@@ -24,6 +24,7 @@ use intercom_hub::hdmi_leg::{spawn_alsa_hdmi_sink, AlsaHdmiSinkConfig};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
+use intercom_hub::janus_relay::JanusWsRelay;
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
@@ -350,10 +351,25 @@ async fn main() -> Result<()> {
         CLOUDFLARE_TURN_API,
     ));
     turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
+
+    // issue 1453: the phones' Janus WebSocket goes through the hub's frame allowlist (`/janus`);
+    // only a hub with a Janus room relays it.
+    let janus_ws = match (matrix.janus_participant(), matrix.janus.as_ref()) {
+        (Some(_), Some(jcfg)) => {
+            tracing::info!(
+                ws_url = %jcfg.ws_url,
+                room = jcfg.room,
+                "janus relay: /janus relays the phones' WebSocket through the frame allowlist"
+            );
+            Some(Arc::new(JanusWsRelay::new(&jcfg.ws_url, jcfg.room)))
+        }
+        _ => None,
+    };
     let state = AppState {
         live: live_rx,
         video: video_state,
         turn,
+        janus_ws,
     };
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await

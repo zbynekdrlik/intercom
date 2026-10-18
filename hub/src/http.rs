@@ -7,6 +7,9 @@
 //! self-contained on strih-snv (the same model bkshading uses). The vendored `janus.js` (MIT) drives
 //! the WebRTC audio; the picture is the MJPEG route M3c (issue 1347) will add. `/api/ice` +
 //! `/api/turn-rest` hand out the box's Cloudflare TURN credentials (issue 1453, `crate::turn`).
+//! `/janus` relays the phone's Janus WebSocket through the frame allowlist (issue 1453,
+//! `crate::janus_relay` + `crate::janus_ws_guard`): nginx points `location = /janus` here and Janus
+//! itself listens on loopback only.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,7 +20,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{header, HeaderName, StatusCode},
+    http::{header, HeaderMap, HeaderName, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
@@ -25,6 +28,8 @@ use axum::{
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::janus_relay::{phone_peer, JanusWsRelay, JANUS_WS_MAX_MESSAGE_BYTES};
+use crate::janus_ws_guard::JANUS_WS_PROTOCOL;
 use crate::ndi_video::VideoState;
 use crate::state::HubState;
 use crate::turn::{
@@ -118,6 +123,9 @@ pub struct AppState {
     pub video: Option<Arc<VideoState>>,
     /// The box's TURN credentials (issue 1453): `/api/ice` for the PWA, `/api/turn-rest` for Janus.
     pub turn: Arc<TurnMinter>,
+    /// The phone's Janus WebSocket relay (issue 1453), present when the hub has a Janus room (a
+    /// `janus` participant + a `[janus]` table). `None` → `/janus` answers 503.
+    pub janus_ws: Option<Arc<JanusWsRelay>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -138,6 +146,7 @@ pub fn router(state: AppState) -> Router {
         .route("/interkom.mjpeg", get(interkom_mjpeg))
         .route("/interkom.jpg", get(interkom_jpg))
         .route("/ws", get(ws_upgrade))
+        .route("/janus", get(janus_ws))
         .with_state(state)
 }
 
@@ -227,6 +236,35 @@ async fn api_turn_rest(State(state): State<AppState>) -> Response {
 
 async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| ws_push(socket, state.live.clone()))
+}
+
+/// `GET /janus` -- the phone's Janus WebSocket (issue 1453). The hub connects to Janus FIRST and
+/// answers the upgrade only then (502 when Janus does not answer, 503 without a Janus room), so a
+/// 101 means the whole path works; the relay then forwards only the frames the phone page itself
+/// sends (`crate::janus_ws_guard`).
+async fn janus_ws(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Some(relay) = state.janus_ws.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "interkom: this hub has no Janus room",
+        )
+            .into_response();
+    };
+    let peer = phone_peer(&headers);
+    match relay.connect().await {
+        Ok(janus) => ws
+            .protocols([JANUS_WS_PROTOCOL])
+            .max_message_size(JANUS_WS_MAX_MESSAGE_BYTES)
+            .on_upgrade(move |socket| async move { relay.run(socket, janus, peer).await }),
+        Err(e) => {
+            tracing::warn!(peer = %peer, error = %e, "janus relay: Janus's WebSocket did not answer -- 502");
+            (StatusCode::BAD_GATEWAY, "interkom: Janus is not reachable").into_response()
+        }
+    }
 }
 
 /// Push the latest [`HubState`] to one client: the current state immediately, then a fresh state on

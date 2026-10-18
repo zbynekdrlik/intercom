@@ -77,6 +77,11 @@ pub struct JanusConfig {
     /// (G.711 µ-law). An unknown value fails the load (issue 1345, 25.9.2026).
     #[serde(default)]
     pub codec: JanusCodec,
+    /// Janus's WebSocket API, which the hub's `/janus` relay connects to (issue 1453). Janus binds it
+    /// to loopback (setup-strih step 14), so phones reach it only through the relay's frame
+    /// allowlist. Must be a `ws://` URL.
+    #[serde(default = "default_janus_ws_url")]
+    pub ws_url: String,
 }
 
 fn default_janus_api_url() -> String {
@@ -87,6 +92,9 @@ fn default_janus_room() -> u64 {
 }
 fn default_janus_rtp_bind() -> String {
     "0.0.0.0:6990".to_string()
+}
+fn default_janus_ws_url() -> String {
+    "ws://127.0.0.1:8188/janus".to_string()
 }
 
 /// The systemd credential name the production `intercom-hub.service` exposes the room secret under
@@ -299,6 +307,12 @@ impl Matrix {
             }
             if !(30..=95).contains(&v.jpeg_quality) {
                 bail!("video.jpeg_quality {} out of range 30..=95", v.jpeg_quality);
+            }
+        }
+        // The phone relay's Janus WebSocket (issue 1453): plain ws:// to Janus's loopback bind.
+        if let Some(j) = &raw.janus {
+            if !j.ws_url.starts_with("ws://") {
+                bail!("janus.ws_url '{}' must be a ws:// URL", j.ws_url);
             }
         }
 

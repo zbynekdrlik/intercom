@@ -64,6 +64,11 @@ libloading = { version = "0.8", optional = true }
 # is already in the dependency graph through tokio, so nothing new is downloaded (rustix was
 # rejected: a new crate for one call).
 libc = "0.2"
+# The phone's Janus WebSocket relay (issue 1453): the hub's own WebSocket CLIENT to Janus's loopback
+# WS. 0.24 is the version axum 0.7's `ws` feature already builds (the server side of the same relay),
+# and futures-util is already in the graph through axum: nothing new is downloaded.
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 [dev-dependencies]
 # Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,

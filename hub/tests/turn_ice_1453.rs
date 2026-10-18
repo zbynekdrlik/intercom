@@ -344,6 +344,7 @@ async fn spawn_hub(turn: TurnMinter) -> String {
         live: rx,
         video: None,
         turn: Arc::new(turn),
+        janus_ws: None,
     }))
     .await
 }
