@@ -47,7 +47,7 @@ STATIC = {
 
 
 MJPEG_FPS = 10
-ICE_HANG_S = 8
+ICE_HANG_S = 12
 ICE_MODES = ("off", "on", "hang", "garbage")
 # The `on` answer: an unused loopback port, so Chromium's TURN allocation fails fast and offline.
 ICE_ON = {

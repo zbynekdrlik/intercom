@@ -6,9 +6,9 @@
 //! compile (Tier-0 #557).
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -22,9 +22,10 @@ use intercom_hub::http::{router, AppState};
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{
-    cache_fresh, ice_servers_json, is_port_53, load_turn_key, parse_generate_ice_servers,
-    parse_turn_key, resolve_turn_path, ttl_left_s, turn_rest_json, TurnError, TurnKey, TurnMinter,
-    TURN_CONFIG_CRED, TURN_USER_AGENT,
+    backoff_active, cache_fresh, expiry_margin_s, ice_servers_json, is_port_53, load_turn_key,
+    parse_generate_ice_servers, parse_turn_key, refresh_wait_s, resolve_turn_path, ttl_left_s,
+    turn_rest_json, TurnError, TurnKey, TurnMinter, TURN_CONFIG_CRED, TURN_EXPIRY_MARGIN_S,
+    TURN_REFRESH_RETRY_S, TURN_USER_AGENT,
 };
 
 const KEY_ID: &str = "fake-key-id-1453";
@@ -47,18 +48,12 @@ fn live_answer() -> Value {
     }]})
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "turn-1453-{}-{}-{}",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A private scratch dir, removed when the test ends (never a pid+timestamp path).
+fn scratch() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("turn-1453-")
+        .tempdir()
+        .unwrap()
 }
 
 fn write_key_file(path: &std::path::Path, text: &str, mode: u32) {
@@ -103,7 +98,8 @@ fn a_bad_key_file_is_refused_without_quoting_its_text() {
 
 #[test]
 fn an_absent_or_open_key_file_leaves_turn_off_with_a_named_reason() {
-    let d = scratch("load");
+    let tmp = scratch();
+    let d = tmp.path();
     let missing = d.join("turn.toml");
     let err = load_turn_key(&missing).expect_err("absent");
     assert!(err.contains("no TURN key file at"), "{err}");
@@ -126,7 +122,8 @@ fn an_absent_or_open_key_file_leaves_turn_off_with_a_named_reason() {
 
 #[test]
 fn the_systemd_credential_copy_wins_only_when_it_exists() {
-    let d = scratch("resolve");
+    let tmp = scratch();
+    let d = tmp.path();
     let configured = d.join("etc-turn.toml");
     let creds = d.join("creds");
     std::fs::create_dir_all(&creds).unwrap();
@@ -213,6 +210,26 @@ fn an_answer_without_a_turn_url_or_credentials_is_an_error() {
 }
 
 #[test]
+fn the_margin_the_backoff_and_the_refresh_wait() {
+    assert_eq!(expiry_margin_s(86_400), TURN_EXPIRY_MARGIN_S);
+    assert_eq!(expiry_margin_s(300), 30, "at most a tenth of the ttl");
+    assert_eq!(expiry_margin_s(3), 0);
+    assert!(backoff_active(0, 15));
+    assert!(backoff_active(14_999, 15));
+    assert!(!backoff_active(15_000, 15));
+    assert!(
+        !backoff_active(0, 0),
+        "a zero back-off never holds a mint back"
+    );
+    // A fresh 24 h set: renew just past the 16 h point.
+    assert_eq!(refresh_wait_s(86_400, 86_400), 57_601);
+    assert_eq!(refresh_wait_s(28_801, 86_400), 2);
+    // Already past the 2/3 point (a failed mint, the cached set served): retry soon.
+    assert_eq!(refresh_wait_s(28_800, 86_400), TURN_REFRESH_RETRY_S);
+    assert_eq!(refresh_wait_s(0, 86_400), TURN_REFRESH_RETRY_S);
+}
+
+#[test]
 fn the_cache_lasts_two_thirds_of_the_ttl() {
     let ttl = 86_400;
     assert!(cache_fresh(0, ttl));
@@ -229,7 +246,10 @@ fn the_cache_lasts_two_thirds_of_the_ttl() {
 #[derive(Clone)]
 struct Fake {
     hits: Arc<AtomicUsize>,
-    status: StatusCode,
+    /// The status a request with a User-Agent gets (201 = the live answer), switchable mid-test.
+    status: Arc<AtomicU16>,
+    /// The ttl of the last request body.
+    ttl: Arc<AtomicU64>,
 }
 
 async fn fake_generate(
@@ -256,9 +276,11 @@ async fn fake_generate(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         Some(format!("Bearer {KEY_TOKEN}").as_str())
     );
-    assert_eq!(body["ttl"], 86_400);
-    if fake.status != StatusCode::CREATED {
-        return (fake.status, Json(json!({"error": "denied"})));
+    fake.ttl
+        .store(body["ttl"].as_u64().unwrap_or(0), Ordering::SeqCst);
+    let status = StatusCode::from_u16(fake.status.load(Ordering::SeqCst)).unwrap();
+    if status != StatusCode::CREATED {
+        return (status, Json(json!({"error": "denied"})));
     }
     (StatusCode::CREATED, Json(live_answer()))
 }
@@ -272,18 +294,23 @@ async fn spawn(app: Router) -> String {
     format!("http://{addr}")
 }
 
-async fn fake_cloudflare(status: StatusCode) -> (String, Arc<AtomicUsize>) {
-    let hits = Arc::new(AtomicUsize::new(0));
+async fn fake_cloudflare(status: StatusCode) -> (String, Fake) {
+    let fake = Fake {
+        hits: Arc::new(AtomicUsize::new(0)),
+        status: Arc::new(AtomicU16::new(status.as_u16())),
+        ttl: Arc::new(AtomicU64::new(0)),
+    };
     let app = Router::new()
         .route(
             "/keys/:key/credentials/generate-ice-servers",
             post(fake_generate),
         )
-        .with_state(Fake {
-            hits: hits.clone(),
-            status,
-        });
-    (format!("{}/keys", spawn(app).await), hits)
+        .with_state(fake.clone());
+    (format!("{}/keys", spawn(app).await), fake)
+}
+
+fn hits(fake: &Fake) -> usize {
+    fake.hits.load(Ordering::SeqCst)
 }
 
 fn hub_state() -> HubState {
@@ -327,7 +354,7 @@ fn key() -> TurnKey {
 
 #[tokio::test]
 async fn the_fake_refuses_a_request_without_a_user_agent_like_cloudflare() {
-    let (base, hits) = fake_cloudflare(StatusCode::CREATED).await;
+    let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
     let r = reqwest::Client::builder()
         .build()
         .unwrap()
@@ -338,12 +365,12 @@ async fn the_fake_refuses_a_request_without_a_user_agent_like_cloudflare() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(hits(&fake), 1);
 }
 
 #[tokio::test]
 async fn api_ice_and_turn_rest_mint_once_and_share_the_cached_set() {
-    let (base, hits) = fake_cloudflare(StatusCode::CREATED).await;
+    let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
     let hub = spawn_hub(TurnMinter::new(key(), &base, 86_400).unwrap()).await;
     let c = reqwest::Client::new();
 
@@ -370,17 +397,23 @@ async fn api_ice_and_turn_rest_mint_once_and_share_the_cached_set() {
     let ttl = rest["ttl"].as_u64().unwrap();
     assert!(ttl > 86_000 && ttl <= 86_400, "ttl {ttl}");
 
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "one mint serves both");
+    assert_eq!(hits(&fake), 1, "one mint serves both");
+    assert_eq!(
+        fake.ttl.load(Ordering::SeqCst),
+        86_400,
+        "the minter asks its own ttl"
+    );
     // A burst of page loads still mints nothing new.
     for _ in 0..5 {
         c.get(format!("{hub}/api/ice")).send().await.unwrap();
     }
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(hits(&fake), 1);
 }
 
 #[tokio::test]
 async fn without_a_key_api_ice_is_a_200_turn_off_and_turn_rest_is_a_named_404() {
-    let d = scratch("off");
+    let tmp = scratch();
+    let d = tmp.path();
     let path = d.join("turn.toml");
     let hub = spawn_hub(TurnMinter::load(None, &path, "http://127.0.0.1:9/keys")).await;
     let c = reqwest::Client::new();
@@ -403,7 +436,7 @@ async fn without_a_key_api_ice_is_a_200_turn_off_and_turn_rest_is_a_named_404() 
 
 #[tokio::test]
 async fn a_refused_mint_is_turn_error_on_the_page_and_502_for_janus() {
-    let (base, hits) = fake_cloudflare(StatusCode::FORBIDDEN).await;
+    let (base, fake) = fake_cloudflare(StatusCode::FORBIDDEN).await;
     let hub = spawn_hub(TurnMinter::new(key(), &base, 86_400).unwrap()).await;
     let c = reqwest::Client::new();
 
@@ -431,16 +464,72 @@ async fn a_refused_mint_is_turn_error_on_the_page_and_502_for_janus() {
         .unwrap()
         .contains("TURN mint failed: HTTP 403"));
     assert_eq!(
-        hits.load(Ordering::SeqCst),
-        2,
-        "a failed mint is not cached"
+        hits(&fake),
+        1,
+        "a failed mint is remembered for the back-off: one attempt, not one per request"
     );
 }
 
 #[tokio::test]
+async fn without_a_back_off_every_request_tries_again() {
+    let (base, fake) = fake_cloudflare(StatusCode::FORBIDDEN).await;
+    let m = TurnMinter::new(key(), &base, 86_400)
+        .unwrap()
+        .with_failure_backoff(0);
+    assert!(m.current().await.is_err());
+    assert!(m.current().await.is_err());
+    assert_eq!(hits(&fake), 2);
+}
+
+#[tokio::test]
+async fn a_failed_renewal_serves_the_unexpired_set_and_backs_off() {
+    // ttl 3 s: the set counts as stale after 2 s, expires at 3 s (margin 0 for so short a ttl).
+    let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
+    let m = TurnMinter::new(key(), &base, 3).unwrap();
+    let (first, _) = m.current().await.unwrap();
+    assert_eq!(hits(&fake), 1);
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    fake.status
+        .store(StatusCode::FORBIDDEN.as_u16(), Ordering::SeqCst);
+    let (second, left) = m.current().await.expect("the cached set while it lives");
+    assert_eq!(hits(&fake), 2, "the stale set was renewed, and that failed");
+    assert_eq!(second, first);
+    assert!(left <= 1, "left {left}");
+    let (third, _) = m.current().await.expect("still the cached set");
+    assert_eq!(third, first);
+    assert_eq!(hits(&fake), 2, "within the back-off no new attempt");
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(
+        m.current().await.unwrap_err(),
+        TurnError::Upstream("HTTP 403: {\"error\":\"denied\"}".into()),
+        "an expired set is never served"
+    );
+}
+
+#[tokio::test]
+async fn the_refresher_warms_the_cache_before_any_request() {
+    let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
+    let m = Arc::new(TurnMinter::new(key(), &base, 86_400).unwrap());
+    m.spawn_refresher();
+    for _ in 0..50 {
+        if hits(&fake) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(hits(&fake), 1, "the refresher minted at start");
+    m.current().await.unwrap();
+    assert_eq!(hits(&fake), 1, "a request finds the warm cache");
+    // TURN off: nothing is spawned, nothing is minted.
+    let off = Arc::new(TurnMinter::off("no key"));
+    off.spawn_refresher();
+}
+
+#[tokio::test]
 async fn a_loaded_key_file_mints_through_the_minter() {
-    let (base, hits) = fake_cloudflare(StatusCode::CREATED).await;
-    let d = scratch("loaded");
+    let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
+    let tmp = scratch();
+    let d = tmp.path();
     let path = d.join("turn.toml");
     write_key_file(&path, &key_text(), 0o600);
     let m = TurnMinter::load(None, &path, &base);
@@ -448,7 +537,7 @@ async fn a_loaded_key_file_mints_through_the_minter() {
     let (c, ttl) = m.current().await.expect("minted");
     assert_eq!(c.username, "u-minted");
     assert_eq!(ttl, 86_400);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(hits(&fake), 1);
     let off = TurnMinter::off("because");
     assert_eq!(
         off.current().await.unwrap_err(),

@@ -75,7 +75,9 @@ strih_public_janus_tool() { printf '%s/../janus_turn_rest_cfg.py' "$(dirname "${
 
 # strih_public_unit_text -> the cloudflared-interkom unit. The token reaches the process as a systemd
 # credential (%d = its credentials directory), so it is never in argv or in this file; the condition
-# keeps the unit from failing on a box whose token is not placed yet.
+# keeps the unit from failing on a box whose token is not placed yet. Type=simple, never notify: a
+# notify unit is "starting" until cloudflared reaches Cloudflare, so with the venue uplink down a
+# blocking start (and multi-user.target, which the kiosk session waits for) would never finish.
 strih_public_unit_text() {
   local tok
   tok="$(strih_public_token_file)"
@@ -90,15 +92,15 @@ Description=Cloudflare Tunnel: the intercom page for phones on mobile data (came
 After=network-online.target nginx.service
 Wants=network-online.target
 ConditionPathExists=${tok}
+StartLimitIntervalSec=0
 
 [Service]
-Type=notify
+Type=simple
 DynamicUser=yes
 LoadCredential=tunnel.token:${tok}
 ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --metrics ${STRIH_PUBLIC_METRICS} run --token-file %d/tunnel.token
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=0
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -284,11 +286,12 @@ strih_interkom_public_install() {
   fi
   if [ -f "$tok" ]; then
     act="$(systemctl is-active "$STRIH_PUBLIC_UNIT" 2>/dev/null || true)"
+    # --no-block: the queued job never holds setup up (an uplink-down venue); item 45 grades /ready.
     if [ "$act" != active ]; then
-      systemctl start "$STRIH_PUBLIC_UNIT" || { rm -rf "$tmp"; echo "strih-interkom-public: systemctl start ${STRIH_PUBLIC_UNIT} failed" >&2; return 1; }
+      systemctl --no-block start "$STRIH_PUBLIC_UNIT" || { rm -rf "$tmp"; echo "strih-interkom-public: systemctl start ${STRIH_PUBLIC_UNIT} failed" >&2; return 1; }
       echo "  started ${STRIH_PUBLIC_UNIT}"
     elif [ "$w_unit" = written ] || [ "$w_tok" = written ]; then
-      systemctl restart "$STRIH_PUBLIC_UNIT" || { rm -rf "$tmp"; echo "strih-interkom-public: systemctl restart ${STRIH_PUBLIC_UNIT} failed" >&2; return 1; }
+      systemctl --no-block restart "$STRIH_PUBLIC_UNIT" || { rm -rf "$tmp"; echo "strih-interkom-public: systemctl restart ${STRIH_PUBLIC_UNIT} failed" >&2; return 1; }
       echo "  restarted ${STRIH_PUBLIC_UNIT} (its unit or token changed)"
     else
       echo "  ${STRIH_PUBLIC_UNIT} running"
@@ -330,7 +333,13 @@ strih_interkom_public_grade_rows() {
   local fact owner tok unit turn tmp st problems ready conns code body f j
   fact="$(strih_lx_https_public 2>/dev/null)" || { printf 'FAIL|(https-tunnel) the box facts are unreadable\nFAIL|(https-turn) the box facts are unreadable\n'; return 0; }
   if [ "$fact" != yes ]; then
-    printf 'NOTE|(https-tunnel) STRIH_HTTPS_PUBLIC=%s: this box publishes nothing off the LAN -- not graded\n' "$fact"
+    st="$(systemctl is-enabled "$STRIH_PUBLIC_UNIT" 2>/dev/null | head -n 1 || true)/$(systemctl is-active "$STRIH_PUBLIC_UNIT" 2>/dev/null | head -n 1 || true)"
+    case "$st" in
+      enabled/* | */active | */activating)
+        printf 'FAIL|(https-tunnel) STRIH_HTTPS_PUBLIC=%s but %s is %s -- a leftover tunnel still publishes this box; systemctl disable --now %s\n' \
+          "$fact" "$STRIH_PUBLIC_UNIT" "$st" "$STRIH_PUBLIC_UNIT" ;;
+      *) printf 'NOTE|(https-tunnel) STRIH_HTTPS_PUBLIC=%s: this box publishes nothing off the LAN -- not graded\n' "$fact" ;;
+    esac
     printf 'NOTE|(https-turn) STRIH_HTTPS_PUBLIC=%s: no TURN on this box -- not graded\n' "$fact"
     return 0
   fi

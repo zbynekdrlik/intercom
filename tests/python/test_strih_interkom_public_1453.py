@@ -105,7 +105,7 @@ if a and a[0] == "install":
 
 _FAKE_SYSTEMCTL = _py("""import os, sys
 st = os.environ["FAKE_STATE"]
-a = [x for x in sys.argv[1:] if x != "--quiet"]
+a = [x for x in sys.argv[1:] if x not in ("--quiet", "--no-block")]
 quiet = "--quiet" in sys.argv[1:]
 open(os.path.join(st, "calls"), "a").write("systemctl " + " ".join(sys.argv[1:]) + "\\n")
 def flag(kind, u):
@@ -378,7 +378,7 @@ def test_a_fresh_box_installs_cloudflared_and_the_unit_and_warns_twice(tmp_path)
     assert "--token-file %d/tunnel.token" in unit
     assert "LoadCredential=tunnel.token:%s" % rig.token in unit
     assert "systemctl enable cloudflared-interkom.service" in calls
-    assert not [c for c in calls if re.match(r"systemctl (start|restart) ", c)], calls
+    assert not [c for c in calls if re.match(r"systemctl (--no-block )?(start|restart) ", c)], calls
     warns = [ln for ln in r.stderr.splitlines() if "WARN" in ln]
     assert len(warns) == 2, r.stderr
     assert str(rig.token) in warns[0] and "strih_interkom_public_token_store" in warns[0]
@@ -409,7 +409,7 @@ def test_the_token_from_the_environment_starts_the_tunnel_and_is_never_printed(t
     assert r.returncode == 0, r.stdout + r.stderr
     assert rig.token.read_text() == FAKE_TOKEN + "\n"
     assert stat.S_IMODE(rig.token.stat().st_mode) == 0o600
-    assert "systemctl start cloudflared-interkom.service" in rig.calls()
+    assert "systemctl --no-block start cloudflared-interkom.service" in rig.calls()
     assert FAKE_TOKEN not in r.stdout + r.stderr
     assert FAKE_TOKEN not in "\n".join(rig.calls()), "the token never reaches an argv"
     assert FAKE_TOKEN not in (rig.units / "cloudflared-interkom.service").read_text()
@@ -424,12 +424,12 @@ def test_a_second_run_changes_nothing_and_a_new_token_restarts(tmp_path):
     assert r.returncode == 0, r.stderr
     calls = rig.calls()
     assert not [c for c in calls if c.startswith(("apt-get", "curl"))], calls
-    assert not [c for c in calls if re.match(r"systemctl (start|restart|daemon-reload|enable)", c)], calls
+    assert not [c for c in calls if re.match(r"systemctl (--no-block )?(start|restart|daemon-reload|enable)", c)], calls
     assert "unchanged" in r.stdout
     rig.clear_calls()
     r = _install(rig, CLOUDFLARE_TUNNEL_TOKEN=FAKE_TOKEN + "-rotated")
     assert r.returncode == 0, r.stderr
-    assert "systemctl restart cloudflared-interkom.service" in rig.calls()
+    assert "systemctl --no-block restart cloudflared-interkom.service" in rig.calls()
 
 
 def test_the_token_store_takes_stdin_and_refuses_a_malformed_token(tmp_path):
@@ -533,8 +533,12 @@ def test_the_unit_holds_no_token_and_runs_unprivileged():
            "--token-file %d/tunnel.token" in u
     assert "ConditionPathExists=/etc/cloudflared/interkom-tunnel.token" in u
     assert "LoadCredential=tunnel.token:/etc/cloudflared/interkom-tunnel.token" in u
-    for line in ("DynamicUser=yes", "NoNewPrivileges=yes", "Type=notify", "WantedBy=multi-user.target"):
+    for line in ("DynamicUser=yes", "NoNewPrivileges=yes", "Type=simple", "WantedBy=multi-user.target",
+                 "StartLimitIntervalSec=0"):
         assert line in u
+    # A notify unit without a start timeout would hold setup + multi-user.target (and the kiosk
+    # session after it) while the venue uplink is down.
+    assert "Type=notify" not in u and "TimeoutStartSec=0" not in u
     assert "--token " not in u, "never the token on the command line"
 
 
@@ -598,6 +602,16 @@ def test_a_box_that_publishes_nothing_gets_two_notes(tmp_path):
     d = _boxes_copy(tmp_path, "strih-pp", "STRIH_HTTPS_PUBLIC=yes\n", "STRIH_HTTPS_PUBLIC=no\n")
     rows = _rows(rig, box="strih-pp", STRIH_BOXES_DIR=str(d))
     assert [st for st, _ in rows] == ["NOTE", "NOTE"], rows
+
+
+@pytest.mark.parametrize("flag", ["enabled-cloudflared-interkom.service", "active-cloudflared-interkom.service"])
+def test_a_leftover_tunnel_on_a_box_that_publishes_nothing_fails(tmp_path, flag):
+    rig = Rig(tmp_path)
+    d = _boxes_copy(tmp_path, "strih-pp", "STRIH_HTTPS_PUBLIC=yes\n", "STRIH_HTTPS_PUBLIC=no\n")
+    rig.flag(flag)
+    rows = _rows(rig, box="strih-pp", STRIH_BOXES_DIR=str(d))
+    assert rows[0][0] == "FAIL" and "leftover tunnel" in rows[0][1], rows
+    assert rows[1][0] == "NOTE"
 
 
 def test_the_report_prints_through_the_callers_functions(tmp_path):

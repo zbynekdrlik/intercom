@@ -4,14 +4,18 @@
 // phone.spec.js: the REAL intercom/web client + the REAL vendored janus.js served by stub_hub.py,
 // only the Janus SERVER faked (fake-janus-server.js). The stub's `/api/ice` mode is switched per
 // test (`/__test/ice/<mode>`). A wrapper around RTCPeerConnection records the configuration janus.js
-// builds, so the test sees exactly which ICE servers the page's PeerConnection got.
+// builds, so the test sees exactly which ICE servers the page's PeerConnection got. Most tests
+// neutralise the service-worker registration (the phone.spec.js pattern); one runs the hung-hub
+// case with the worker in control, the path a real installed phone takes.
 const path = require("path");
 const { test, expect } = require("@playwright/test");
+const { openControlledByWorker } = require("./picture-helpers");
 
 // janus.js's own default when it is given no iceServers (janus.js `gatewayCallbacks.iceServers ||`).
 const JANUS_DEFAULT_ICE = [{ urls: "stun:stun.l.google.com:19302" }];
 
-test.beforeEach(async ({ page }) => {
+// Before app.js: the service worker never registers (a test that wants it in control skips this).
+async function neutraliseWorker(page) {
   await page.addInitScript(() => {
     if (navigator.serviceWorker) {
       Object.defineProperty(navigator.serviceWorker, "register", {
@@ -19,6 +23,11 @@ test.beforeEach(async ({ page }) => {
         configurable: true,
       });
     }
+  });
+}
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
     try {
       localStorage.setItem("interkom.display", "Kamera 1");
     } catch (e) {
@@ -62,6 +71,7 @@ async function pageIce(page) {
 }
 
 test("the hub's TURN servers reach the page's PeerConnection before the join", async ({ page, request }) => {
+  await neutraliseWorker(page);
   await request.get("/__test/ice/on");
   const seen = watchConsole(page);
   await page.goto("/");
@@ -83,6 +93,7 @@ test("the hub's TURN servers reach the page's PeerConnection before the join", a
 });
 
 test("a box without TURN keeps janus.js's default ICE server", async ({ page, request }) => {
+  await neutraliseWorker(page);
   await request.get("/__test/ice/off");
   const seen = watchConsole(page);
   await page.goto("/");
@@ -92,6 +103,7 @@ test("a box without TURN keeps janus.js's default ICE server", async ({ page, re
 });
 
 test("a hub that answers garbage still joins with the default ICE server", async ({ page, request }) => {
+  await neutraliseWorker(page);
   await request.get("/__test/ice/garbage");
   const seen = watchConsole(page);
   await page.goto("/");
@@ -101,14 +113,30 @@ test("a hub that answers garbage still joins with the default ICE server", async
 });
 
 test("a hub that never answers /api/ice does not block the join", async ({ page, request }) => {
+  await neutraliseWorker(page);
   await request.get("/__test/ice/hang");
   const seen = watchConsole(page);
   const t0 = Date.now();
   await page.goto("/");
   await expectConnected(page);
   const took = Date.now() - t0;
-  // The stub holds the answer 8 s; the page gives up after 3 s and joins with the default.
-  expect(took, `joined after ${took} ms`).toBeLessThan(7000);
+  // The stub holds the answer 12 s; the page gives up after 6 s and joins with the default.
+  expect(took, `joined after ${took} ms`).toBeLessThan(10000);
   expect(await pageIce(page)).toEqual(JANUS_DEFAULT_ICE);
+  expect(seen, `console must be clean:\n${seen.join("\n")}`).toEqual([]);
+});
+
+test("with the service worker in control a hung /api/ice still joins with a clean console", async ({ page, request }) => {
+  await request.get("/__test/ice/off");
+  await openControlledByWorker(page);
+  await request.get("/__test/ice/hang");
+  const seen = watchConsole(page);
+  const t0 = Date.now();
+  await page.reload();
+  const controlled = await page.evaluate(() => !!navigator.serviceWorker.controller);
+  expect(controlled, "the reloaded page is controlled by the worker").toBe(true);
+  await expectConnected(page);
+  const took = Date.now() - t0;
+  expect(took, `joined after ${took} ms`).toBeLessThan(10000);
   expect(seen, `console must be clean:\n${seen.join("\n")}`).toEqual([]);
 });

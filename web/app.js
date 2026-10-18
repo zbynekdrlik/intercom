@@ -30,8 +30,10 @@ const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebui
 const ICE_GRACE_MS = 5000; // a "disconnected" ICE state gets this long to recover by itself.
 const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebuilds the session.
 // issue 1453: the hub's TURN servers are fetched before each session; a slow hub never holds the
-// join longer than this (then the session starts with janus.js's default ICE servers).
-const ICE_FETCH_TIMEOUT_MS = 3000;
+// join longer than this (then the session starts with janus.js's default ICE servers). Longer than
+// the hub's own 5 s bound on a Cloudflare mint (intercom/hub/src/turn.rs TURN_MINT_TIMEOUT), so a
+// page that meets a cold cache still gets the relay.
+const ICE_FETCH_TIMEOUT_MS = 6000;
 const METER_FLOOR_DB = -60; // the meters' left edge.
 const VOICE_DB = -45; // above this the meter counts as "voice present".
 const VOICE_HOLD_MS = 600; // keep "hovorí" this long after the level drops.

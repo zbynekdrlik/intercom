@@ -64,3 +64,8 @@ libloading = { version = "0.8", optional = true }
 # is already in the dependency graph through tokio, so nothing new is downloaded (rustix was
 # rejected: a new crate for one call).
 libc = "0.2"
+
+[dev-dependencies]
+# Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,
+# never a pid+timestamp path. The same version the appliance crate tests with.
+tempfile = "3.9"

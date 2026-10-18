@@ -349,6 +349,7 @@ async fn main() -> Result<()> {
         &args.turn_config,
         CLOUDFLARE_TURN_API,
     ));
+    turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
     let state = AppState {
         live: live_rx,
         video: video_state,

@@ -16,14 +16,18 @@
 //!
 //! The key (Cloudflare's key id + key API token) lives in a 0600 TOML file, by default
 //! `/etc/intercom-hub/turn.toml`. The provisioned hub runs as the operator (setup-strih step 12) and
-//! cannot read a root 0600 file, so setup-strih step 13 hands it over as the systemd credential
-//! `turn.toml` (only when the file exists); `resolve_turn_path` prefers that copy. An absent,
+//! cannot read a root 0600 file, so setup-strih step 16i hands it over as the systemd credential
+//! `turn.toml` (a drop-in written only while the file exists); `resolve_turn_path` prefers that
+//! copy. An absent,
 //! unreadable, group/world-readable or malformed file leaves TURN off with a named reason; the rest
 //! of the hub is unchanged. The token never reaches a log line, a Debug print or a response.
 //!
 //! Credentials are minted for `TURN_TTL_S` and reused until 2/3 of it has passed, so a phone always
-//! gets at least a third of the lifetime. Concurrent callers wait on one mint. When a mint fails, a
-//! cached set that has not expired yet is served (with a warning) instead of an error.
+//! gets at least a third of the lifetime. Concurrent callers wait on one mint. The hub warms the cache
+//! at start and renews it before the 2/3 point (`TurnMinter::spawn_refresher`), so a page or Janus
+//! request does not normally wait on Cloudflare. When a mint fails, a cached set that has not expired
+//! yet is served (with a warning) instead of an error, and the failure is remembered for
+//! `TURN_FAILURE_BACKOFF_S`: during an outage a burst of page loads costs one mint attempt, not one each.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -45,10 +49,14 @@ pub const CLOUDFLARE_TURN_API: &str = "https://rtc.live.cloudflare.com/v1/turn/k
 pub const TURN_USER_AGENT: &str = "camera-box-intercom/1";
 /// The lifetime asked for every credential set, seconds (24 h).
 pub const TURN_TTL_S: u64 = 86_400;
-/// Never serve a cached set within this many seconds of its expiry.
+/// Never serve a cached set within this many seconds of its expiry (at most a tenth of the ttl).
 pub const TURN_EXPIRY_MARGIN_S: u64 = 60;
-/// The mint request's own bound (connect + response).
+/// The mint request's own bound (connect + response). The PWA waits longer than this for `/api/ice`.
 pub const TURN_MINT_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a failed mint, requests within this many seconds get the cached set or the error at once.
+pub const TURN_FAILURE_BACKOFF_S: u64 = 15;
+/// The background refresher's retry after a failed mint, seconds.
+pub const TURN_REFRESH_RETRY_S: u64 = 30;
 
 /// The box's Cloudflare TURN key. `Debug` never prints the token.
 #[derive(Clone, PartialEq, Eq)]
@@ -263,6 +271,29 @@ pub fn ttl_left_s(elapsed_ms: u64, ttl_s: u64) -> u64 {
     ttl_s.saturating_sub(elapsed_ms / 1000)
 }
 
+/// The margin before expiry inside which a cached set is no longer served: `TURN_EXPIRY_MARGIN_S`,
+/// at most a tenth of the ttl.
+pub fn expiry_margin_s(ttl_s: u64) -> u64 {
+    TURN_EXPIRY_MARGIN_S.min(ttl_s / 10)
+}
+
+/// Whether a mint that failed `elapsed_ms` ago still holds new attempts back.
+pub fn backoff_active(elapsed_ms: u64, backoff_s: u64) -> bool {
+    u128::from(elapsed_ms) < u128::from(backoff_s) * 1000
+}
+
+/// The background refresher's sleep after a pass that left a set with `ttl_left` seconds: until just
+/// past the 2/3 point of `ttl_s` (the first moment the cache counts as stale), or
+/// `TURN_REFRESH_RETRY_S` when the set is already past it (the mint failed, a cached set is served).
+pub fn refresh_wait_s(ttl_left: u64, ttl_s: u64) -> u64 {
+    let stale_at_left = ttl_s / 3;
+    if ttl_left > stale_at_left {
+        ttl_left - stale_at_left + 1
+    } else {
+        TURN_REFRESH_RETRY_S
+    }
+}
+
 /// Why `/api/ice` / `/api/turn-rest` have no credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnError {
@@ -286,6 +317,13 @@ struct Cached {
     at: Instant,
 }
 
+#[derive(Default)]
+struct CacheState {
+    creds: Option<Cached>,
+    /// When the last mint failed and why (cleared by a successful mint).
+    failure: Option<(Instant, String)>,
+}
+
 enum Source {
     Off(String),
     On {
@@ -299,7 +337,8 @@ enum Source {
 pub struct TurnMinter {
     source: Source,
     ttl_s: u64,
-    cache: Mutex<Option<Cached>>,
+    backoff_s: u64,
+    cache: Mutex<CacheState>,
 }
 
 impl TurnMinter {
@@ -308,7 +347,8 @@ impl TurnMinter {
         Self {
             source: Source::Off(reason.into()),
             ttl_s: TURN_TTL_S,
-            cache: Mutex::new(None),
+            backoff_s: TURN_FAILURE_BACKOFF_S,
+            cache: Mutex::new(CacheState::default()),
         }
     }
 
@@ -332,8 +372,15 @@ impl TurnMinter {
                 client,
             },
             ttl_s: ttl_s.max(1),
-            cache: Mutex::new(None),
+            backoff_s: TURN_FAILURE_BACKOFF_S,
+            cache: Mutex::new(CacheState::default()),
         })
+    }
+
+    /// The same minter with another failure back-off (seconds); `TURN_FAILURE_BACKOFF_S` by default.
+    pub fn with_failure_backoff(mut self, backoff_s: u64) -> Self {
+        self.backoff_s = backoff_s;
+        self
     }
 
     /// The hub's start-up path: the key from the credential copy or `configured`, TURN off (one
@@ -375,11 +422,17 @@ impl TurnMinter {
             } => (key, endpoint, client),
         };
         // Held across the mint on purpose: concurrent callers share one request.
-        let mut cache = self.cache.lock().await;
-        if let Some(c) = cache.as_ref() {
+        let mut st = self.cache.lock().await;
+        if let Some(c) = st.creds.as_ref() {
             let elapsed = elapsed_ms(c.at);
             if cache_fresh(elapsed, self.ttl_s) {
                 return Ok((c.creds.clone(), ttl_left_s(elapsed, self.ttl_s)));
+            }
+        }
+        if let Some((at, reason)) = st.failure.as_ref() {
+            if backoff_active(elapsed_ms(*at), self.backoff_s) {
+                let reason = reason.clone();
+                return self.cached_or(&st, reason);
             }
         }
         match mint(client, endpoint, key, self.ttl_s).await {
@@ -390,24 +443,53 @@ impl TurnMinter {
                     "turn: minted Cloudflare TURN credentials"
                 );
                 let creds = Arc::new(creds);
-                *cache = Some(Cached {
+                st.creds = Some(Cached {
                     creds: creds.clone(),
                     at: Instant::now(),
                 });
+                st.failure = None;
                 Ok((creds, self.ttl_s))
             }
             Err(e) => {
-                if let Some(c) = cache.as_ref() {
-                    let left = ttl_left_s(elapsed_ms(c.at), self.ttl_s);
-                    if left > TURN_EXPIRY_MARGIN_S {
-                        tracing::warn!(error = %e, ttl_left_s = left, "turn: mint failed -- serving the cached credentials");
-                        return Ok((c.creds.clone(), left));
-                    }
-                }
-                tracing::warn!(error = %e, "turn: mint failed and no usable cached credentials");
-                Err(TurnError::Upstream(e))
+                tracing::warn!(error = %e, backoff_s = self.backoff_s, "turn: mint failed");
+                st.failure = Some((Instant::now(), e.clone()));
+                self.cached_or(&st, e)
             }
         }
+    }
+
+    /// A cached set that has not expired (outside the margin), else the mint error.
+    fn cached_or(
+        &self,
+        st: &CacheState,
+        reason: String,
+    ) -> Result<(Arc<IceCredentials>, u64), TurnError> {
+        if let Some(c) = st.creds.as_ref() {
+            let left = ttl_left_s(elapsed_ms(c.at), self.ttl_s);
+            if left > expiry_margin_s(self.ttl_s) {
+                return Ok((c.creds.clone(), left));
+            }
+        }
+        Err(TurnError::Upstream(reason))
+    }
+
+    /// Warm the cache now and renew it before the 2/3 point for the hub's lifetime, so a page or
+    /// Janus request does not normally wait on Cloudflare. Nothing is spawned when TURN is off.
+    /// Needs a tokio runtime.
+    pub fn spawn_refresher(self: &Arc<Self>) {
+        if self.off_reason().is_some() {
+            return;
+        }
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let wait = match me.current().await {
+                    Ok((_, left)) => refresh_wait_s(left, me.ttl_s),
+                    Err(_) => TURN_REFRESH_RETRY_S,
+                };
+                tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
+            }
+        });
     }
 }
 
