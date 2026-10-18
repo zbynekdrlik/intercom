@@ -32,6 +32,7 @@ use intercom_hub::matrix::Matrix;
 use intercom_hub::mix_thread::{current_sched_class, spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
+use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
     resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
 };
@@ -59,6 +60,11 @@ struct Args {
     /// Override the HTTP bind address (host:port) from the config's `[hub].bind`.
     #[arg(long)]
     bind: Option<String>,
+
+    /// The Cloudflare TURN key file (issue 1453). The unit's `turn.toml` credential wins when loaded;
+    /// absent = TURN off (`/api/ice` answers turn=off, `/api/turn-rest` 404), the hub otherwise unchanged.
+    #[arg(long, default_value = TURN_CONFIG_DEFAULT)]
+    turn_config: PathBuf,
 }
 
 #[tokio::main]
@@ -110,34 +116,10 @@ async fn main() -> Result<()> {
             })
             .collect(),
     ));
-    {
-        let out_addrs = out_addrs.clone();
-        let hosts: Vec<String> = outputs.iter().map(|(_, _, h)| h.clone()).collect();
-        tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
-            ticker.tick().await; // the first tick fires immediately; startup already resolved
-            loop {
-                ticker.tick().await;
-                let hosts = hosts.clone();
-                let fresh = tokio::task::spawn_blocking(move || {
-                    hosts
-                        .iter()
-                        .map(|h| resolve_vban_addr(h, intercom_vban::VBAN_PORT))
-                        .collect::<Vec<_>>()
-                })
-                .await;
-                if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
-                    for (slot, a) in cur.iter_mut().zip(fresh) {
-                        if a.is_some() && *slot != a {
-                            tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
-                            *slot = a;
-                        }
-                    }
-                }
-            }
-        });
-    }
+    spawn_output_resolve_refresh(
+        out_addrs.clone(),
+        outputs.iter().map(|(_, _, h)| h.clone()).collect(),
+    );
     let engine = Arc::new(Engine::new(matrix.clone()));
     let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(input_buffers(&matrix)));
 
@@ -362,9 +344,15 @@ async fn main() -> Result<()> {
         "intercom-hub starting"
     );
 
+    let turn = Arc::new(TurnMinter::load(
+        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+        &args.turn_config,
+        CLOUDFLARE_TURN_API,
+    ));
     let state = AppState {
         live: live_rx,
         video: video_state,
+        turn,
     };
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
@@ -373,6 +361,38 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Re-resolve the VBAN output hosts every `OUTPUT_RESOLVE_REFRESH_S` off the hot path (a cambox on a
+/// new DHCP lease is picked up within a minute). A failed lookup keeps the last-known-good address.
+fn spawn_output_resolve_refresh(
+    out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>>,
+    hosts: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
+        ticker.tick().await; // the first tick fires immediately; startup already resolved
+        loop {
+            ticker.tick().await;
+            let hosts = hosts.clone();
+            let fresh = tokio::task::spawn_blocking(move || {
+                hosts
+                    .iter()
+                    .map(|h| resolve_vban_addr(h, intercom_vban::VBAN_PORT))
+                    .collect::<Vec<_>>()
+            })
+            .await;
+            if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
+                for (slot, a) in cur.iter_mut().zip(fresh) {
+                    if a.is_some() && *slot != a {
+                        tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
+                        *slot = a;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Everything the block loop owns; `main` builds it once and moves it onto the loop's thread.
