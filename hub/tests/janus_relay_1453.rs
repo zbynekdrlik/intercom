@@ -31,7 +31,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use intercom_hub::http::{router, AppState};
-use intercom_hub::janus_relay::{JanusUpstream, JanusWsRelay, MAX_REFUSALS_PER_CONNECTION};
+use intercom_hub::janus_relay::{
+    phone_peer, JanusUpstream, JanusWsRelay, MAX_CONCURRENT_RELAYS, MAX_REFUSALS_PER_CONNECTION,
+};
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::TurnMinter;
@@ -143,6 +145,15 @@ async fn spawn_hub(janus_ws: Option<Arc<JanusWsRelay>>) -> SocketAddr {
 
 async fn hub_to(janus_url: &str) -> SocketAddr {
     spawn_hub(Some(Arc::new(JanusWsRelay::new(janus_url, ROOM)))).await
+}
+
+/// The HTTP status of a refused upgrade (the hub answered before 101).
+async fn upgrade_status(hub: SocketAddr) -> u16 {
+    match tokio_tungstenite::connect_async(phone_request(hub)).await {
+        Err(WsError::Http(resp)) => resp.status().as_u16(),
+        Err(other) => panic!("expected an HTTP refusal, got {other}"),
+        Ok(_) => 101,
+    }
 }
 
 fn phone_request(hub: SocketAddr) -> tokio_tungstenite::tungstenite::handshake::client::Request {
@@ -403,4 +414,77 @@ ws_url = "http://127.0.0.1:8188/janus"
     )
     .unwrap_err();
     assert!(err.to_string().contains("ws://"), "{err}");
+}
+
+#[tokio::test]
+async fn the_relay_cap_answers_503_before_touching_janus_and_frees_the_slot_on_close() {
+    let (url, fake) = spawn_fake_janus().await;
+    let relay = JanusWsRelay::new(&url, ROOM).with_max_relays(1);
+    let hub = spawn_hub(Some(Arc::new(relay))).await;
+
+    let mut first = phone(hub).await;
+    assert_eq!(
+        upgrade_status(hub).await,
+        503,
+        "the second phone is over the cap"
+    );
+    assert_eq!(
+        fake.protocols.lock().unwrap().len(),
+        1,
+        "a phone over the cap never opens a socket to Janus"
+    );
+
+    // The first phone leaves: its slot comes back once its relay ends.
+    first.close(None).await.unwrap();
+    drop(first);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if upgrade_status(hub).await == 101 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the slot was not freed after the phone left"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[test]
+fn a_relay_holds_at_most_its_slots_and_the_default_is_the_constant() {
+    let relay = JanusWsRelay::new("ws://127.0.0.1:8188/janus", ROOM).with_max_relays(2);
+    let a = relay.try_reserve().expect("slot 1");
+    let _b = relay.try_reserve().expect("slot 2");
+    assert!(
+        relay.try_reserve().is_none(),
+        "a third relay is over the cap"
+    );
+    drop(a);
+    assert!(
+        relay.try_reserve().is_some(),
+        "a released slot is free again"
+    );
+
+    let default = JanusWsRelay::new("ws://127.0.0.1:8188/janus", ROOM);
+    let held: Vec<_> = (0..MAX_CONCURRENT_RELAYS)
+        .map(|_| default.try_reserve().expect("a slot under the default cap"))
+        .collect();
+    assert!(default.try_reserve().is_none());
+    assert_eq!(held.len(), MAX_CONCURRENT_RELAYS);
+    // Zero would refuse every phone: at least one slot.
+    assert!(JanusWsRelay::new("ws://x", ROOM)
+        .with_max_relays(0)
+        .try_reserve()
+        .is_some());
+}
+
+#[test]
+fn the_phone_log_names_both_client_headers_quoted() {
+    let mut h = HeaderMap::new();
+    assert_eq!(phone_peer(&h), "xff=\"-\" cf=\"-\"");
+    h.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+    h.insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+    assert_eq!(phone_peer(&h), "xff=\"127.0.0.1\" cf=\"203.0.113.7\"");
+    h.insert("cf-connecting-ip", "x".repeat(300).parse().unwrap());
+    assert!(phone_peer(&h).len() < 120, "a long header is cut");
 }

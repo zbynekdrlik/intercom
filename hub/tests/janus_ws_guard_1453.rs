@@ -282,3 +282,53 @@ fn a_forwarded_frame_is_decided_on_content_not_on_formatting() {
         "{ \"body\" : {\"muted\":false , \"request\":\"configure\"},\n\"janus\":\"message\" }";
     assert_eq!(check_client_frame(text, ROOM), Verdict::Forward);
 }
+
+/// The guard and Janus must read a frame the same way, or a frame could pass the guard and reach
+/// Janus as something else. Both parsers keep the LAST of duplicate keys (serde_json's map insert,
+/// jansson without JSON_REJECT_DUPLICATES) and decode `\u` escapes before keys are compared; the
+/// guard matches names exactly where Janus compares `request` case-insensitively (stricter).
+#[test]
+fn the_guard_reads_a_frame_the_way_janus_does() {
+    let frame = |body: &str| {
+        format!(
+            r#"{{"janus":"message","transaction":"t","session_id":1,"handle_id":2,"body":{body}}}"#
+        )
+    };
+    // An escaped key is the same key.
+    refused(&frame(
+        r#"{"request":"join","room":1000,"rtp":{"ip":"203.0.113.7","port":9}}"#,
+    ));
+    refused(&frame(
+        r#"{"request":"join","room":1000,"rtp":{"ip":"203.0.113.7","port":9}}"#,
+    ));
+    // Duplicate keys: the LAST one decides, for the guard as for Janus.
+    refused(&frame(
+        r#"{"request":"join","room":1000,"request":"rtp_forward"}"#,
+    ));
+    assert_eq!(
+        check_client_frame(
+            &frame(r#"{"request":"rtp_forward","request":"join","room":1000}"#),
+            ROOM
+        ),
+        Verdict::Forward,
+        "the last request is a plain join, as Janus reads it"
+    );
+    refused(&frame(
+        r#"{"request":"join","room":1000,"rtp":{"ip":"x","port":9},"rtp":null}"#,
+    ));
+    refused(&frame(r#"{"request":"join","room":4242,"room":1001}"#));
+    refused(&frame(
+        r#"{"request":"configure","muted":true,"muted":"no"}"#,
+    ));
+    // The top-level request too.
+    refused(r#"{"janus":"message","janus":"claim","transaction":"t"}"#);
+    // Numbers that are not an integer room.
+    refused(&frame(r#"{"request":"join","room":1000.0}"#));
+    refused(&frame(r#"{"request":"join","room":1e3}"#));
+    // Case variants Janus would accept are refused here.
+    refused(r#"{"janus":"MESSAGE","transaction":"t","body":{"request":"join","room":1000}}"#);
+    refused(&frame(r#"{"request":"Join","room":1000}"#));
+    refused(r#"{"janus":"attach","plugin":"Janus.Plugin.AudioBridge","transaction":"t"}"#);
+    // Trailing data after the object.
+    refused(r#"{"janus":"keepalive","transaction":"t"} {"janus":"claim"}"#);
+}
