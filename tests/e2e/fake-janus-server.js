@@ -9,6 +9,8 @@
 //
 // Test controls + records live on window.__fakeJanus:
 //   joins / configures / offers (with the offer's audio direction) / sessions,
+//   sent (every frame the page sent, the raw text, issue 1453: phone.spec checks each one against
+//   the frames the hub's /janus allowlist forwards),
 //   failConnects (the next N sockets fail to open), dropConnection() (the server drops the live
 //   socket), rejectNextConfigures (the next N configure-with-offer get an error event and no
 //   answer), inboundAudioBytes() (what the "server" received from the phone's mic).
@@ -22,6 +24,7 @@
     joins: [],
     configures: [],
     offers: [],
+    sent: [],
     sockets: [],
     handles: [],
   };
@@ -71,6 +74,8 @@
 
     send(text) {
       if (this.readyState !== 1) return;
+      state.sent.push(String(text));
+      if (typeof window.__janusFrameSent === "function") window.__janusFrameSent(String(text));
       const msg = JSON.parse(text);
       Promise.resolve().then(() => this.onRequest(msg));
     }

@@ -11,6 +11,32 @@ const { test, expect } = require("@playwright/test");
 
 const SCREENSHOT_DIR = process.env.INTERKOM_E2E_SCREENSHOT_DIR || "";
 
+// issue 1453: the hub relays the phone's Janus WebSocket through a frame allowlist
+// (intercom/hub/src/janus_ws_guard.rs). janus-ws-pwa-frames.json holds the raw text of one frame of
+// every shape the page sends (captured from this suite; keepalive / hangup / detach / info, which
+// these short tests never reach, built from janus.js 1.1.2's own request literals). The hub's test
+// (intercom/hub/tests/janus_relay_1453.rs) forwards each of them byte-identically through the real
+// relay, and every test here checks that the page sent no frame of another shape. A new frame shape
+// in app.js (or a janus.js update) fails here until a real sample is added, which then makes the
+// Rust test prove the allowlist forwards it.
+const PWA_FRAMES_FILE = path.join(__dirname, "..", "fixtures", "janus-ws-pwa-frames.json");
+const PWA_FRAMES = JSON.parse(fs.readFileSync(PWA_FRAMES_FILE, "utf8")).map((text) => JSON.parse(text));
+
+// What the allowlist decides on: the janus request, the plugin of an attach, and a plugin
+// message's request + its body keys.
+function frameShape(frame) {
+  const parts = [frame.janus];
+  if (frame.janus === "attach") parts.push(frame.plugin);
+  if (frame.janus === "message") {
+    const body = frame.body || {};
+    parts.push(body.request, Object.keys(body).sort().join(","));
+  }
+  return parts.join(" ");
+}
+const ALLOWED_SHAPES = new Set(PWA_FRAMES.map(frameShape));
+// Every frame the page sent in the current test (all page loads, reloads included).
+let sentFrames = [];
+
 // Before app.js runs in every test:
 // - neutralise the service-worker registration (a claimed page would route fetches through the
 //   SW; Playwright's own `serviceWorkers: "block"` logs a console warning, which the zero-console
@@ -19,6 +45,10 @@ const SCREENSHOT_DIR = process.env.INTERKOM_E2E_SCREENSHOT_DIR || "";
 //   "room audio" (so the fake's remote track is never counted as a mic permission request);
 // - install the fake Janus server.
 test.beforeEach(async ({ page }) => {
+  sentFrames = [];
+  await page.exposeFunction("__janusFrameSent", (text) => {
+    sentFrames.push(text);
+  });
   await page.addInitScript(() => {
     if (navigator.serviceWorker) {
       Object.defineProperty(navigator.serviceWorker, "register", {
@@ -38,6 +68,15 @@ test.beforeEach(async ({ page }) => {
     }
   });
   await page.addInitScript({ path: path.join(__dirname, "fake-janus-server.js") });
+});
+
+test.afterEach(async () => {
+  const outside = sentFrames.filter((text) => !ALLOWED_SHAPES.has(frameShape(JSON.parse(text))));
+  expect(
+    outside,
+    `the page sent a frame the hub's /janus allowlist would refuse (shapes allowed: ${[...ALLOWED_SHAPES].join(" | ")}); ` +
+      "add a real sample to intercom/tests/fixtures/janus-ws-pwa-frames.json and let janus_ws_guard.rs allow it (issue 1453)"
+  ).toEqual([]);
 });
 
 function watchConsole(page) {

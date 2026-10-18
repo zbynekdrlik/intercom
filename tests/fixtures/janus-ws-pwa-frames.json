@@ -1,0 +1,15 @@
+[
+ "{\"janus\":\"create\",\"transaction\":\"6bx2nTFdkIXu\"}",
+ "{\"janus\":\"attach\",\"plugin\":\"janus.plugin.audiobridge\",\"transaction\":\"ZmszV5jfdBNq\",\"session_id\":1001}",
+ "{\"janus\":\"message\",\"body\":{\"request\":\"join\",\"room\":1000,\"display\":\"Kamera 1\",\"muted\":true},\"transaction\":\"GjKnKV4NDEnE\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"message\",\"body\":{\"request\":\"configure\",\"muted\":true},\"transaction\":\"ZuHqSDnRkzfP\",\"jsep\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 1131680375256751845 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0\\r\\na=extmap-allow-mixed\\r\\na=msid-semantic: WMS\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\\r\\nc=IN IP4 0.0.0.0\\r\\na=rtcp:9 IN IP4 0.0.0.0\\r\\na=ice-ufrag:Fmp4\\r\\na=ice-pwd:qPuPzhLYJIkwDEa9FWNJyvsS\\r\\na=ice-options:trickle\\r\\na=fingerprint:sha-256 D5:73:77:3F:61:A1:51:B2:31:F7:7D:4E:A3:5D:B3:D5:59:75:4F:89:20:EF:0B:31:85:92:FE:8C:35:AB:04:AE\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\\r\\na=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\\r\\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\\r\\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\\r\\na=recvonly\\r\\na=rtcp-mux\\r\\na=rtcp-rsize\\r\\na=rtcp-xr:rcvr-rtt=all\\r\\na=rtpmap:111 opus/48000/2\\r\\na=rtcp-fb:111 transport-cc\\r\\na=fmtp:111 minptime=10;useinbandfec=1\\r\\na=rtpmap:63 red/48000/2\\r\\na=fmtp:63 111/111\\r\\na=rtpmap:9 G722/8000\\r\\na=rtpmap:0 PCMU/8000\\r\\na=rtpmap:8 PCMA/8000\\r\\na=rtpmap:13 CN/8000\\r\\na=rtpmap:110 telephone-event/48000\\r\\na=rtpmap:126 telephone-event/8000\\r\\n\"},\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"trickle\",\"candidate\":{\"candidate\":\"candidate:2524118243 1 udp 2122260223 192.0.2.10 36788 typ host generation 0 ufrag Fmp4 network-id 5 network-cost 50\",\"sdpMid\":\"0\",\"sdpMLineIndex\":0},\"transaction\":\"rbY6yQc0u9wU\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"trickle\",\"candidate\":{\"completed\":true},\"transaction\":\"NodOPquPJpjU\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"message\",\"body\":{\"request\":\"configure\",\"muted\":true},\"transaction\":\"UYKOyZrEInHh\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"destroy\",\"transaction\":\"jJSrVj8EQpMF\",\"session_id\":1001}",
+ "{\"janus\":\"message\",\"body\":{\"request\":\"configure\",\"display\":\"Kamera 5\"},\"transaction\":\"xnqbcoEQTH7m\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"keepalive\",\"session_id\":1001,\"transaction\":\"kA1keepalive\"}",
+ "{\"janus\":\"hangup\",\"transaction\":\"hU1hangup000\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"detach\",\"transaction\":\"dT1detach000\",\"session_id\":1001,\"handle_id\":1002}",
+ "{\"janus\":\"info\",\"transaction\":\"iN1info00000\"}"
+]
