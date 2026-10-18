@@ -14,14 +14,21 @@
 //!    the phone unchanged;
 //! 3. either side closing ends both (Janus then destroys the sessions that socket created).
 //!
+//! The path is public and unauthenticated, so the number of relays at once is capped
+//! ([`MAX_CONCURRENT_RELAYS`]): each holds two sockets in the production audio daemon, and an
+//! uncapped flood would exhaust its file descriptors and break the audio legs' respawns. A phone
+//! over the cap gets 503 before the hub opens anything towards Janus.
+//!
 //! The hub's own audiobridge leg (`janus_rtp`) uses Janus's loopback HTTP API, never this path.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::http::HeaderMap;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -37,23 +44,43 @@ pub const JANUS_WS_MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// After this many refused frames on one connection the hub closes it (a client that keeps sending
 /// what the page never sends is not the page; this also bounds the warning lines it can cause).
 pub const MAX_REFUSALS_PER_CONNECTION: u32 = 8;
+/// How many phone relays may run at once (a crew is ~10 phones; each relay holds two sockets).
+pub const MAX_CONCURRENT_RELAYS: usize = 64;
+/// How many characters of a client-sent header the log quotes.
+const PEER_QUOTE_MAX_CHARS: usize = 64;
 
 /// The hub's WebSocket to Janus.
 pub type JanusUpstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Where the relay connects and which room a phone may join (`[janus].ws_url` / `[janus].room`).
+/// Where the relay connects, which room a phone may join (`[janus].ws_url` / `[janus].room`) and
+/// the slots that cap how many relays run at once.
 #[derive(Debug, Clone)]
 pub struct JanusWsRelay {
     ws_url: String,
     room: u64,
+    slots: Arc<Semaphore>,
 }
 
 impl JanusWsRelay {
+    /// A relay with [`MAX_CONCURRENT_RELAYS`] slots.
     pub fn new(ws_url: &str, room: u64) -> Self {
         Self {
             ws_url: ws_url.to_string(),
             room,
+            slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RELAYS)),
         }
+    }
+
+    /// The same relay with `max` slots (at least one).
+    pub fn with_max_relays(mut self, max: usize) -> Self {
+        self.slots = Arc::new(Semaphore::new(max.max(1)));
+        self
+    }
+
+    /// Take one relay slot, or `None` when every slot is in use. The slot is held until the permit
+    /// is dropped (the end of [`JanusWsRelay::run`]).
+    pub fn try_reserve(&self) -> Option<OwnedSemaphorePermit> {
+        self.slots.clone().try_acquire_owned().ok()
     }
 
     pub fn room(&self) -> u64 {
@@ -87,8 +114,15 @@ impl JanusWsRelay {
         Ok(connected.0)
     }
 
-    /// Relay one phone connection until either side closes. `peer` names the phone in the log.
-    pub async fn run(&self, mut client: WebSocket, mut janus: JanusUpstream, peer: String) {
+    /// Relay one phone connection until either side closes. `peer` names the phone in the log;
+    /// `_slot` is the relay slot this connection holds, released when the relay ends.
+    pub async fn run(
+        &self,
+        mut client: WebSocket,
+        mut janus: JanusUpstream,
+        peer: String,
+        _slot: OwnedSemaphorePermit,
+    ) {
         let mut refusals: u32 = 0;
         tracing::info!(peer = %peer, "janus relay: phone connected");
         loop {
@@ -150,13 +184,22 @@ impl JanusWsRelay {
     }
 }
 
-/// The phone's address for the log: Cloudflare's `CF-Connecting-IP` (the tunnel), else nginx's
-/// `X-Forwarded-For`, else `local`. Client-controlled text, so cut and Debug-quoted.
+/// The phone's address for the log: nginx's `X-Forwarded-For` (the connecting address nginx saw,
+/// 127.0.0.1 for the tunnel) and Cloudflare's `CF-Connecting-IP` (the phone behind the tunnel). Both
+/// are headers a client can also send itself (a LAN client reaching :8790 directly), so the log
+/// shows both, cut and Debug-quoted, and never treats either as proof.
 pub fn phone_peer(headers: &HeaderMap) -> String {
-    let raw = ["cf-connecting-ip", "x-forwarded-for"]
-        .iter()
-        .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()))
-        .unwrap_or("local");
-    let cut: String = raw.chars().take(64).collect();
-    format!("{cut:?}")
+    let field = |name: &str| -> String {
+        let raw = headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let cut: String = raw.chars().take(PEER_QUOTE_MAX_CHARS).collect();
+        format!("{cut:?}")
+    };
+    format!(
+        "xff={} cf={}",
+        field("x-forwarded-for"),
+        field("cf-connecting-ip")
+    )
 }

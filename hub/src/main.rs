@@ -351,25 +351,11 @@ async fn main() -> Result<()> {
         CLOUDFLARE_TURN_API,
     ));
     turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
-
-    // issue 1453: the phones' Janus WebSocket goes through the hub's frame allowlist (`/janus`);
-    // only a hub with a Janus room relays it.
-    let janus_ws = match (matrix.janus_participant(), matrix.janus.as_ref()) {
-        (Some(_), Some(jcfg)) => {
-            tracing::info!(
-                ws_url = %jcfg.ws_url,
-                room = jcfg.room,
-                "janus relay: /janus relays the phones' WebSocket through the frame allowlist"
-            );
-            Some(Arc::new(JanusWsRelay::new(&jcfg.ws_url, jcfg.room)))
-        }
-        _ => None,
-    };
     let state = AppState {
         live: live_rx,
         video: video_state,
         turn,
-        janus_ws,
+        janus_ws: janus_ws_relay(&matrix),
     };
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
@@ -378,6 +364,21 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
+/// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
+fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
+    let (Some(_), Some(jcfg)) = (matrix.janus_participant(), matrix.janus.as_ref()) else {
+        return None;
+    };
+    tracing::info!(
+        ws_url = %jcfg.ws_url,
+        room = jcfg.room,
+        max_relays = intercom_hub::janus_relay::MAX_CONCURRENT_RELAYS,
+        "janus relay: /janus relays the phones' WebSocket through the frame allowlist"
+    );
+    Some(Arc::new(JanusWsRelay::new(&jcfg.ws_url, jcfg.room)))
 }
 
 /// Re-resolve the VBAN output hosts every `OUTPUT_RESOLVE_REFRESH_S` off the hot path (a cambox on a

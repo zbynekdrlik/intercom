@@ -238,10 +238,10 @@ async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Resp
     ws.on_upgrade(move |socket| ws_push(socket, state.live.clone()))
 }
 
-/// `GET /janus` -- the phone's Janus WebSocket (issue 1453). The hub connects to Janus FIRST and
-/// answers the upgrade only then (502 when Janus does not answer, 503 without a Janus room), so a
-/// 101 means the whole path works; the relay then forwards only the frames the phone page itself
-/// sends (`crate::janus_ws_guard`).
+/// `GET /janus` -- the phone's Janus WebSocket (issue 1453). The hub takes a relay slot, connects to
+/// Janus FIRST and answers the upgrade only then (502 when Janus does not answer, 503 without a Janus
+/// room or with every relay slot in use), so a 101 means the whole path works; the relay then
+/// forwards only the frames the phone page itself sends (`crate::janus_ws_guard`).
 async fn janus_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -255,11 +255,20 @@ async fn janus_ws(
             .into_response();
     };
     let peer = phone_peer(&headers);
+    let Some(slot) = relay.try_reserve() else {
+        tracing::warn!(peer = %peer, "janus relay: every relay slot is in use -- 503");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "interkom: too many phones connected",
+        )
+            .into_response();
+    };
     match relay.connect().await {
         Ok(janus) => ws
             .protocols([JANUS_WS_PROTOCOL])
             .max_message_size(JANUS_WS_MAX_MESSAGE_BYTES)
-            .on_upgrade(move |socket| async move { relay.run(socket, janus, peer).await }),
+            .max_frame_size(JANUS_WS_MAX_MESSAGE_BYTES)
+            .on_upgrade(move |socket| async move { relay.run(socket, janus, peer, slot).await }),
         Err(e) => {
             tracing::warn!(peer = %peer, error = %e, "janus relay: Janus's WebSocket did not answer -- 502");
             (StatusCode::BAD_GATEWAY, "interkom: Janus is not reachable").into_response()

@@ -726,6 +726,7 @@ Interkom picture = M3c — both out of this lane).
 
 ```
 phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ Janus WS :8188 (strih-snv)
+  (M3a history; since issue 1453: ──▶ the box's nginx ──▶ the hub's /janus allowlist relay ──▶ Janus WS 127.0.0.1:8188)
                                                                        │  audiobridge room "interkom" (id 1000)
                                                           plain RTP PCMU (8 kHz, PT 0)
                                                                        ▼
@@ -778,7 +779,7 @@ the secret substituted from the file via a bash var — no argv exposure) + `jan
 (ws :8188, no wss), and `systemctl enable janus` — **NEVER start** it (the M4 cut-over starts it
 with the hub, same rule as `intercom-hub.service`). The pure jcfg renderers live in
 `scripts/lib/strih-provision.sh` (`strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` —
-placeholder secret, never inlined — and `strih_janus_ws_jcfg_text LAN_IP`), pinned in
+placeholder secret, never inlined — and `strih_janus_ws_jcfg_text`, loopback-only since issue 1453), pinned in
 `tests/strih_provision_pure_functions.rs`. `verify-strih.sh` item 17 is REPORT-ONLY (janus
 installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_room_jcfg_ok`).
 
@@ -1055,7 +1056,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `scripts/nginx/shading.newlevel.media.conf` is untouched. `interkom_https_site_content` = the same
   renderer with the interkom PRIMARY host (`interkom_https_hostname` = `interkom-lx.newlevel.media`,
   the cert-keyed name), the strih.lan upstream (`http://strih.lan:8790` = the hub) + the extra
-  `location = /janus { proxy_pass http://strih.lan:8188; … }` block from
+  `location = /janus { proxy_pass http://strih.lan:8188; … }` block (since issue 1453 `strih.lan:8790`, the hub's relay) from
   `interkom_https_janus_location` (HTTP/1.1 Upgrade passthrough + `proxy_read_timeout 3600s` for the
   persistent WS). The `/ws` upgrade for the hub is already carried by `location /`. The rendered
   site is committed at `scripts/nginx/interkom.newlevel.media.conf` and the python test
@@ -1328,7 +1329,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   the 17-step flow already runs **Program audio (12) → Intercom hub (13) → Janus (14)** with nothing
   for Janus to precede, and this lane re-applies ONLY the Janus binds/restart/credential onto that
   layout. The Janus step (14) writes THREE jcfg: the audiobridge room, `janus.transport.websockets.jcfg`
-  (**`ws_ip` bound to the LAN IP** on :8188, not 0.0.0.0), and a new `janus.transport.http.jcfg`
+  (`ws_ip` bound to the LAN IP on :8188 at M3; **since issue 1453 bound to 127.0.0.1**, phones go through the hub's `/janus` relay), and a new `janus.transport.http.jcfg`
   (**HTTP API bound `ip = "127.0.0.1"` loopback-only** on :8088 — closes the design's loopback-HTTP
   intent). Ubuntu's `janus` package auto-STARTS the service on install (before the jcfg exists); the
   step now **`systemctl restart janus` ONLY IF it is already active** (`systemctl is-active --quiet
