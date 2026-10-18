@@ -23,9 +23,9 @@ use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{
     backoff_active, cache_fresh, expiry_margin_s, ice_servers_json, is_port_53, load_turn_key,
-    parse_generate_ice_servers, parse_turn_key, refresh_wait_s, resolve_turn_path, ttl_left_s,
-    turn_rest_json, TurnError, TurnKey, TurnMinter, TURN_CONFIG_CRED, TURN_EXPIRY_MARGIN_S,
-    TURN_REFRESH_RETRY_S, TURN_USER_AGENT,
+    load_turn_key_at, parse_generate_ice_servers, parse_turn_key, refresh_wait_s,
+    resolve_turn_path, ttl_left_s, turn_rest_json, TurnError, TurnKey, TurnMinter,
+    TURN_CONFIG_CRED, TURN_EXPIRY_MARGIN_S, TURN_REFRESH_RETRY_S, TURN_USER_AGENT,
 };
 
 const KEY_ID: &str = "fake-key-id-1453";
@@ -118,6 +118,35 @@ fn an_absent_or_open_key_file_leaves_turn_off_with_a_named_reason() {
     // systemd's credential copy is 0400.
     write_key_file(&missing, &key_text(), 0o400);
     assert!(load_turn_key(&missing).is_ok());
+}
+
+#[test]
+fn the_systemd_credential_copy_loads_at_systemds_own_mode_0440() {
+    // Live strih-snv 18.10.2026: systemd exposes a LoadCredential= copy as mode 0440 inside the
+    // unit's 0500 credentials directory, and the hub refused it ("readable by group/others (mode
+    // 440)"), so TURN stayed off. A copy in the credentials directory may be group-readable; an
+    // other-readable one, and any group-readable file outside it, stay refused.
+    let tmp = scratch();
+    let creds = tmp.path().join("creds");
+    std::fs::create_dir(&creds).unwrap();
+    let cred = creds.join(TURN_CONFIG_CRED);
+    write_key_file(&cred, &key_text(), 0o440);
+    let dir = creds.to_str().unwrap();
+    assert_eq!(load_turn_key_at(&cred, Some(dir)).unwrap().key_id, KEY_ID);
+
+    std::fs::remove_file(&cred).unwrap();
+    write_key_file(&cred, &key_text(), 0o444);
+    let err = load_turn_key_at(&cred, Some(dir)).expect_err("other-readable credential copy");
+    assert!(err.contains("mode 444"), "{err}");
+
+    let outside = tmp.path().join("turn.toml");
+    write_key_file(&outside, &key_text(), 0o440);
+    let err =
+        load_turn_key_at(&outside, Some(dir)).expect_err("group-readable outside the creds dir");
+    assert!(
+        err.contains("mode 440") && err.contains("chmod 600"),
+        "{err}"
+    );
 }
 
 #[test]
