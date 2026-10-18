@@ -488,3 +488,17 @@ fn the_phone_log_names_both_client_headers_quoted() {
     h.insert("cf-connecting-ip", "x".repeat(300).parse().unwrap());
     assert!(phone_peer(&h).len() < 120, "a long header is cut");
 }
+
+#[test]
+fn the_cap_warning_fires_once_per_episode() {
+    let relay = JanusWsRelay::new("ws://127.0.0.1:8188/janus", ROOM);
+    assert!(!relay.mark_free(), "nothing was full yet");
+    assert!(relay.mark_full(), "the first refusal starts an episode");
+    assert!(
+        !relay.mark_full(),
+        "later refusals of the same episode stay quiet"
+    );
+    assert!(relay.mark_free(), "the next reservation ends it");
+    assert!(!relay.mark_free());
+    assert!(relay.mark_full(), "a new episode warns again");
+}

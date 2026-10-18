@@ -294,13 +294,26 @@ fn the_guard_reads_a_frame_the_way_janus_does() {
             r#"{{"janus":"message","transaction":"t","session_id":1,"handle_id":2,"body":{body}}}"#
         )
     };
-    // An escaped key is the same key.
-    refused(&frame(
-        r#"{"request":"join","room":1000,"rtp":{"ip":"203.0.113.7","port":9}}"#,
-    ));
-    refused(&frame(
-        r#"{"request":"join","room":1000,"rtp":{"ip":"203.0.113.7","port":9}}"#,
-    ));
+    // An escaped key or value is the same key or value once decoded (JSON \uXXXX escapes). The
+    // escapes are written with an escaped backslash so no tool decodes them on the way in; the
+    // asserts prove the frame text really carries them.
+    let escaped_key = frame(
+        "{\"request\":\"join\",\"room\":1000,\"r\\u0074p\":{\"ip\":\"203.0.113.7\",\"port\":9}}",
+    );
+    assert!(escaped_key.contains("r\\u0074p"), "{escaped_key}");
+    refused(&escaped_key);
+    let escaped_request = frame(
+        "{\"request\":\"j\\u006fin\",\"room\":1000,\"rtp\":{\"ip\":\"203.0.113.7\",\"port\":9}}",
+    );
+    assert!(escaped_request.contains("j\\u006fin"), "{escaped_request}");
+    refused(&escaped_request);
+    let escaped_join = frame("{\"request\":\"j\\u006fin\",\"room\":1000}");
+    assert!(escaped_join.contains("j\\u006fin"), "{escaped_join}");
+    assert_eq!(
+        check_client_frame(&escaped_join, ROOM),
+        Verdict::Forward,
+        "an escaped plain join is read as a join, as Janus reads it"
+    );
     // Duplicate keys: the LAST one decides, for the guard as for Janus.
     refused(&frame(
         r#"{"request":"join","room":1000,"request":"rtp_forward"}"#,
