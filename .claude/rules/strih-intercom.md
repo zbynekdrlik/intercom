@@ -733,8 +733,9 @@ phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ 
 ```
 
 The hub sends the phones' N-1 mix INTO the room as PCMU and receives the room mix minus itself (=
-the phones' mics), feeding the existing engine unchanged. Janus's HTTP API stays loopback (:8088);
-only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss on the box).
+the phones' mics), feeding the existing engine unchanged. Janus's HTTP API stays loopback (:8088).
+Since issue 1453 the WS transport is loopback-only too: phones reach it through the hub's `/janus`
+allowlist relay behind the box's own nginx (`.claude/rules/strih-https.md`).
 
 ### The plain-RTP participant contract (pinned to the Janus AudioBridge docs)
 
