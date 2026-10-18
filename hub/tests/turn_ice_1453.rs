@@ -483,22 +483,23 @@ async fn without_a_back_off_every_request_tries_again() {
 
 #[tokio::test]
 async fn a_failed_renewal_serves_the_unexpired_set_and_backs_off() {
-    // ttl 3 s: the set counts as stale after 2 s, expires at 3 s (margin 0 for so short a ttl).
+    // ttl 6 s: the set counts as stale after 4 s, expires at 6 s (margin 0 for so short a ttl);
+    // the ~1.9 s between the first sleep and the expiry leaves a slow CI runner room.
     let (base, fake) = fake_cloudflare(StatusCode::CREATED).await;
-    let m = TurnMinter::new(key(), &base, 3).unwrap();
+    let m = TurnMinter::new(key(), &base, 6).unwrap();
     let (first, _) = m.current().await.unwrap();
     assert_eq!(hits(&fake), 1);
-    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    tokio::time::sleep(Duration::from_millis(4_100)).await;
     fake.status
         .store(StatusCode::FORBIDDEN.as_u16(), Ordering::SeqCst);
     let (second, left) = m.current().await.expect("the cached set while it lives");
     assert_eq!(hits(&fake), 2, "the stale set was renewed, and that failed");
     assert_eq!(second, first);
-    assert!(left <= 1, "left {left}");
+    assert!(left <= 2, "left {left}");
     let (third, _) = m.current().await.expect("still the cached set");
     assert_eq!(third, first);
     assert_eq!(hits(&fake), 2, "within the back-off no new attempt");
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
     assert_eq!(
         m.current().await.unwrap_err(),
         TurnError::Upstream("HTTP 403: {\"error\":\"denied\"}".into()),
