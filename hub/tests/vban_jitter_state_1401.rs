@@ -203,6 +203,25 @@ fn the_mix_threads_class_shows_on_api_state_once_the_daemon_sets_it() {
     assert_eq!(v["mix_thread_sched"], "SCHED_FIFO 10");
 }
 
+/// Issue 1401, design 6265012279: the hub's memory lock is on `/api/state` (verify-strih item 16
+/// FAILs a running hub that reads false); the pure snapshot has no process and omits it.
+#[test]
+fn the_memory_lock_shows_on_api_state_once_the_daemon_sets_it() {
+    let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
+    let mut hs = HubState::snapshot(&matrix(), "v", &stats);
+    let v = serde_json::to_value(&hs).unwrap();
+    assert!(
+        v.get("memory_locked").is_none(),
+        "the pure snapshot has no process: {v}"
+    );
+    hs.memory_locked = Some(true);
+    let v = serde_json::to_value(&hs).unwrap();
+    assert_eq!(v["memory_locked"], true);
+    hs.memory_locked = Some(false);
+    let v = serde_json::to_value(&hs).unwrap();
+    assert_eq!(v["memory_locked"], false, "a refused lock reads false: {v}");
+}
+
 #[test]
 fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
     let program = JitterFacet::from(NetworkFillStats {
