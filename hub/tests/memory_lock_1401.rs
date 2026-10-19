@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::thread;
 
 use intercom_hub::mix_thread::{
-    apply_memory_lock, prefault_stack, MIX_STACK_PREFAULT_BYTES, MIX_THREAD_NAME,
+    apply_memory_lock, memlock_limit_check, prefault_stack, MIX_STACK_PREFAULT_BYTES,
+    MIX_THREAD_NAME,
 };
 
 fn read(rel: &str) -> String {
@@ -135,9 +136,43 @@ fn main_locks_the_memory_before_it_spawns_the_hub_mix_thread() {
         .find("spawn_mix_thread(move || run_block_loop(block_loop))")
         .expect("the hub-mix spawn");
     assert!(lock < spawn, "the memory is locked before hub-mix starts");
+    // Locked before the live channel is seeded, so /api/state never omits the field (review 1).
+    let seed = src
+        .find("tokio::sync::watch::channel(")
+        .expect("the live channel seed");
+    assert!(lock < seed, "the lock comes before the seed snapshot");
+    // The real outcome travels all the way to /api/state, never a constant.
+    for wire in [
+        "initial.memory_locked = Some(memory_lock.locked);",
+        "memory_locked: memory_lock.locked,",
+        "snapshot.memory_locked = Some(memory_locked);",
+    ] {
+        assert_eq!(src.matches(wire).count(), 1, "{wire}");
+    }
+}
+
+#[test]
+fn a_finite_memlock_limit_never_takes_the_future_lock() {
+    // MCL_FUTURE under a finite RLIMIT_MEMLOCK would make a LATER allocation past the limit fail
+    // (an abort), so "never fatal" holds only when the lock is skipped there (review 1).
+    assert_eq!(memlock_limit_check(None, false), Ok(()), "infinity locks");
+    assert_eq!(memlock_limit_check(None, true), Ok(()));
+    assert_eq!(
+        memlock_limit_check(Some(8 * 1024 * 1024), true),
+        Ok(()),
+        "root (CAP_IPC_LOCK) is not held to the limit"
+    );
+    let refused = memlock_limit_check(Some(8_388_608), false).expect_err("a finite limit");
+    assert!(refused.contains("8388608"), "it names the limit: {refused}");
+    assert!(refused.contains("infinity"), "{refused}");
+    // And the decision turns that refusal into the one WARNING, unlocked.
+    let lock = apply_memory_lock(|| Err(io::Error::other(refused.clone())));
+    assert!(!lock.locked);
+    assert!(lock.message.contains("8388608"), "{}", lock.message);
     assert!(
-        src.contains("snapshot.memory_locked = Some("),
-        "the outcome is published on /api/state"
+        lock.message.contains("LimitMEMLOCK=infinity"),
+        "{}",
+        lock.message
     );
 }
 

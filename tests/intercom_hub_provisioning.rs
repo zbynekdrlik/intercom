@@ -175,8 +175,10 @@ fn the_real_hub_unit_grants_the_memory_lock_and_no_dropin_takes_it_back() {
         );
     }
     let libs = std::fs::read_dir(root().join("scripts/lib")).expect("scripts/lib");
-    for entry in libs {
-        let path = entry.expect("a lib entry").path();
+    let mut paths: Vec<PathBuf> = libs.map(|e| e.expect("a lib entry").path()).collect();
+    // setup-strih.sh writes the hub's drop-ins (step 12 / 13 / 4b), so it is scanned too.
+    paths.push(root().join("scripts/setup-strih.sh"));
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("sh") {
             continue;
         }
