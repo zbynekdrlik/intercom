@@ -94,7 +94,7 @@ fn an_error_without_a_known_errno_still_reads_and_never_claims_a_lock() {
 fn the_stack_prefault_is_a_fixed_whole_page_region_well_inside_a_thread_stack() {
     const PAGE: usize = 4096;
     const { assert!(MIX_STACK_PREFAULT_BYTES > 0) };
-    const { assert!(MIX_STACK_PREFAULT_BYTES % PAGE == 0) };
+    const { assert!(MIX_STACK_PREFAULT_BYTES.is_multiple_of(PAGE)) };
     // std's default thread stack is 2 MiB; the pre-fault stays at half of it or less, so it can
     // never overflow the hub-mix stack.
     const { assert!(MIX_STACK_PREFAULT_BYTES <= 1024 * 1024) };
