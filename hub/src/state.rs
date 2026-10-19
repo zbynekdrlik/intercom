@@ -202,6 +202,12 @@ pub struct HubState {
     /// here without ssh. Set by the daemon; omitted from the pure snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix_thread_sched: Option<String>,
+    /// Whether the hub locked its memory in RAM before it started the hub-mix thread (issue 1401,
+    /// design 6265012279: `mlockall`, granted by the unit's `LimitMEMLOCK=infinity`). `false` = the
+    /// hub runs unlocked and its real-time thread can stall in a page fault under memory pressure
+    /// (verify-strih item 16 FAILs it). Set by the daemon; omitted from the pure snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_locked: Option<bool>,
 }
 
 impl HubState {
@@ -252,6 +258,7 @@ impl HubState {
             caught_up_ticks: 0,
             lost_ticks: 0,
             mix_thread_sched: None,
+            memory_locked: None,
         }
     }
 

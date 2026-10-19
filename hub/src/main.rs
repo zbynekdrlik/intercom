@@ -30,7 +30,10 @@ use intercom_hub::local_audio::{
     LocalSourceConfig,
 };
 use intercom_hub::matrix::Matrix;
-use intercom_hub::mix_thread::{current_sched_class, spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
+use intercom_hub::mix_thread::{
+    apply_memory_lock, current_sched_class, lock_all_memory, spawn_mix_thread, MonoClock,
+    MIX_THREAD_NAME,
+};
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
@@ -306,6 +309,9 @@ async fn main() -> Result<()> {
     // The block loop runs on its own real-time OS thread, "hub-mix" (issue 1401, design
     // 5980775411): SCHED_FIFO 10 + absolute-deadline sleeps, so contention on the box no longer
     // makes it miss ticks; tokio keeps HTTP, the Janus session and the VBAN receive.
+    // Its memory is locked in RAM first, so hub-mix never stalls in a page fault (issue 1401).
+    let memory_lock = apply_memory_lock(lock_all_memory);
+    memory_lock.log();
     let block_loop = BlockLoop {
         matrix: matrix.clone(),
         engine,
@@ -319,6 +325,7 @@ async fn main() -> Result<()> {
         local_audio,
         video_for_loop: video_state.clone(),
         live_tx,
+        memory_locked: memory_lock.locked,
     };
     let mix = spawn_mix_thread(move || run_block_loop(block_loop))
         .context("spawn the hub-mix block loop thread")?;
@@ -431,6 +438,8 @@ struct BlockLoop {
     local_audio: LocalAudioWiring,
     video_for_loop: Option<Arc<intercom_hub::ndi_video::VideoState>>,
     live_tx: tokio::sync::watch::Sender<Arc<HubState>>,
+    /// Whether `main` locked the process memory before the spawn (`/api/state` `memory_locked`).
+    memory_locked: bool,
 }
 
 /// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
@@ -456,6 +465,7 @@ fn run_block_loop(bl: BlockLoop) {
         local_audio,
         video_for_loop,
         live_tx,
+        memory_locked,
     } = bl;
     let LocalAudioWiring {
         program_sink_tx,
@@ -634,6 +644,7 @@ fn run_block_loop(bl: BlockLoop) {
                 snapshot.caught_up_ticks = caught_up_total;
                 snapshot.lost_ticks = lost_total;
                 snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
+                snapshot.memory_locked = Some(memory_locked);
                 // Attach the Interkom picture facet (M3c) when the video leg is running.
                 if let Some(vs) = &video_for_loop {
                     let now_wall = std::time::SystemTime::now()

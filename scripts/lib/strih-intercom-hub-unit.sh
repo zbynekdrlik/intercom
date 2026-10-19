@@ -3,7 +3,8 @@
 # the scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak.
 #
 # scripts/lib/strih-intercom-hub-unit.sh -- issue 1412: the intercom-hub unit per box ROLE, and verify
-# item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs.
+# item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs; issue
+# 1401: verify item 16's grade of the hub's memory lock.
 #
 # The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
@@ -178,5 +179,48 @@ for p in ps:
       *) bad "(hdmi-leg) grading the hub state failed: ${row}" ;;
     esac
   done <<<"$rows"
+  return 0
+}
+
+# strih_intercom_hub_memlock_grade STATE_URL -> verify item 16's memory-lock row (issue 1401, design
+# 6265012279) through the caller's ok / bad / note. On 14.10.2026 stream-pp ran out of memory and the
+# unlocked hub's SCHED_FIFO hub-mix thread stalled in page faults (711 lost ticks in 6 s). The hub locks
+# its memory before it starts hub-mix and publishes the outcome as `memory_locked` on /api/state: a JSON
+# true PASSes; false FAILs (the running hub's unit has no LimitMEMLOCK=infinity, or the hub was not
+# restarted since setup-strih step 13 installed it); a hub that does not report it FAILs (a binary from
+# before the lock); an unreadable hub is a NOTE (the item's unit rows grade a dead hub).
+# STRIH_HUB_MEMLOCK_STATE_FILE reads the JSON from a file instead (the test seam). Always rc 0.
+strih_intercom_hub_memlock_grade() {
+  local url="${1:?hub state url required}" json row
+  if [ -n "${STRIH_HUB_MEMLOCK_STATE_FILE:-}" ]; then
+    json="$(cat -- "$STRIH_HUB_MEMLOCK_STATE_FILE" 2>/dev/null || true)"
+  else
+    json="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$json" ]; then
+    note "(intercom-hub) the hub state at ${url} is not readable -- its memory lock is graded when the hub answers"
+    return 0
+  fi
+  row="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    state = json.load(sys.stdin)
+except Exception as e:
+    print("FAIL\tthe intercom hub state is not JSON (%s)" % e)
+    sys.exit(0)
+if not isinstance(state, dict):
+    print("FAIL\tthe intercom hub state is not a JSON object")
+elif "memory_locked" not in state:
+    print("FAIL\tthe running hub does not report memory_locked (a binary from before issue 1401) -- deploy the current intercom-hub and restart it")
+elif state["memory_locked"] is True:
+    print("OK\tmemory locked (mlockall): the hub-mix thread never waits on a page fault")
+else:
+    print("FAIL\tmemory NOT locked (memory_locked=%s): under memory pressure hub-mix stalls in page faults (issue 1401) -- the unit needs LimitMEMLOCK=infinity, then systemctl restart intercom-hub; journalctl -u intercom-hub names the errno" % json.dumps(state["memory_locked"]))
+' 2>&1 || true)"
+  case "$row" in
+    OK$'\t'*) ok "(intercom-hub) ${row#*$'\t'}" ;;
+    FAIL$'\t'*) bad "(intercom-hub) ${row#*$'\t'}" ;;
+    *) bad "(intercom-hub) grading the hub memory lock failed: ${row:-no output}" ;;
+  esac
   return 0
 }

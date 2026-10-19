@@ -33,6 +33,15 @@ NoNewPrivileges=true
 # (a hub test pins it). Without the grant the thread logs one warning and runs SCHED_OTHER. The
 # OBS boxes' "rtprio stays OFF" rule (issue 1357) is about OBS's render tick, not this daemon.
 LimitRTPRIO=10
+# issue 1401 (design 6265012279): on 14.10.2026 stream-pp ran out of memory, the hub's evicted code
+# pages stalled the SCHED_FIFO hub-mix thread in page faults (711 lost ticks in 6 s) and a page fault
+# in the hub invoked the OOM killer. The hub locks all its memory (mlockall MCL_CURRENT|MCL_FUTURE)
+# before it starts hub-mix; this grant lets a non-root hub do that (tens of MB on a 15 GB box: once
+# locked, every thread stack is resident whole).
+# Without it the hub logs one WARNING, runs unlocked and /api/state reads memory_locked: false.
+LimitMEMLOCK=infinity
+# The kernel's OOM killer picks a browser source or the control-room Chrome before the interkom.
+OOMScoreAdjust=-900
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
