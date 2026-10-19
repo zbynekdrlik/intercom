@@ -223,13 +223,13 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    // Lock the memory in RAM before hub-mix exists, so it never stalls in a page fault (issue 1401).
+    let memory_lock = apply_memory_lock(lock_all_memory);
+    memory_lock.log();
     // Seed the live channel so a client connecting before the first tick sees current state.
-    let initial = Arc::new(HubState::snapshot(
-        &matrix,
-        VERSION,
-        &vec![RuntimeStats::default(); n],
-    ));
-    let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+    let mut initial = HubState::snapshot(&matrix, VERSION, &vec![RuntimeStats::default(); n]);
+    initial.memory_locked = Some(memory_lock.locked);
+    let (live_tx, live_rx) = tokio::sync::watch::channel(Arc::new(initial));
     // The periodic status line is written here, on tokio, from every snapshot the block loop
     // publishes: a journal write can block, and the block loop runs on the real-time hub-mix
     // thread (issue 1401).
@@ -309,9 +309,6 @@ async fn main() -> Result<()> {
     // The block loop runs on its own real-time OS thread, "hub-mix" (issue 1401, design
     // 5980775411): SCHED_FIFO 10 + absolute-deadline sleeps, so contention on the box no longer
     // makes it miss ticks; tokio keeps HTTP, the Janus session and the VBAN receive.
-    // Its memory is locked in RAM first, so hub-mix never stalls in a page fault (issue 1401).
-    let memory_lock = apply_memory_lock(lock_all_memory);
-    memory_lock.log();
     let block_loop = BlockLoop {
         matrix: matrix.clone(),
         engine,

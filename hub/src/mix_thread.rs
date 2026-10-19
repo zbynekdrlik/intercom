@@ -23,8 +23,9 @@
 //!   spawns this thread, so this thread's stack and every later allocation are locked too, and the
 //!   thread touches [`MIX_STACK_PREFAULT_BYTES`] of its stack before its first block. The unit grants
 //!   it with `LimitMEMLOCK=infinity` (and `OOMScoreAdjust=-900` keeps the hub last in the OOM
-//!   killer's order). Refused: ONE warning naming the errno, the hub runs unlocked as before, and
-//!   `/api/state` reads `memory_locked: false`.
+//!   killer's order). Refused (also on purpose under a finite `RLIMIT_MEMLOCK`, where `MCL_FUTURE`
+//!   would make a later allocation fail, [`memlock_limit_check`]): ONE warning naming the reason,
+//!   the hub runs unlocked as before, and `/api/state` reads `memory_locked: false`.
 //!
 //! The rtprio-off rule of the OBS boxes (issue 1357) is about OBS's render tick and the NDI threads
 //! that inherited its SCHED_FIFO. It does not apply here: the hub is not OBS, this one thread
@@ -156,9 +157,35 @@ impl MemoryLock {
     }
 }
 
-/// Lock every current and future page of the process in RAM: `mlockall(MCL_CURRENT | MCL_FUTURE)`.
-/// Non-root needs the unit's `LimitMEMLOCK=infinity` (else ENOMEM).
+/// May the hub take `MCL_FUTURE` under this `RLIMIT_MEMLOCK` (soft limit; `None` = infinity)?
+/// Under a finite limit every LATER mapping counts against it, so an allocation past it fails (an
+/// abort in Rust) long after a lock that succeeded: the lock is refused there, with the reason, and
+/// the hub runs unlocked. Root (CAP_IPC_LOCK) is not held to the limit.
+pub fn memlock_limit_check(limit: Option<libc::rlim_t>, is_root: bool) -> Result<(), String> {
+    match limit {
+        Some(bytes) if !is_root => Err(format!(
+            "RLIMIT_MEMLOCK is {bytes} bytes, not infinity: with MCL_FUTURE a later allocation \
+             past it would fail, so the lock is not taken"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Lock every current and future page of the process in RAM: `mlockall(MCL_CURRENT | MCL_FUTURE)`,
+/// only when [`memlock_limit_check`] allows it. Non-root needs the unit's `LimitMEMLOCK=infinity`.
 pub fn lock_all_memory() -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable rlimit that outlives the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let finite = (limit.rlim_cur != libc::RLIM_INFINITY).then_some(limit.rlim_cur);
+    // SAFETY: geteuid takes nothing and cannot fail.
+    let is_root = unsafe { libc::geteuid() } == 0;
+    memlock_limit_check(finite, is_root).map_err(io::Error::other)?;
     // SAFETY: mlockall takes only flags and touches no memory of ours.
     let rc = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
     if rc == 0 {

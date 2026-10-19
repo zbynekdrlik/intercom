@@ -59,19 +59,30 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   6264952452). On 14.10.2026 stream-pp ran out of memory with no swap: the unlocked hub's code pages
   were evicted and hub-mix stalled in page faults, 711 lost ticks in 6 s, and a page fault in the hub
   invoked the second OOM kill. SCHED_FIFO cannot help a thread blocked on a page fault.
-  - `main` calls `mix_thread::apply_memory_lock(lock_all_memory)` right before the hub-mix spawn:
+  - `main` calls `mix_thread::apply_memory_lock(lock_all_memory)` before it seeds the live
+    channel (so the seed snapshot already carries `memory_locked`) and so before the hub-mix spawn:
     `mlockall(MCL_CURRENT | MCL_FUTURE)`, so the hub-mix stack and every later allocation are
     locked too. `MemoryLock::log` writes ONE line: info `memory locked`, or a WARNING naming the
     errno by name and number (`ENOMEM` = no `LimitMEMLOCK=infinity`) and the missing grant. Never
     fatal: a refused lock runs the hub as before.
+  - **Never `MCL_FUTURE` under a finite `RLIMIT_MEMLOCK`** (review 1): every LATER mapping then
+    counts against the limit, so an allocation past it fails long after a lock that succeeded (an
+    abort in Rust, a failed thread spawn). `lock_all_memory` reads the soft limit first and the pure
+    `memlock_limit_check` refuses the lock unless it is infinity (or the hub runs as root), with a
+    reason naming the limit in the same WARNING.
   - hub-mix touches `MIX_STACK_PREFAULT_BYTES` (256 KiB, whole pages) of its own stack right after
     its SCHED_FIFO request and before the block loop (`prefault_stack`).
   - The unit: `LimitMEMLOCK=infinity` + `OOMScoreAdjust=-900` in `[Service]`; no provisioning
     drop-in may set either (`tests/intercom_hub_provisioning.rs` scans every `scripts/lib/*.sh` for a
     line-leading directive).
   - Locked = resident whole: every thread stack (tokio workers, the blocking pool, the NDI and pw-cat
-    threads) counts at its full size, so `VmLck` (and RSS) is tens of MB, not the ~1.5-17 MB the hub
-    showed unlocked. Children (pw-cat, aplay) do not inherit the lock (fork + exec).
+    threads) is faulted in at its full size, so RSS is tens of MB, not the ~1.5-17 MB the hub showed
+    unlocked. `VmLck` counts every `VM_LOCKED` mapping, also glibc's reserved-but-untouched
+    (PROT_NONE) malloc arenas, so it can read far MORE than RSS: grade `VmLck >= VmRSS` and
+    `VmSwap 0 kB`, never "VmLck about equal to RSS" or a fixed size.
+  - Known limit: the children (pw-cat, aplay, `timeout`) do not inherit the lock (fork + exec) but
+    DO inherit `oom_score_adj` -900, so an egress player can still stall in a page fault, and a
+    leaking child is shielded from the OOM killer too.
   - `/api/state` `memory_locked` (true / false; omitted from the pure snapshot). verify-strih item 16
     grades it through `strih_intercom_hub_memlock_grade` (`scripts/lib/strih-intercom-hub-unit.sh`,
     seam `STRIH_HUB_MEMLOCK_STATE_FILE`): a JSON true PASSes; false FAILs naming the grant and the
@@ -203,7 +214,8 @@ minute.
 - The memory lock (design 6265012279): after reinstalling the unit + `daemon-reload` + a hub
   restart, `systemctl show intercom-hub -p LimitMEMLOCK -p OOMScoreAdjust` reads `infinity` / `-900`,
   `/api/state` `memory_locked: true`, the journal `memory locked` (never the `mlockall ... refused`
-  WARNING), `grep -E 'VmLck|VmRSS' /proc/$(pidof intercom-hub)/status` shows VmLck ~= VmRSS, and
+  WARNING), `grep -E 'VmLck|VmRSS|VmSwap' /proc/$(pidof intercom-hub)/status` shows VmLck >= VmRSS
+  and VmSwap 0 kB (VmLck can be much larger, see above), and
   `cat /proc/$(pidof intercom-hub)/oom_score_adj` = -900.
 - The 13:58 stopgap (`chrt -f -p 10` on 22 hub threads, comment 5980789088) ends with that restart:
   the tokio workers are SCHED_OTHER again by design.
