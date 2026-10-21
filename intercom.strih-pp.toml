@@ -142,19 +142,21 @@ in_ch = 2
 dst = "vestibule"
 out_ch = 2
 
-# --- the program to the cutters' ears, unity (issue 1457: every level at 0 dB)
+# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026: kept)
 
 [[point]]
 src = "lv1"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
+gain_db = -8.0
 
 [[point]]
 src = "lv1"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
+gain_db = -8.0
 
 [[point]]
 src = "cam1"
