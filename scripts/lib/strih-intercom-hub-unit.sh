@@ -224,3 +224,123 @@ else:
   esac
   return 0
 }
+
+# --- issue 1457 (owner 21.10.2026): every hub level at 0 dB -----------------------------------------------
+# "vsade by to malo byt na 0dB ... tak nie ma to byt na 0db a ja pridam strihaca na zvukovke!!!". The routing
+# points are unity in the TOML; these two set and grade the PipeWire nodes the hub plays to or records from
+# (each pipewire_target / pipewire_source of the box's routing TOML) at volume 1.0, unmuted, in the operator's
+# session. strih-pp's cutters' ears (the Yamaha MG-XU output) sat at 0.40 on 21.10.2026. WirePlumber keeps a
+# set volume across restarts. Seam: STRIH_HUB_PW_EUID (the effective uid, 0 = run the tools through sudo -u).
+
+# strih_intercom_hub_pw_nodes TOML -> the PipeWire node names of the routing TOML, sorted, one per line.
+strih_intercom_hub_pw_nodes() {
+  python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        m = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+names = {p[k] for p in m.get("participant", []) for k in ("pipewire_target", "pipewire_source") if p.get(k)}
+print("\n".join(sorted(names)))
+' "$1" 2>/dev/null || true
+}
+
+# _strih_hub_pw USER CMD... -> CMD in USER's PipeWire session (XDG_RUNTIME_DIR), bounded.
+_strih_hub_pw() {
+  local user="$1" uid
+  shift
+  uid="$(id -u "$user" 2>/dev/null)" || return 1
+  if [ "${STRIH_HUB_PW_EUID:-$(id -u)}" = 0 ]; then
+    sudo -u "$user" env XDG_RUNTIME_DIR="/run/user/${uid}" timeout 10 "$@"
+  else
+    env XDG_RUNTIME_DIR="/run/user/${uid}" timeout 10 "$@"
+  fi
+}
+
+# strih_intercom_hub_pw_levels USER TOML -> one `name|id|volume|muted` line per node of TOML (id, volume and
+# muted empty for a node the session does not list); rc 1 when the session does not answer pw-dump.
+strih_intercom_hub_pw_levels() {
+  local user="$1" toml="$2" nodes dump name id v
+  nodes="$(strih_intercom_hub_pw_nodes "$toml")"
+  [ -n "$nodes" ] || return 0
+  dump="$(_strih_hub_pw "$user" pw-dump 2>/dev/null)" || return 1
+  [ -n "$dump" ] || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    id="$(printf '%s' "$dump" | python3 -c '
+import json, sys
+try:
+    objs = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in objs:
+    if o.get("type") == "PipeWire:Interface:Node" and ((o.get("info") or {}).get("props") or {}).get("node.name") == sys.argv[1]:
+        print(o.get("id"))
+        break
+' "$name" 2>/dev/null || true)"
+    if [ -z "$id" ]; then
+      printf '%s|||\n' "$name"
+      continue
+    fi
+    v="$(_strih_hub_pw "$user" wpctl get-volume "$id" 2>/dev/null || true)"
+    printf '%s|%s|%s|%s\n' "$name" "$id" "$(awk '$1 == "Volume:" {print $2; exit}' <<<"$v")" \
+      "$(case "$v" in *MUTED*) echo muted ;; esac)"
+  done <<<"$nodes"
+}
+
+# strih_intercom_hub_pw_unity_apply USER TOML -> setup-strih step 13: every node of TOML to volume 1.0,
+# unmuted. One line per node; WARN-only, always rc 0 (verify item 9 FAILs a node left off unity).
+strih_intercom_hub_pw_unity_apply() {
+  local user="$1" toml="$2" levels name id vol muted
+  if ! levels="$(strih_intercom_hub_pw_levels "$user" "$toml")"; then
+    echo "  WARN: the PipeWire session of ${user} does not answer -- the hub levels are set at the next setup-strih run (verify item 9 grades them)"
+    return 0
+  fi
+  while IFS='|' read -r name id vol muted; do
+    [ -n "$name" ] || continue
+    if [ -z "$id" ]; then
+      echo "  hub level: ${name} is not in the PipeWire session (device not connected?) -- set when it is"
+      continue
+    fi
+    if [ "$vol" != 1.00 ]; then
+      if _strih_hub_pw "$user" wpctl set-volume "$id" 1.0 >/dev/null 2>&1; then
+        echo "  hub level: ${name} volume ${vol:-?} -> 1.00 (0 dB, issue 1457)"
+      else
+        echo "  WARN: could not set ${name} to volume 1.0 -- verify item 9 FAILs it until it is"
+      fi
+    fi
+    if [ "$muted" = muted ]; then
+      if _strih_hub_pw "$user" wpctl set-mute "$id" 0 >/dev/null 2>&1; then
+        echo "  hub level: ${name} unmuted"
+      else
+        echo "  WARN: could not unmute ${name} -- verify item 9 FAILs it until it is"
+      fi
+    fi
+  done <<<"$levels"
+  return 0
+}
+
+# strih_intercom_hub_pw_unity_grade USER TOML -> verify item 9, one (hub-level) row per node: PASS at 1.00
+# unmuted, FAIL off unity or muted, NOTE for a node the session does not list; ONE NOTE when the session
+# does not answer. Always rc 0.
+strih_intercom_hub_pw_unity_grade() {
+  local user="$1" toml="$2" levels name id vol muted
+  if ! levels="$(strih_intercom_hub_pw_levels "$user" "$toml")"; then
+    note "(hub-level) the PipeWire session of ${user} does not answer -- the hub node levels are graded when it does"
+    return 0
+  fi
+  while IFS='|' read -r name id vol muted; do
+    [ -n "$name" ] || continue
+    if [ -z "$id" ]; then
+      note "(hub-level) ${name} is not in the PipeWire session (device not connected?)"
+    elif [ "$muted" = muted ]; then
+      bad "(hub-level) ${name} is muted -- re-run setup-strih.sh step 13 (issue 1457: every hub level at 0 dB)"
+    elif [ "$vol" != 1.00 ]; then
+      bad "(hub-level) ${name} volume ${vol:-unread}, want 1.00 (0 dB) -- re-run setup-strih.sh step 13 (issue 1457)"
+    else
+      ok "(hub-level) ${name} volume 1.00 (0 dB)"
+    fi
+  done <<<"$levels"
+  return 0
+}

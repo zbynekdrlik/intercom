@@ -142,21 +142,19 @@ in_ch = 2
 dst = "vestibule"
 out_ch = 2
 
-# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points)
+# --- the program to the cutters' ears, unity (issue 1457: every level at 0 dB)
 
 [[point]]
 src = "lv1"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
-gain_db = -8.0
 
 [[point]]
 src = "lv1"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-gain_db = -8.0
 
 [[point]]
 src = "cam1"
@@ -398,120 +396,105 @@ in_ch = 2
 dst = "phones"
 out_ch = 2
 
-# --- the cutters talk to every camera and the phones, on both ears (+6 dB into the cameras: owner
-# 14.10.2026, "kameramani pocuju potichu strihaca"; the phones stay at 0 dB)
+# --- the cutters talk to every camera and the phones, on both ears, unity. issue 1457 (owner
+# 21.10.2026): every level at 0 dB, the cutter is raised on the sound card -- "tak nie ma to byt na 0db a ja
+# pridam strihaca na zvukovke!!!" (the +6 dB into the cameras of 14.10.2026 made the phones 6 dB quieter)
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam1"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam1"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam4"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam4"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam6"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam6"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 1
 dst = "cam7"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 1
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
 in_ch = 2
 dst = "cam7"
 out_ch = 2
-gain_db = 6.0
 
 [[point]]
 src = "cutters"
