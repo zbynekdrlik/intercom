@@ -224,3 +224,68 @@ else:
   esac
   return 0
 }
+
+# --- issue 1439: the stream role runs no intercom hub ------------------------------------------------
+# Design revision 6338127636 (owner 22.10.2026: "naco tam je dalsia vrstva?"): on the stream role the
+# console's VBAN program goes straight into the OBS obs-vban source, so setup-strih step 13 installs no
+# hub there and moves a hub an earlier run left behind aside (never deleted: the files stay under
+# STRIH_HUB_ASIDE_DIR/<UTC stamp>/<their absolute path>), and verify item 16 grades "no hub". The paths
+# are seams for the tests (STRIH_HUB_UNIT_FILE / _DROPIN_DIR / _BIN / _CONFIG_DIR / _ASIDE_DIR).
+
+# strih_intercom_hub_leftovers -> the hub files present on this box, one path per line (nothing = none).
+strih_intercom_hub_leftovers() {
+  local p
+  for p in "${STRIH_HUB_UNIT_FILE:-/etc/systemd/system/intercom-hub.service}" \
+           "${STRIH_HUB_DROPIN_DIR:-/etc/systemd/system/intercom-hub.service.d}" \
+           "${STRIH_HUB_BIN:-/usr/local/bin/intercom-hub}" "${STRIH_HUB_CONFIG_DIR:-/etc/intercom-hub}"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi
+  done
+}
+
+# strih_intercom_hub_remove -> setup-strih step 13 on a box that runs no hub: stop + disable a running /
+# enabled hub (BEFORE its unit file moves, so the WantedBy link goes with it), then move every hub file
+# aside, then daemon-reload. Idempotent: a box without a hub prints one line and touches nothing. rc 1 +
+# a stderr line when a stop / disable / move fails (nothing after it is done).
+strih_intercom_hub_remove() {
+  local aside="${STRIH_HUB_ASIDE_DIR:-/var/lib/camera-box/intercom-hub-removed}" stamp p dest moved=0
+  if systemctl is-active --quiet intercom-hub 2>/dev/null; then
+    systemctl stop intercom-hub || { echo "strih-intercom-hub-unit: could not stop intercom-hub.service" >&2; return 1; }
+    echo "  stopped intercom-hub.service (the stream role runs no hub, issue 1439)"
+  fi
+  if systemctl is-enabled --quiet intercom-hub 2>/dev/null; then
+    systemctl disable intercom-hub || { echo "strih-intercom-hub-unit: could not disable intercom-hub.service" >&2; return 1; }
+    echo "  disabled intercom-hub.service"
+  fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    dest="${aside%/}/${stamp}${p}"
+    if ! { mkdir -p "$(dirname "$dest")" && mv -T -- "$p" "$dest"; }; then
+      echo "strih-intercom-hub-unit: could not move ${p} aside to ${dest}" >&2; return 1
+    fi
+    echo "  moved ${p} aside to ${dest}"
+    moved=1
+  done < <(strih_intercom_hub_leftovers)
+  if [ "$moved" = 1 ]; then
+    systemctl daemon-reload || { echo "strih-intercom-hub-unit: daemon-reload failed after moving the hub aside" >&2; return 1; }
+  else
+    echo "  no intercom hub on this box -- nothing to remove"
+  fi
+  return 0
+}
+
+# strih_intercom_hub_absent_grade WHY -> verify item 16 on a box that runs no hub (WHY = the step gate's
+# reason) through the caller's ok / bad: PASS when no hub file is left and the unit is not running, FAIL
+# naming what is left (a running hub keeps the console's UDP port from the OBS vban source). Always rc 0.
+strih_intercom_hub_absent_grade() {
+  local why="${1-}" left state
+  left="$(strih_intercom_hub_leftovers | tr '\n' ' ')"
+  state="$(systemctl is-active intercom-hub 2>/dev/null || true)"
+  case "$state" in active|activating|reloading|deactivating) left="${left}(intercom-hub.service ${state}) " ;; esac
+  if [ -z "$left" ]; then
+    ok "(intercom-hub) no intercom hub on this box (${why})"
+  else
+    bad "(intercom-hub) this box runs no hub (${why}), but ${left% } is still there -- re-run setup-strih.sh step 13, then restart OBS (issue 1439)"
+  fi
+  return 0
+}
