@@ -247,11 +247,15 @@ strih_intercom_hub_leftovers() {
 # aside, then daemon-reload. Idempotent: a box without a hub prints one line and touches nothing. rc 1 +
 # a stderr line when a stop / disable / move fails (nothing after it is done).
 strih_intercom_hub_remove() {
-  local aside="${STRIH_HUB_ASIDE_DIR:-/var/lib/camera-box/intercom-hub-removed}" stamp p dest moved=0
-  if systemctl is-active --quiet intercom-hub 2>/dev/null; then
-    systemctl stop intercom-hub || { echo "strih-intercom-hub-unit: could not stop intercom-hub.service" >&2; return 1; }
-    echo "  stopped intercom-hub.service (the stream role runs no hub, issue 1439)"
-  fi
+  local aside="${STRIH_HUB_ASIDE_DIR:-/var/lib/camera-box/intercom-hub-removed}" stamp p dest moved=0 state
+  # Every state with a job or a process is stopped, not only "active" (`is-active --quiet`): a restart
+  # loop reads activating, and a hub still shutting down can hold the console's UDP port.
+  state="$(systemctl is-active intercom-hub 2>/dev/null || true)"
+  case "$state" in
+    active|activating|reloading|deactivating)
+      systemctl stop intercom-hub || { echo "strih-intercom-hub-unit: could not stop intercom-hub.service" >&2; return 1; }
+      echo "  stopped intercom-hub.service (${state}; the stream role runs no hub, issue 1439)" ;;
+  esac
   if systemctl is-enabled --quiet intercom-hub 2>/dev/null; then
     systemctl disable intercom-hub || { echo "strih-intercom-hub-unit: could not disable intercom-hub.service" >&2; return 1; }
     echo "  disabled intercom-hub.service"
