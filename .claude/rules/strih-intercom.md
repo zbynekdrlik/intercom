@@ -241,7 +241,7 @@ Step 12 installs the operator-session `strih-program` null sink
 (`~/.config/pipewire/pipewire.conf.d/strih-program.conf`) + the loopback republish source
 (`~/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf`, `strih_pipewire_program_loopback_conf`
 — see the follow-up above) + a WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz
-+ the **intercom-hub audio drop-in**. The old fail-loud
+(the **intercom-hub audio drop-in** is written by step 13 with the hub since issue 1439). The old fail-loud
 `STRIH_LX_AUDIO_WIRED` flag is REMOVED — `verify-strih.sh` derives the audio verdict
 (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture + hub program-rx,
 FOH-live level is a supervisor NOTE).
