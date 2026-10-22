@@ -83,9 +83,9 @@ pub fn encode_packet(block: &OutBlock<'_>) -> Result<Vec<u8>> {
     Ok(packet)
 }
 
-/// Decode a VBAN packet into planar PCM16 (`Pcm16` + `Float32` payloads supported; both are what
-/// the cambox may put on the wire) plus the header's sample rate in Hz (`0` for a reserved rate
-/// index — no rate, so the converter rejects it). The number of frames is derived from the actual
+/// Decode a VBAN packet into planar PCM16 (`Pcm16` + `Float32` payloads, what the cambox may put
+/// on the wire, and `Pcm24`, what mbc.lan sends, issue 1462) plus the header's sample rate in Hz
+/// (`0` for a reserved rate index — no rate, so the converter rejects it). The number of frames is derived from the actual
 /// payload length, so a short/long packet never panics. The samples are at the HEADER rate — the
 /// receive path runs them through [`crate::vban_rate::VbanRateConverter`] before they reach a
 /// 48 kHz jitter ring (issue 1345: a 96 kHz FOH stream overran the ring).
@@ -101,6 +101,13 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
             .iter()
             .map(|c| i16::from_le_bytes(*c))
             .collect(),
+        // issue 1462: mbc.lan sends 24-bit PCM. Keep the top 16 bits of each sign-extended sample.
+        c if c == VbanCodec::Pcm24 as u8 => payload
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 16) as i16)
+            .collect(),
         c if c == VbanCodec::Float32 as u8 => payload
             .as_chunks::<4>()
             .0
@@ -110,7 +117,7 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
                 (f * 32767.0).clamp(-32768.0, 32767.0) as i16
             })
             .collect(),
-        other => anyhow::bail!("unsupported VBAN codec 0x{other:02x} (only PCM16/Float32)"),
+        other => anyhow::bail!("unsupported VBAN codec 0x{other:02x} (only PCM16/PCM24/Float32)"),
     };
 
     let frames = interleaved.len().checked_div(n_ch).unwrap_or(0);
