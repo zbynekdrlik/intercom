@@ -49,11 +49,12 @@ adding/regenerating the matrix, never hand-add a self-route — it will fail to 
 (the checked-in live matrix). Slot roles are DERIVED from the XML's own attributes, not hard-coded:
 an active `VBANStreamOut` (`status=1`) makes a slot a `cambox` (cam1..7), else a `program_ref`
 (fohabl/lv1/mbc = the stream name minus `-strih`); `AMDevice` type 256/4/1 → cutters/speakers/line34;
-online VAIO1 → phones, VASIO8 → **program_out** (issue 1344 — was `program_monitor` in M1).
+online VAIO1 → phones; VASIO8 → NOTHING since issue 1439 phase 2 (it was **program_out**, issue 1344,
+and `program_monitor` in M1: the strih OBS now takes the console's VBAN program itself, so the converter
+drops VASIO8 and its points, `.claude/rules/obs-vban-receive.md` "The strih role").
 Per-participant `in_channels`/`out_channels` = the max channel routed (this preserves cam2's 8-ch
-input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); VASIO8 →
-`program_out` is a `pipewire` sink (the OBS `ASIO zvuk` capture) and `cutters` (MiniFuse) is a
-`pipewire` capture input (issue 1344); `speakers`/`line34` stay `adapter = "none"`.
+input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); `cutters`
+(MiniFuse) is a `pipewire` capture input (issue 1344); `speakers`/`line34` stay `adapter = "none"`.
 
 **PARITY IS PINNED:** `tests/python/test_vbmatrix_to_intercom_toml_1345.py` regenerates from the
 fixture (`intercom/tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
