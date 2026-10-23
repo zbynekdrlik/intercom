@@ -26,8 +26,9 @@ pub const ALSA_CARD_DEFAULT_PERIOD_FRAMES: usize = 256;
 /// The ALSA buffer of a card leg in periods (aplay keeps it full on playback): 4, like the HDMI leg.
 pub const ALSA_CARD_PERIODS: usize = 4;
 
-/// The allowed `alsa_period_frames`. Above 512 a 6-channel S32_LE playback pipe's trim mark no
-/// longer fits a 64 KiB Linux pipe.
+/// The allowed `alsa_period_frames`. The playback pipe must also fit a Linux pipe at its trim mark
+/// (9 periods of the card's channels at up to 4 bytes a sample), checked at load by
+/// [`crate::alsa_spec::playback_pipe_trim_bytes`]: the MiniFuse's 6 channels fit up to 303 frames.
 pub const ALSA_CARD_PERIOD_RANGE: std::ops::RangeInclusive<usize> = 64..=512;
 
 /// The most hw channels a card leg opens (a USB class-compliant interface).

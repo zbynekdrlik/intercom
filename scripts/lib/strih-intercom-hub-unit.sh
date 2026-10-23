@@ -184,6 +184,27 @@ for p in ps:
   return 0
 }
 
+# strih_intercom_hub_config_install SRC DST BIN -> setup-strih step 13's install of the routing TOML
+# (issue 1438). Step 13 installs the checkout's routing file but keeps an already-installed hub binary
+# (the hub is upgraded by its own deploy). A routing file that needs a newer hub (the issue-1438 `alsa`
+# adapter) would make the installed hub refuse it at its next restart and crash-loop, so the file is
+# installed only when the installed hub loads it (`BIN --check-config --config SRC`, bounded): a hub
+# that refuses it, or a binary from before the flag, keeps the installed DST and gets one WARNING that
+# names the reinstall. With no hub binary yet (a fresh box: the same step installs the checkout's own
+# build right after) the file is installed. Prints what it did; rc 0, or 1 when the copy itself fails.
+strih_intercom_hub_config_install() {
+  local src="${1:?routing file required}" dst="${2:?install path required}" bin="${3:?hub binary required}" why
+  if [ -x "$bin" ] && ! why="$(timeout 15 "$bin" --check-config --config "$src" 2>&1)"; then
+    if [ -f "$dst" ]; then
+      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: $(printf '%s' "$why" | tail -n 1)" >&2
+      return 0
+    fi
+    echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: $(printf '%s' "$why" | tail -n 1)" >&2
+  fi
+  install -Dm644 "$src" "$dst" || return 1
+  echo "  routing file ${src} installed -> ${dst}"
+}
+
 # strih_intercom_hub_alsa_leg_grade STATE_URL -> verify item 9's rows for the hub's card legs (issue
 # 1438: the cutters' USB card -- strih-snv's MiniFuse 4, strih-pp's MG-XU -- opened by the hub itself
 # through ALSA, aplay for the cans and arecord for the talkback, no PipeWire) through the caller's

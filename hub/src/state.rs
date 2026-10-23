@@ -330,13 +330,10 @@ impl HubState {
                         .map(|f| {
                             HdmiLegState::new(p.hdmi_connector.clone().unwrap_or_default(), f)
                         }),
-                    alsa: if p.adapter == crate::matrix::ADAPTER_ALSA {
-                        crate::matrix::alsa_card_spec(id, p)
-                            .ok()
-                            .map(|spec| AlsaLegState::new(&spec, s.alsa.unwrap_or_default()))
-                    } else {
-                        None
-                    },
+                    // the spec was resolved once at load: no parsing on the hub-mix thread
+                    alsa: matrix
+                        .alsa_spec(id)
+                        .map(|spec| AlsaLegState::new(spec, s.alsa.unwrap_or_default())),
                 }
             })
             .collect();

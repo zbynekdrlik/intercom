@@ -200,7 +200,13 @@ fn alsa_playback_loop(
                         Ok(report) => {
                             stats.record_write(&report);
                             stats.record_servo_depth(sink.servo_depth());
-                            log_pipe_write(label, &pcm, &report);
+                            if report.first {
+                                // The prime of every spawn: a busy PCM retried each backoff cycle
+                                // must not repeat an info line (the side logs once per change).
+                                tracing::debug!(%pcm, "local-audio: {label} pipe primed");
+                            } else {
+                                log_pipe_write(label, &pcm, &report);
+                            }
                         }
                         Err(e) => break e,
                     }

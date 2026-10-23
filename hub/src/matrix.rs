@@ -15,10 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
-use crate::alsa_card::{
-    card_id_ok, identity_map, parse_channel_map, AlsaCardSpec, ALSA_CARD_DEFAULT_PERIOD_FRAMES,
-    ALSA_CARD_MAX_CHANNELS, ALSA_CARD_PERIOD_RANGE,
-};
+use crate::alsa_card::AlsaCardSpec;
+use crate::alsa_spec::check_alsa;
 use crate::janus_rtp::JanusCodec;
 
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
@@ -312,121 +310,8 @@ pub struct Matrix {
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
-}
-
-/// Whether a participant carries any `alsa_*` key.
-fn has_alsa_keys(p: &Participant) -> bool {
-    p.alsa_card.is_some()
-        || p.alsa_device.is_some()
-        || p.alsa_period_frames.is_some()
-        || p.alsa_out_channels.is_some()
-        || p.alsa_in_channels.is_some()
-        || p.alsa_channel_map.is_some()
-        || p.alsa_in_channel_map.is_some()
-}
-
-/// Resolve and check an `alsa` participant's card leg (issue 1438): the card ID, the period, the
-/// card's channel counts and the two channel maps. `id` is the participant's index.
-pub fn alsa_card_spec(id: usize, p: &Participant) -> Result<AlsaCardSpec> {
-    let card = p.alsa_card.clone().unwrap_or_default();
-    if !card_id_ok(&card) {
-        bail!(
-            "participant '{}': adapter 'alsa' needs alsa_card = the ALSA card ID (e.g. M4; letters, digits, _; at most 15; never a bare index), got '{}'",
-            p.name,
-            card
-        );
-    }
-    if p.in_channels == 0 && p.out_channels == 0 {
-        bail!(
-            "participant '{}': adapter 'alsa' needs in_channels or out_channels > 0",
-            p.name
-        );
-    }
-    let device = p.alsa_device.unwrap_or(0);
-    if device > 31 {
-        bail!(
-            "participant '{}': alsa_device {} out of range 0..=31",
-            p.name,
-            device
-        );
-    }
-    let period_frames = p
-        .alsa_period_frames
-        .unwrap_or(ALSA_CARD_DEFAULT_PERIOD_FRAMES);
-    if !ALSA_CARD_PERIOD_RANGE.contains(&period_frames) {
-        bail!(
-            "participant '{}': alsa_period_frames {} out of range {:?}",
-            p.name,
-            period_frames,
-            ALSA_CARD_PERIOD_RANGE
-        );
-    }
-    let hw_channels = |key: &str, set: Option<usize>, used: usize| -> Result<usize> {
-        let hw = set.unwrap_or(used);
-        if used > 0 && !(used..=ALSA_CARD_MAX_CHANNELS).contains(&hw) {
-            bail!(
-                "participant '{}': {} {} must hold the participant's {} channels (and at most {})",
-                p.name,
-                key,
-                hw,
-                used,
-                ALSA_CARD_MAX_CHANNELS
-            );
-        }
-        if used == 0 && set.is_some() {
-            bail!(
-                "participant '{}': {} is set but the participant uses no channel on that side",
-                p.name,
-                key
-            );
-        }
-        Ok(hw)
-    };
-    let hw_out_channels = hw_channels("alsa_out_channels", p.alsa_out_channels, p.out_channels)?;
-    let hw_in_channels = hw_channels("alsa_in_channels", p.alsa_in_channels, p.in_channels)?;
-    let map = |key: &str,
-               set: Option<&str>,
-               used: usize,
-               hw: usize,
-               unique: bool|
-     -> Result<Vec<usize>> {
-        match set {
-            None => Ok(identity_map(used)),
-            Some(_) if used == 0 => bail!(
-                "participant '{}': {} is set but the participant uses no channel on that side",
-                p.name,
-                key
-            ),
-            Some(m) => parse_channel_map(m, used, hw, unique)
-                .map_err(|e| anyhow!("participant '{}': {} '{}' {}", p.name, key, m, e)),
-        }
-    };
-    let out_map = map(
-        "alsa_channel_map",
-        p.alsa_channel_map.as_deref(),
-        p.out_channels,
-        hw_out_channels,
-        true,
-    )?;
-    let in_map = map(
-        "alsa_in_channel_map",
-        p.alsa_in_channel_map.as_deref(),
-        p.in_channels,
-        hw_in_channels,
-        false,
-    )?;
-    Ok(AlsaCardSpec {
-        participant: id,
-        card,
-        device,
-        period_frames,
-        out_channels: p.out_channels,
-        hw_out_channels,
-        out_map,
-        in_channels: p.in_channels,
-        hw_in_channels,
-        in_map,
-    })
+    /// The card legs' resolved specs (issue 1438), resolved once at load.
+    alsa_specs: Vec<AlsaCardSpec>,
 }
 
 /// Convert a dB gain to a linear amplitude factor (`10^(dB/20)`). `0 dB` → `1.0`, `-6 dB` ≈ `0.501`,
@@ -470,8 +355,7 @@ impl Matrix {
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
         let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut alsa_pcms: std::collections::HashSet<(String, u32)> =
-            std::collections::HashSet::new();
+        let (mut alsa_pcms, mut alsa_specs) = (std::collections::HashSet::new(), Vec::new());
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
@@ -485,25 +369,8 @@ impl Matrix {
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
-            // The card leg (issue 1438): every `alsa_*` key resolves through `alsa_card_spec`, which
-            // fails loud on a bad one; the keys are refused on every other adapter.
-            if p.adapter == ADAPTER_ALSA {
-                let spec = alsa_card_spec(id, p)?;
-                if !alsa_pcms.insert((spec.card.clone(), spec.device)) {
-                    bail!(
-                        "participant '{}': card {} device {} is already opened by another participant",
-                        p.name,
-                        spec.card,
-                        spec.device
-                    );
-                }
-            } else if has_alsa_keys(p) {
-                bail!(
-                    "participant '{}': the alsa_* keys are only for adapter 'alsa' (got '{}')",
-                    p.name,
-                    p.adapter
-                );
-            }
+            // The card leg (issue 1438): the alsa_* keys resolve and are checked in `alsa_spec`.
+            alsa_specs.extend(check_alsa(id, p, &mut alsa_pcms)?);
             // The HDMI leg (issue 1424 part 3): a named connector, an output only, one participant
             // per connector (one aplay per hw PCM).
             if p.adapter == ADAPTER_ALSA_HDMI {
@@ -754,6 +621,7 @@ impl Matrix {
             participants: raw.participants,
             index,
             points,
+            alsa_specs,
         })
     }
 
@@ -863,12 +731,12 @@ impl Matrix {
     /// The card legs (issue 1438): every `alsa` participant's resolved card spec, fed from its OWN
     /// N-1 output bus (playback) and feeding its own input buffer (capture).
     pub fn alsa_cards(&self) -> Vec<AlsaCardSpec> {
-        self.participants
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.adapter == ADAPTER_ALSA)
-            .filter_map(|(id, p)| alsa_card_spec(id, p).ok())
-            .collect()
+        self.alsa_specs.clone()
+    }
+
+    /// The card leg spec of participant `id`, if it is on the `alsa` adapter.
+    pub fn alsa_spec(&self, id: usize) -> Option<&AlsaCardSpec> {
+        self.alsa_specs.iter().find(|c| c.participant == id)
     }
 
     /// The lip-sync delay of the `alsa_hdmi` participant `id` in ms (0 when absent).

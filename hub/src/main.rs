@@ -74,6 +74,12 @@ struct Args {
     /// absent = TURN off (`/api/ice` answers turn=off, `/api/turn-rest` 404), the hub otherwise unchanged.
     #[arg(long, default_value = TURN_CONFIG_DEFAULT)]
     turn_config: PathBuf,
+
+    /// Only load and check the routing TOML (`--config`) and exit: 0 = this hub binary runs it,
+    /// non-zero names why not (issue 1438: setup-strih installs a new routing file only when the
+    /// installed hub loads it, so an older hub never crash-loops on an adapter it does not know).
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[tokio::main]
@@ -91,6 +97,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("read intercom config {}", args.config.display()))?;
     let matrix = Matrix::from_toml(&text)
         .with_context(|| format!("parse intercom config {}", args.config.display()))?;
+    if args.check_config {
+        println!(
+            "intercom-hub {VERSION}: {} loads ({} participants, {} points)",
+            args.config.display(),
+            matrix.participants.len(),
+            matrix.points.len()
+        );
+        return Ok(());
+    }
 
     let http_bind = args.bind.clone().unwrap_or_else(|| matrix.hub.bind.clone());
     let http_addr: SocketAddr = http_bind

@@ -54,7 +54,9 @@ and `program_monitor` in M1: the strih OBS now takes the console's VBAN program 
 drops VASIO8 and its points, `.claude/rules/obs-vban-receive.md` "The strih role").
 Per-participant `in_channels`/`out_channels` = the max channel routed (this preserves cam2's 8-ch
 input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); `cutters`
-(MiniFuse) is a `pipewire` capture input (issue 1344); `speakers`/`line34` stay `adapter = "none"`.
+(MiniFuse) is the `alsa` card leg since issue 1438 (card ID `M4`, aplay + arecord on the hw PCM, no
+PipeWire; `.claude/rules/strih-intercom-alsa-leg.md`; issue 1344 had it on `pipewire`);
+`speakers`/`line34` stay `adapter = "none"`.
 
 **PARITY IS PINNED:** `tests/python/test_vbmatrix_to_intercom_toml_1345.py` regenerates from the
 fixture (`intercom/tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
@@ -162,6 +164,10 @@ strih, and a second hub sending VBAN back to them is double talkback.
   same as the drop-in `clear` and the hub `stop`.
 
 ## M2 — the local PipeWire audio bridge (issue 1344, DONE)
+
+> **Issue 1438:** the cutters left PipeWire: both TOMLs put them on the `alsa` card leg
+> (`.claude/rules/strih-intercom-alsa-leg.md`). The pw-cat paths below stay as the hub's `pipewire`
+> adapter (the strih-pp `program_out` sink, and the cutters' rollback).
 
 The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
 `pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
