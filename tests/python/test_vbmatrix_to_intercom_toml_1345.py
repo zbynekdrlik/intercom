@@ -164,56 +164,45 @@ def test_vasio8_is_not_carried_into_the_hub():
     assert (by_name["fohabl"]["in_channels"], by_name["lv1"]["in_channels"]) == (4, 2)
 
 
-def test_cutters_becomes_a_pipewire_talkback_capture():
-    """The MiniFuse (AMDevice type 256) carries the operator TALKBACK mic — the converter maps the
-    cutters participant to a pipewire capture input, not the old adapter=none."""
+def test_cutters_open_the_minifuse_through_alsa_by_its_card_id_1438():
+    """issue 1438: the MiniFuse (AMDevice type 256) carries the operator talkback mic and the cans;
+    the hub opens the card itself through ALSA (`hw:CARD=M4,DEV=0`), no PipeWire node, so a missing
+    card is the leg down instead of a fallback into another device."""
     _hub, parts, _points = _model()
     cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["adapter"] == "pipewire"
-    assert cutters.get("pipewire_source"), "cutters needs a pipewire_source (the MiniFuse capture node)"
-    assert "MiniFuse" in cutters["pipewire_source"]
+    assert cutters["adapter"] == "alsa"
+    # the card ID read live on strih-snv (/proc/asound/cards), never a card index
+    assert cutters["alsa_card"] == "M4"
+    assert cutters["alsa_device"] == 0
+    assert cutters["alsa_period_frames"] == 256
+    assert not any(k.startswith("pipewire") for k in cutters), cutters
 
 
-def test_minifuse_capture_node_is_the_real_uppercase_arturia_alsa_name():
-    # issue 1344 follow-up (20.9.2026 live diagnosis, issuecomment-5751113173): the real ALSA node
-    # name on the box is uppercase "ARTURIA" (`wpctl status` / `pactl list sources`), NOT the
-    # title-case "Arturia" the converter used to emit — a case-sensitive PipeWire node-name mismatch
-    # the hub reads as a missing device.
+def test_the_minifuse_hw_channels_carry_the_mics_and_the_cans_1438():
+    """The MiniFuse hw PCM opens with exactly 6 channels both ways; the 2 mics are its hw inputs 1-2,
+    the cutters' 4 outputs (issue 1345: the operator's headphones) its hw outputs 1-4."""
     _hub, parts, _points = _model()
     cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0",         cutters["pipewire_source"]
+    assert (cutters["in_channels"], cutters["out_channels"]) == (2, 4)
+    assert (cutters["alsa_in_channels"], cutters["alsa_out_channels"]) == (6, 6)
+    assert cutters["alsa_in_channel_map"] == "1,2"
+    assert cutters["alsa_channel_map"] == "1,2,3,4"
 
 
-def test_generated_toml_emits_the_pipewire_fields():
+def test_generated_toml_emits_the_alsa_fields_1438():
     text = conv.convert(_xml())
-    assert 'adapter = "pipewire"' in text
-    # issue 1439 phase 2: no strih-program sink and no program source streams (no program_out)
-    assert 'pipewire_target = "strih-program"' not in text
+    assert 'adapter = "alsa"' in text
+    assert 'alsa_card = "M4"' in text
+    assert 'alsa_channel_map = "1,2,3,4"' in text
+    assert 'alsa_in_channel_map = "1,2"' in text
+    # no PipeWire node is left in the strih-snv matrix (issue 1439 phase 2 removed the program sink)
+    assert 'adapter = "pipewire"' not in text
+    assert "pipewire_" not in text
     assert "source_streams" not in text
-    assert "pipewire_source = " in text
-    # No stale program_monitor participant survives.
     data = tomllib.loads(text)
     assert not any(p["name"] == "program_monitor" for p in data["participant"])
-
-
-# --- 24.9.2026 production fix: the operator's headphones + the talkback level -------------------
-
-_MINIFUSE_PLAYBACK = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
-
-
-def test_cutters_play_their_n1_mix_to_the_minifuse_outputs():
-    """On Linux the cutters participant was capture-only, so the operator heard NOTHING. The converter
-    now gives it the MiniFuse playback node + an explicit AUX channel map for its 4 output channels
-    (the pro-audio node's ports are AUX0..AUX5; an unmapped 4-ch stream defaults to FL/FR/RL/RR)."""
-    _hub, parts, _points = _model()
-    cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
-    assert cutters["pipewire_target"] == _MINIFUSE_PLAYBACK
-    assert cutters["out_channels"] == 4
-    assert cutters["pipewire_channel_map"] == "AUX0,AUX1,AUX2,AUX3"
-    text = conv.convert(_xml())
-    assert f'pipewire_target = "{_MINIFUSE_PLAYBACK}"' in text
-    assert 'pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"' in text
+    cutters = next(p for p in data["participant"] if p["name"] == "cutters")
+    assert (cutters["alsa_out_channels"], cutters["alsa_in_channels"]) == (6, 6)
 
 
 def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cams():

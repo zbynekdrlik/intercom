@@ -275,7 +275,22 @@ fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
     let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     assert_eq!(buffers.len(), m.participants.len());
-    let local_inputs: Vec<usize> = m.local_inputs().into_iter().map(|(id, _, _)| id).collect();
+    // The local captures: a pipewire capture, or since issue 1438 a card leg's arecord.
+    let local_inputs: Vec<usize> = m
+        .local_inputs()
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .chain(
+            m.alsa_cards()
+                .into_iter()
+                .filter(|c| c.in_channels > 0)
+                .map(|c| c.participant),
+        )
+        .collect();
+    assert!(
+        !local_inputs.is_empty(),
+        "the cutters' talkback is a local capture"
+    );
     let mut vban_legs = 0;
     for (id, (p, b)) in m.participants.iter().zip(&buffers).enumerate() {
         let want = if p.adapter == ADAPTER_VBAN {

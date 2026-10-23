@@ -113,3 +113,31 @@ fn strih_pp_vestibule_hears_the_lv1_program_on_hdmi_1() {
         "the vestibule is an output only"
     );
 }
+
+/// issue 1438: the PP cutters open the Yamaha MG-XU directly through ALSA by its card ID `MGXU`
+/// (2 in / 2 out, its hw channels 1 and 2), so a card that leaves USB is the leg DOWN, never a
+/// PipeWire fallback into the program sink (22.10.2026).
+#[test]
+fn strih_pp_cutters_open_the_mg_xu_by_card_id_1438() {
+    use intercom_hub::matrix::ADAPTER_ALSA;
+    let m = Matrix::from_toml(PP_TOML).expect("the PP matrix must load through Matrix::from_toml");
+    let cutters = m.id_of("cutters").expect("cutters");
+    assert_eq!(m.participants[cutters].adapter, ADAPTER_ALSA);
+    assert!(
+        m.local_inputs().is_empty() && m.local_outputs().is_empty(),
+        "no pipewire node is left on the cutters"
+    );
+    let cards = m.alsa_cards();
+    assert_eq!(cards.len(), 1);
+    let c = &cards[0];
+    assert_eq!(
+        (c.participant, c.card.as_str(), c.device),
+        (cutters, "MGXU", 0)
+    );
+    assert_eq!((c.in_channels, c.hw_in_channels), (2, 2));
+    assert_eq!((c.out_channels, c.hw_out_channels), (2, 2));
+    assert_eq!(c.in_map, [0, 1]);
+    assert_eq!(c.out_map, [0, 1]);
+    // The program sink stays on PipeWire (the OBS capture), untouched by this step.
+    assert_eq!(m.program_out().expect("program_out").1, "strih-program");
+}
