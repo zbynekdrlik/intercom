@@ -10,6 +10,12 @@
 # the Blackmagic HDMI-to-SDI converter) hears the lv1 program straight from this hub, no PipeWire and no
 # OBS in between (zero latency; audio never behind the picture). The connector is named, the hub
 # resolves it to its hw PCM by EDID vs ELD; nothing found = the leg stays silent and says why.
+# 23.10.2026 (issue 1438): the hub opens the MG-XU itself through ALSA by its card ID `MGXU` (strih-pp
+# /var/lib/alsa/asound.state; 2 channels each way), aplay for the cans and arecord for the talkback mic, no
+# PipeWire node. A card that leaves USB is the leg DOWN, never a fallback: on 22.10.2026 the pw-cat legs
+# re-routed into the `strih-program` sink while the MG-XU was unplugged. Rollback: adapter = "pipewire" with
+# pipewire_target/source = "alsa_output/alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo" and
+# pipewire_channel_map = "FL,FR".
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
@@ -83,10 +89,14 @@ out_channels = 0
 [[participant]]
 name = "cutters"
 role = "cutters"
-adapter = "pipewire"
-pipewire_target = "alsa_output.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
-pipewire_source = "alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
-pipewire_channel_map = "FL,FR"
+adapter = "alsa"
+alsa_card = "MGXU"
+alsa_device = 0
+alsa_period_frames = 256
+alsa_out_channels = 2
+alsa_in_channels = 2
+alsa_channel_map = "1,2"
+alsa_in_channel_map = "1,2"
 in_channels = 2
 out_channels = 2
 

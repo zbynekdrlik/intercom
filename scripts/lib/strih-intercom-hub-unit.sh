@@ -5,7 +5,8 @@
 # scripts/lib/strih-intercom-hub-unit.sh -- issue 1412: the intercom-hub unit per box ROLE, and verify
 # item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs; issue
 # 1401: verify item 16's grade of the hub's memory lock; issue 1467: verify item 16's hub version vs the
-# checkout + the decode_rejects note.
+# checkout + the decode_rejects note; issue 1438: verify item 9's grade of the hub's card leg (the
+# cutters' USB card opened through ALSA).
 #
 # The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
@@ -178,6 +179,81 @@ for p in ps:
       FAIL$'\t'*) bad "(hdmi-leg) ${row#*$'\t'}" ;;
       '') ;;
       *) bad "(hdmi-leg) grading the hub state failed: ${row}" ;;
+    esac
+  done <<<"$rows"
+  return 0
+}
+
+# strih_intercom_hub_alsa_leg_grade STATE_URL -> verify item 9's rows for the hub's card legs (issue
+# 1438: the cutters' USB card -- strih-snv's MiniFuse 4, strih-pp's MG-XU -- opened by the hub itself
+# through ALSA, aplay for the cans and arecord for the talkback, no PipeWire) through the caller's
+# ok / bad / note: one row per `alsa` participant on the hub's /api/state. PASS = the card is on the box
+# and every side the participant uses moves audio (the format and the xruns named); FAIL = the card is
+# not on the box, a side is down (its named reason) or not moving audio, or the hub has no alsa facet
+# (a binary from before the card leg); a cutters participant still on `pipewire` (the rollback) is a
+# NOTE; an unreadable hub is a NOTE (item 16 FAILs a dead hub). STRIH_HUB_ALSA_STATE_FILE reads the JSON
+# from a file instead (the test seam). Always rc 0.
+strih_intercom_hub_alsa_leg_grade() {
+  local url="${1:?hub state url required}" json rows row
+  if [ -n "${STRIH_HUB_ALSA_STATE_FILE:-}" ]; then
+    json="$(cat -- "$STRIH_HUB_ALSA_STATE_FILE" 2>/dev/null || true)"
+  else
+    json="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$json" ]; then
+    note "(card-leg) the intercom hub state at ${url} is not readable -- the cutters' card leg is graded when the hub answers"
+    return 0
+  fi
+  rows="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    ps = json.load(sys.stdin).get("participants", [])
+except Exception as e:
+    print("FAIL\tthe intercom hub state is not JSON (%s)" % e)
+    sys.exit(0)
+for p in ps:
+    name = p.get("name", "?")
+    if p.get("adapter") == "pipewire" and p.get("role") == "cutters":
+        print("NOTE\t%s are on the pipewire adapter (the issue-1438 rollback path) -- the card leg is not graded" % name)
+        continue
+    if p.get("adapter") != "alsa":
+        continue
+    a = p.get("alsa")
+    if not a:
+        print("FAIL\t%s: the hub reports no alsa facet (a hub binary from before issue 1438) -- reinstall the hub" % name)
+        continue
+    card, pcm = a.get("card", "?"), a.get("pcm", "?")
+    if not a.get("present"):
+        print("FAIL\t%s: card %s is not on the box -- plug it in; the hub opens it by itself within 30 s (issue 1438)" % (name, card))
+        continue
+    sides, bad = [], []
+    for side, tool in (("playback", "aplay"), ("capture", "arecord")):
+        s = a.get(side)
+        if s is None:
+            continue
+        if not s.get("running"):
+            why = s.get("state", "?")
+            if why == "ready":
+                why = "%s is not moving audio (a PCM another process holds, or it never read)" % tool
+            bad.append("%s %s: %s" % (side, tool, why))
+        else:
+            sides.append("%s %s %s, xruns %s" % (side, s.get("format"), s.get("hw_channels"), s.get("xruns", 0)))
+    if bad:
+        print("FAIL\t%s on %s: %s -- journalctl -u intercom-hub names it (issue 1438)" % (name, pcm, "; ".join(bad)))
+    else:
+        print("OK\t%s on %s: %s" % (name, pcm, "; ".join(sides)))
+' 2>&1 || true)"
+  # The leg runs aplay + arecord (alsa-utils, setup-strih step 4b): a box without them never plays.
+  if [ -n "$rows" ] && ! { command -v aplay && command -v arecord; } >/dev/null 2>&1; then
+    bad "(card-leg) aplay/arecord missing -- apt-get install alsa-utils (setup-strih.sh step 4b, issue 1438)"
+  fi
+  while IFS= read -r row; do
+    case "$row" in
+      OK$'\t'*) ok "(card-leg) ${row#*$'\t'}" ;;
+      FAIL$'\t'*) bad "(card-leg) ${row#*$'\t'}" ;;
+      NOTE$'\t'*) note "(card-leg) ${row#*$'\t'}" ;;
+      '') ;;
+      *) bad "(card-leg) grading the hub state failed: ${row}" ;;
     esac
   done <<<"$rows"
   return 0

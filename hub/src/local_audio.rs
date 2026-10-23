@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::alsa_card::PcmFormat;
 use crate::pipe_fill::{stretch_interleaved, PipeFillControl, PipeServoDepth};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
@@ -149,6 +150,9 @@ pub fn pipe_write_bytes(
 pub struct PipeFillWriter<W> {
     pipe: W,
     channels: usize,
+    /// The sample format on the pipe (issue 1438: a card leg's aplay may take S32_LE); S16_LE for
+    /// every pw-cat pipe, whose bytes stay exactly as before.
+    format: PcmFormat,
     control: PipeFillControl,
     /// The controller's clock: nanoseconds since this writer (this pw-cat child) was created.
     epoch: Instant,
@@ -167,9 +171,17 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         PipeFillWriter {
             pipe,
             channels: usize::from(channels.max(1)),
+            format: PcmFormat::S16Le,
             control,
             epoch: Instant::now(),
         }
+    }
+
+    /// The same guard on a pipe that carries `format` samples (issue 1438): the fill is read in
+    /// frames of that width, and every block is converted from the hub's s16 before it is written.
+    pub fn with_format(mut self, format: PcmFormat) -> Self {
+        self.format = format;
+        self
     }
 
     /// The pipe fill in frames, or `BrokenPipe` once pw-cat closed its end: every reading, held or
@@ -181,7 +193,7 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
                 "pw-cat closed its stdin pipe",
             ));
         }
-        Ok(pipe_fill_bytes(&self.pipe)? / (self.channels * 2))
+        Ok(pipe_fill_bytes(&self.pipe)? / (self.channels * self.format.bytes_per_sample()))
     }
 
     fn now_ns(&self) -> u64 {
@@ -205,7 +217,7 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
             .control
             .plan_block(self.now_ns(), fill_frames, block_frames);
         if let Some(bytes) = pipe_write_bytes(report.plan, interleaved, self.channels) {
-            self.pipe.write_all(&bytes)?;
+            self.pipe.write_all(&self.format.from_s16le_bytes(bytes))?;
         }
         Ok(report)
     }
@@ -453,6 +465,11 @@ impl LocalAudioStats {
                 }
             }
         }
+    }
+
+    /// Count one captured block (issue 1438: the card leg's arecord shares this facet).
+    pub(crate) fn record_rx(&self) {
+        self.rx_blocks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one child spawn (issue 1424: the HDMI leg's aplay shares this facet).

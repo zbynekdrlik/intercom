@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::alsa_card::{AlsaDirFacet, AlsaLegFacet, ALSA_CARD_PERIODS};
 use crate::hdmi_audio::{HdmiLegFacet, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES};
 use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
@@ -89,6 +90,77 @@ impl HdmiLegState {
     }
 }
 
+/// One side of a card leg as `/api/state` shows it (issue 1438).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlsaSideState {
+    /// `ready`, `card not present`, the named reason the card cannot be opened, or `not started
+    /// yet`.
+    pub state: &'static str,
+    /// The hw sample format the child speaks with the card (`S16_LE` / `S32_LE` / `S24_3LE`) once
+    /// ready, else null.
+    pub format: Option<&'static str>,
+    /// The card's channel count on this side (the hw PCM opens with exactly this many).
+    pub hw_channels: usize,
+    /// The child is moving audio (aplay has read from its pipe / arecord delivered a block).
+    pub running: bool,
+    /// The child's xruns since the hub started (aplay `underrun!!!` / arecord `overrun!!!`).
+    pub xruns: u64,
+    /// Child spawns since the hub started.
+    pub spawns: u64,
+}
+
+impl AlsaSideState {
+    fn new(f: AlsaDirFacet, hw_channels: usize) -> Self {
+        AlsaSideState {
+            state: f.state.name(),
+            format: f.state.format().map(|f| f.alsa_name()),
+            hw_channels,
+            running: f.running,
+            xruns: f.xruns,
+            spawns: f.spawns,
+        }
+    }
+}
+
+/// The card leg as `/api/state` shows it (issue 1438): the card the matrix names, whether it was on
+/// the box at the last look, and each side the participant uses (`null` for an unused side). The
+/// playback pipe's fill and depth are in the participant's `local_audio` facet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlsaLegState {
+    /// The ALSA card ID (`M4`, `MGXU`).
+    pub card: String,
+    /// `hw:CARD=<id>,DEV=<n>`.
+    pub pcm: String,
+    /// The card was on the box at the last look of either side.
+    pub present: bool,
+    pub playback: Option<AlsaSideState>,
+    pub capture: Option<AlsaSideState>,
+    /// The ALSA period and buffer both sides open with (frames at the hub rate).
+    pub alsa_period_frames: usize,
+    pub alsa_buffer_frames: usize,
+}
+
+impl AlsaLegState {
+    fn new(spec: &crate::alsa_card::AlsaCardSpec, f: AlsaLegFacet) -> Self {
+        AlsaLegState {
+            card: spec.card.clone(),
+            pcm: crate::alsa_card::pcm_name(&spec.card, spec.device),
+            present: f.card_present(),
+            playback: (spec.out_channels > 0)
+                .then(|| AlsaSideState::new(f.playback, spec.hw_out_channels)),
+            capture: (spec.in_channels > 0)
+                .then(|| AlsaSideState::new(f.capture, spec.hw_in_channels)),
+            alsa_period_frames: spec.period_frames,
+            alsa_buffer_frames: spec.period_frames * ALSA_CARD_PERIODS,
+        }
+    }
+
+    /// Every side the participant uses is moving audio.
+    pub fn up(&self) -> bool {
+        self.playback.iter().chain(&self.capture).all(|s| s.running)
+    }
+}
+
 impl From<NetworkFillStats> for JitterFacet {
     fn from(s: NetworkFillStats) -> Self {
         JitterFacet {
@@ -137,6 +209,8 @@ pub struct RuntimeStats {
     pub jitter: Option<JitterFacet>,
     /// The HDMI audio leg facet (issue 1424 part 3), `None` for every non-`alsa_hdmi` participant.
     pub hdmi: Option<HdmiLegFacet>,
+    /// The card leg facet (issue 1438), `None` for every non-`alsa` participant.
+    pub alsa: Option<AlsaLegFacet>,
 }
 
 /// One participant's serialized state.
@@ -184,6 +258,9 @@ pub struct ParticipantState {
     /// The HDMI audio leg (issue 1424 part 3), present only for an `alsa_hdmi` participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hdmi: Option<HdmiLegState>,
+    /// The card leg (issue 1438), present only for an `alsa` participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alsa: Option<AlsaLegState>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -253,6 +330,13 @@ impl HubState {
                         .map(|f| {
                             HdmiLegState::new(p.hdmi_connector.clone().unwrap_or_default(), f)
                         }),
+                    alsa: if p.adapter == crate::matrix::ADAPTER_ALSA {
+                        crate::matrix::alsa_card_spec(id, p)
+                            .ok()
+                            .map(|spec| AlsaLegState::new(&spec, s.alsa.unwrap_or_default()))
+                    } else {
+                        None
+                    },
                 }
             })
             .collect();
@@ -360,8 +444,43 @@ impl HubState {
                 None => format!(" hdmi={}:silent", p.name),
             })
             .collect();
+        // The card legs (issue 1438): the card, the playback pipe depth and each side's xruns
+        // (playback/capture) while every side moves audio, else which side is down and why.
+        let alsa: String = self
+            .participants
+            .iter()
+            .filter_map(|p| p.alsa.as_ref().map(|a| (p, a)))
+            .map(|(p, a)| {
+                if a.up() {
+                    format!(
+                        " alsa={}:{}:depth={}:xruns={}/{}",
+                        p.name,
+                        a.card,
+                        p.local_audio.map_or(0, |l| l.pipe_depth_frames),
+                        a.playback.as_ref().map_or(0, |s| s.xruns),
+                        a.capture.as_ref().map_or(0, |s| s.xruns)
+                    )
+                } else {
+                    let why = a
+                        .playback
+                        .iter()
+                        .chain(&a.capture)
+                        .find(|s| !s.running)
+                        .map_or("down", |s| {
+                            // The card was found and the child spawned, but it moves no audio
+                            // (a PCM another process holds, or it never read yet).
+                            if s.state == "ready" {
+                                "not running"
+                            } else {
+                                s.state
+                            }
+                        });
+                    format!(" alsa={}:{}:down({why})", p.name, a.card)
+                }
+            })
+            .collect();
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
@@ -372,6 +491,7 @@ impl HubState {
             rejects,
             undecodable,
             hdmi,
+            alsa,
             levels.join(" ")
         )
     }
@@ -446,6 +566,7 @@ out_channels = 4
                 local_audio: None,
                 jitter: None,
                 hdmi: None,
+                alsa: None,
             },
             RuntimeStats::default(),
         ];

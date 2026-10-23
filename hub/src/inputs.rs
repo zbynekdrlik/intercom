@@ -15,7 +15,8 @@ use crate::vban_jitter::{
 
 /// One input buffer per participant, id-indexed like `matrix.participants`:
 ///
-/// - a local PipeWire capture (the MiniFuse talkback) and the Janus (phones) ingress get the
+/// - a local capture (the cutters' talkback: a PipeWire capture, or since issue 1438 the card's
+///   own `arecord`) and the Janus (phones) ingress get the
 ///   local-capture target-fill ring that absorbs their 1024- / 960-frame bursts (issue 1345: the
 ///   generic no-prefill buffer spliced ~8x/s, and the phones leg overran ~60x/s);
 /// - every VBAN leg (the FOH program feed, the camboxes' talkback) gets the VBAN-leg buffer with
@@ -37,6 +38,13 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
         .local_inputs()
         .into_iter()
         .map(|(pid, _, _)| pid)
+        .chain(
+            matrix
+                .alsa_cards()
+                .into_iter()
+                .filter(|c| c.in_channels > 0)
+                .map(|c| c.participant),
+        )
         .collect();
     matrix
         .participants

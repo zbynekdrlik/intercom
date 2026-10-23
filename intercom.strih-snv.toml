@@ -122,10 +122,14 @@ out_channels = 0
 [[participant]]
 name = "cutters"
 role = "cutters"
-adapter = "pipewire"
-pipewire_target = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
-pipewire_source = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
-pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"
+adapter = "alsa"
+alsa_card = "M4"
+alsa_device = 0
+alsa_period_frames = 256
+alsa_out_channels = 6
+alsa_in_channels = 6
+alsa_channel_map = "1,2,3,4"
+alsa_in_channel_map = "1,2"
 in_channels = 2
 out_channels = 4
 

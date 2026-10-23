@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::alsa_card::PcmFormat;
 use crate::drm_output_audio_match::{reason, MonitorId};
 use crate::hdmi_audio::{
     aplay_argv, eld_still_matches, iec958_on, is_banner_line, is_xrun_line, read_pcm_eld,
@@ -56,8 +57,25 @@ pub const ELD_WATCH_MISSES: u32 = 2;
 /// The pipe fill controller of an aplay leg: aplay reads one ALSA period at a time, and at its start
 /// it pulls its whole ALSA buffer plus the period it then holds while blocked on the full PCM.
 pub fn aplay_pipe_control(rate: u32) -> PipeFillControl {
-    PipeFillControl::with_quantum(rate, ALSA_HDMI_PERIOD_FRAMES)
-        .with_reader_buffer(ALSA_HDMI_BUFFER_FRAMES + ALSA_HDMI_PERIOD_FRAMES)
+    aplay_pipe_control_for(rate, ALSA_HDMI_PERIOD_FRAMES, ALSA_HDMI_BUFFER_FRAMES)
+}
+
+/// [`aplay_pipe_control`] for any aplay period and buffer (issue 1438: the card leg's period comes
+/// from the matrix).
+pub fn aplay_pipe_control_for(rate: u32, period: usize, buffer: usize) -> PipeFillControl {
+    PipeFillControl::with_quantum(rate, period).with_reader_buffer(buffer + period)
+}
+
+/// What counts a child's xruns from its stderr: the HDMI leg's stats, or one side of a card leg
+/// (issue 1438), so both share [`AplaySink`].
+pub trait XrunCounter: Send + Sync {
+    fn count_xrun(&self);
+}
+
+impl XrunCounter for HdmiLegStats {
+    fn count_xrun(&self) {
+        self.record_xrun();
+    }
 }
 
 /// The watcher's decision after one ELD reading: `Some(true)` the PCM still carries the monitor,
@@ -97,6 +115,36 @@ impl AplaySink {
         watch: Option<MonitorId>,
     ) -> io::Result<Self> {
         let argv = aplay_argv(card, device, rate, channels);
+        let mut sink = Self::spawn_argv(
+            &argv,
+            channels,
+            aplay_pipe_control(rate),
+            PcmFormat::S16Le,
+            hdmi,
+        )?;
+        if let Some(want) = watch {
+            let (moved, stop) = (sink.pcm_moved.clone(), sink.stop.clone());
+            if let Err(e) = thread::Builder::new()
+                .name("hdmi-leg-eld".into())
+                .spawn(move || eld_watch(card, device, &want, &moved, &stop))
+            {
+                sink.finish();
+                return Err(e);
+            }
+        }
+        Ok(sink)
+    }
+
+    /// Spawn aplay with `argv` (its stdin carries `channels` interleaved samples of `format` a
+    /// frame, guarded by `control`); its xruns are counted into `xruns`. Issue 1438: the card leg
+    /// spawns its aplay through this too.
+    pub fn spawn_argv(
+        argv: &[String],
+        channels: u8,
+        control: PipeFillControl,
+        format: PcmFormat,
+        xruns: Arc<dyn XrunCounter>,
+    ) -> io::Result<Self> {
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
@@ -114,12 +162,12 @@ impl AplaySink {
         // Ends at aplay's exit (EOF on its stderr). A failed thread spawn ends aplay here: no
         // AplaySink owns it yet, so its Drop would not.
         let spawned = thread::Builder::new()
-            .name("hdmi-leg-stderr".into())
+            .name("aplay-stderr".into())
             .spawn(move || {
                 let mut last = String::new();
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     if is_xrun_line(&line) {
-                        hdmi.record_xrun();
+                        xruns.count_xrun();
                     } else if !line.trim().is_empty() && !is_banner_line(&line) {
                         last = line;
                     }
@@ -134,26 +182,13 @@ impl AplaySink {
                 return Err(e);
             }
         };
-        let pcm_moved = Arc::new(AtomicBool::new(false));
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut sink = AplaySink {
+        Ok(AplaySink {
             child,
-            stdin: PipeFillWriter::with_control(stdin, channels, aplay_pipe_control(rate)),
+            stdin: PipeFillWriter::with_control(stdin, channels, control).with_format(format),
             stderr_reader: Some(stderr_reader),
-            pcm_moved,
-            stop,
-        };
-        if let Some(want) = watch {
-            let (moved, stop) = (sink.pcm_moved.clone(), sink.stop.clone());
-            if let Err(e) = thread::Builder::new()
-                .name("hdmi-leg-eld".into())
-                .spawn(move || eld_watch(card, device, &want, &moved, &stop))
-            {
-                sink.finish();
-                return Err(e);
-            }
-        }
-        Ok(sink)
+            pcm_moved: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     /// aplay has read from the pipe since its spawn: it is playing.
@@ -173,7 +208,7 @@ impl AplaySink {
 
     /// End aplay (if it still runs) and the watcher; return aplay's last stderr line that was not an
     /// xrun or its start banner.
-    fn finish(&mut self) -> String {
+    pub fn finish(&mut self) -> String {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -300,7 +335,7 @@ pub fn spawn_alsa_hdmi_sink(
 }
 
 /// Drop every block queued while the leg was silent. `false` once the hub is shutting down.
-fn drop_stale(rx: &Receiver<Vec<i16>>) -> bool {
+pub(crate) fn drop_stale(rx: &Receiver<Vec<i16>>) -> bool {
     loop {
         match rx.try_recv() {
             Ok(_) => {}
