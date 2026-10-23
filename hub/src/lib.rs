@@ -41,6 +41,7 @@ pub mod ndi_video;
 pub mod pipe_fill;
 pub mod state;
 pub mod turn;
+pub mod vban_classify;
 pub mod vban_io;
 pub mod vban_jitter;
 pub mod vban_rate;

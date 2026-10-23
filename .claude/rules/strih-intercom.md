@@ -703,26 +703,35 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   FOH console sent `fohabl-strih` as 24-bit PCM to a hub built before the PCM24 arm: the old
   `route_packet` decoded BEFORE the name lookup, turned the error into `None`, and the cutters lost
   FOH for ~90 min with no counter and no log.
-  - `vban_io::classify_packet` reads the stream name from the raw header (`vban_stream_name`: magic +
-    the 16-byte name, any sub-protocol), looks it up, and only then decodes:
-    `Audio` / `Undecodable { id, stream, reason }` / `Foreign` (unknown name or not VBAN, silent).
-    `route_packet` stays the audio-only wrapper.
+  - `classify_packet` (`intercom/hub/src/vban_classify.rs`, re-exported from `vban_io`) reads the
+    stream name from the raw header (`vban_stream_name`: magic + the 16-byte name, any sub-protocol),
+    looks it up, and only then decodes: `Audio` / `Undecodable { id, stream, reason }` / `Foreign`
+    (unknown name or not VBAN, silent). `route_packet` stays the audio-only wrapper.
   - Undecodable = an unsupported codec (`unsupported VBAN codec 0x..`), a non-audio sub-protocol, or a
-    payload without one whole frame (`malformed VBAN payload`). A reserved rate index still decodes
-    to rate 0 and stays a `rate_rejects` count (the converter's).
-  - The receive task owns a `DecodeRejects` per participant: one warn per transition (the first
-    reject, a changed reason: stream, sender, reason, count) and one info when the stream decodes
-    again; the count is published through the same `VbanRateStats` slot
-    (`publish_decode_rejects`, which `publish` never resets).
+    payload without one whole frame (`malformed VBAN payload`, no byte count in the reason so one
+    stream keeps one reason). A reserved rate index still decodes to rate 0 and stays a
+    `rate_rejects` count (the converter's).
+  - The receive task (`spawn_vban_receive` in main.rs, out of `main()` for its size) owns a
+    `DecodeRejects` per participant: a warn per transition (the first reject, a changed reason:
+    stream, sender, reason, count) and an info when the stream decodes again, at most one line per
+    stream every `DECODE_LOG_FLOOR` (10 s; the next line carries `suppressed_transitions`), so a
+    sender mixing good and bad packets never logs at packet rate. The count is published through
+    the same `VbanRateStats` slot (`publish_decode_rejects`, which `publish` never resets).
   - `/api/state`: `decode_rejects` on every VBAN participant; the status line appends
     `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
     count (`strih_intercom_hub_version_grade`, below).
   - Tests: `intercom/hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
     half, CI only; the status line + snapshot are mirrored in a stub-matrix replica of state.rs).
+    Every plain-rustc replica that mounts `vban_io.rs` now mounts `vban_classify.rs` next to it.
+  - Open (review round 1, design-accepted): verify item 16 NOTEs a hub older than the checkout on
+    nearly every run, because the workspace version moves on every PR while an installed hub is
+    never replaced; grading by "the hub source changed since the hub's commit" needs git history the
+    staged tree does not carry.
 - **The hub binary of the checkout's own commit (issue 1467).** setup-strih step 13
   (`strih_intercom_hub_binary_install BIN ROOT`, `scripts/lib/strih-ci-artifact.sh`) fetches the
   `intercom-hub-linux-amd64` artifact of the provisioning tree's commit (`strih_checkout_source_sha`:
-  a git checkout's HEAD when ROOT is its top level, else the `CAMERA_BOX_SOURCE_SHA` file the
+  a git checkout's HEAD when ROOT is its top level, read with `-c safe.directory=<ROOT>` so a root run
+  from the operator's clone is not refused by git's ownership check, else the `CAMERA_BOX_SOURCE_SHA` file the
   strih-snv deploy writes into its staged tree, which also carries `Cargo.toml` now), `main` only
   when that commit has no artifact (a WARNING names it), `STRIH_LX_HUB_SRC` still first. The log
   names the ref; `<bin>.version` records version / source_sha / artifact_ref. An installed binary is

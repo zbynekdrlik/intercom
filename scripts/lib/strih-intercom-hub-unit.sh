@@ -241,7 +241,7 @@ else:
 strih_intercom_hub_version_grade() {
   local base="${1:?hub base url required}" box="${2:-<box>}"
   local root="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  local bin="${4:-/usr/local/bin/intercom-hub}" want vjson recorded="" sjson rows row
+  local bin="${4:-/usr/local/bin/intercom-hub}" want vjson recorded="" sjson rows row tmp
   want="$(strih_checkout_version "$root" || true)"
   if [ -n "${STRIH_HUB_VERSION_JSON_FILE:-}" ]; then
     vjson="$(cat -- "$STRIH_HUB_VERSION_JSON_FILE" 2>/dev/null || true)"
@@ -254,9 +254,24 @@ strih_intercom_hub_version_grade() {
   else
     sjson="$(curl -fsS --max-time 3 "${base}/api/state" 2>/dev/null || true)"
   fi
-  rows="$(STRIH_HUB_V_JSON="$vjson" STRIH_HUB_S_JSON="$sjson" python3 - "$want" "$recorded" "$bin" "$root" "$box" <<'PYHUBV' 2>&1 || true
-import json, os, re, sys
-want, recorded, binp, root, box = sys.argv[1:6]
+  # The two JSON answers go to python as FILES (an environment string is capped at 128 KB, issue 1467
+  # review); python reads its program from the heredoc.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/strih-hub-version.XXXXXX" 2>/dev/null)" || {
+    note "(intercom-hub) the hub version is not graded: no temp dir"
+    return 0
+  }
+  printf '%s' "$vjson" > "$tmp/version.json" 2>/dev/null || true
+  printf '%s' "$sjson" > "$tmp/state.json" 2>/dev/null || true
+  rows="$(python3 - "$want" "$recorded" "$bin" "$root" "$box" "$tmp/version.json" "$tmp/state.json" <<'PYHUBV' 2>&1 || true
+import json, re, sys
+want, recorded, binp, root, box, vfile, sfile = sys.argv[1:8]
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 def key(v):
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", v or "")
@@ -271,7 +286,7 @@ def key(v):
 
 running = ""
 try:
-    running = str(json.loads(os.environ.get("STRIH_HUB_V_JSON") or "null")["version"])
+    running = str(load(vfile)["version"])
 except Exception:
     running = ""
 have, source = (running, "runs") if running else (recorded if recorded not in ("", "unknown") else "", "recorded")
@@ -287,7 +302,7 @@ else:
     print("OK\thub %s %s (this checkout %s)" % ("runs" if source == "runs" else "recorded", have, want))
 
 try:
-    state = json.loads(os.environ.get("STRIH_HUB_S_JSON") or "null")
+    state = load(sfile)
     legs = [(p.get("name", "?"), int(p.get("decode_rejects") or 0)) for p in state.get("participants", [])
             if isinstance(p, dict)]
 except Exception:
@@ -297,6 +312,7 @@ if bad:
     print("NOTE\tdecode_rejects %s -- a known VBAN stream the hub cannot decode (its packets are dropped; journalctl -u intercom-hub names the stream, sender and reason, issue 1467)" % " ".join(bad))
 PYHUBV
 )"
+  rm -rf -- "$tmp" 2>/dev/null || true
   while IFS= read -r row; do
     case "$row" in
       OK$'\t'*) ok "(intercom-hub) ${row#*$'\t'}" ;;
