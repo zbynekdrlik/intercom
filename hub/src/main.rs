@@ -341,8 +341,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
-/// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
 /// The VBAN receive task (moved out of `main()` for its size, issue 1467): demux each datagram by its
 /// stream name ([`classify_packet`]), bring a known stream to the hub rate through its own converter
 /// (issue 1345) and push it into its jitter buffer; a known stream that does not decode is counted in
@@ -415,6 +413,8 @@ fn spawn_vban_receive(
     });
 }
 
+/// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
+/// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
 fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
     let (Some(_), Some(jcfg)) = (matrix.janus_participant(), matrix.janus.as_ref()) else {
         return None;

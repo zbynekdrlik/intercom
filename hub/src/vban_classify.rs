@@ -122,6 +122,10 @@ pub struct DecodeRejects {
     rejecting: Option<String>,
     last_log: Option<Instant>,
     suppressed: u64,
+    /// A transition was suppressed by the floor and its state is not in the journal yet: the next
+    /// note after the floor logs the stream's CURRENT state (review round 2: otherwise a stream that
+    /// flipped back inside the floor and stayed there left the opposite state as the last line).
+    pending: bool,
 }
 
 impl DecodeRejects {
@@ -148,53 +152,81 @@ impl DecodeRejects {
 
     /// Whether a transition at `now` may be logged: `Some(n)` when no line was logged within
     /// [`DECODE_LOG_FLOOR`] (`n` = the transitions suppressed since the last line, then reset),
-    /// `None` when it is suppressed (and counted).
+    /// `None` when it is suppressed (counted, and its state left pending for [`Self::pending_due`]).
     pub fn log_due(&mut self, now: Instant) -> Option<u64> {
         if let Some(last) = self.last_log {
             if now.saturating_duration_since(last) < DECODE_LOG_FLOOR {
                 self.suppressed += 1;
+                self.pending = true;
                 return None;
             }
         }
         self.last_log = Some(now);
+        self.pending = false;
         Some(std::mem::take(&mut self.suppressed))
+    }
+
+    /// A packet that is NOT a transition: `Some(n)` once the floor has passed since the last line
+    /// while a suppressed transition is pending (log the current state, `n` suppressed), else `None`.
+    pub fn pending_due(&mut self, now: Instant) -> Option<u64> {
+        if !self.pending {
+            return None;
+        }
+        self.log_due(now)
+    }
+
+    /// Whether the transition `t` of this packet (or a pending earlier one) is to be logged now.
+    fn due(&mut self, t: Option<DecodeTransition>, now: Instant) -> Option<u64> {
+        match t {
+            Some(_) => self.log_due(now),
+            None => self.pending_due(now),
+        }
     }
 }
 
-/// Count an undecodable packet of a known stream and log the transition (stream, sender, reason),
-/// at most one line per [`DECODE_LOG_FLOOR`], so a silent leg names its cause in the journal.
+/// Count an undecodable packet of a known stream and log its state (stream, sender, reason) on a
+/// transition, at most one line per [`DECODE_LOG_FLOOR`] (a suppressed one logged by the first note
+/// after the floor), so a silent leg names its cause in the journal. `true` = a line was logged.
 pub fn note_undecodable(
     rejects: &mut DecodeRejects,
     stream: &str,
     from: SocketAddr,
     reason: &str,
     now: Instant,
-) {
-    if rejects.reject(reason).is_some() {
-        if let Some(suppressed) = rejects.log_due(now) {
-            tracing::warn!(
-                stream = %stream,
-                sender = %from,
-                reason = %reason,
-                decode_rejects = rejects.count(),
-                suppressed_transitions = suppressed,
-                "VBAN stream of a known participant cannot be decoded: its packets are DROPPED (issue 1467)"
-            );
-        }
-    }
+) -> bool {
+    let transition = rejects.reject(reason);
+    let Some(suppressed) = rejects.due(transition, now) else {
+        return false;
+    };
+    tracing::warn!(
+        stream = %stream,
+        sender = %from,
+        reason = %reason,
+        decode_rejects = rejects.count(),
+        suppressed_transitions = suppressed,
+        "VBAN stream of a known participant cannot be decoded: its packets are DROPPED (issue 1467)"
+    );
+    true
 }
 
-/// A packet of a known stream decoded: log once when it follows rejects (under the same floor).
-pub fn note_decoded(rejects: &mut DecodeRejects, stream: &str, from: SocketAddr, now: Instant) {
-    if rejects.accept().is_some() {
-        if let Some(suppressed) = rejects.log_due(now) {
-            tracing::info!(
-                stream = %stream,
-                sender = %from,
-                decode_rejects = rejects.count(),
-                suppressed_transitions = suppressed,
-                "VBAN stream decodes again (issue 1467)"
-            );
-        }
-    }
+/// A packet of a known stream decoded: log it when it follows rejects (under the same floor, a
+/// suppressed recovery logged by the first note after it). `true` = a line was logged.
+pub fn note_decoded(
+    rejects: &mut DecodeRejects,
+    stream: &str,
+    from: SocketAddr,
+    now: Instant,
+) -> bool {
+    let transition = rejects.accept();
+    let Some(suppressed) = rejects.due(transition, now) else {
+        return false;
+    };
+    tracing::info!(
+        stream = %stream,
+        sender = %from,
+        decode_rejects = rejects.count(),
+        suppressed_transitions = suppressed,
+        "VBAN stream decodes again (issue 1467)"
+    );
+    true
 }

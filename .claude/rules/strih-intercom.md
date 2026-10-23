@@ -715,7 +715,9 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     `DecodeRejects` per participant: a warn per transition (the first reject, a changed reason:
     stream, sender, reason, count) and an info when the stream decodes again, at most one line per
     stream every `DECODE_LOG_FLOOR` (10 s; the next line carries `suppressed_transitions`), so a
-    sender mixing good and bad packets never logs at packet rate. The count is published through
+    sender mixing good and bad packets never logs at packet rate. A suppressed transition stays
+    PENDING: the first packet after the floor logs the stream's CURRENT state, so the journal's last
+    line never says the opposite of what the hub does (review round 2). The count is published through
     the same `VbanRateStats` slot (`publish_decode_rejects`, which `publish` never resets).
   - `/api/state`: `decode_rejects` on every VBAN participant; the status line appends
     `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
