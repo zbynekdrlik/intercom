@@ -4,7 +4,8 @@
 #
 # scripts/lib/strih-intercom-hub-unit.sh -- issue 1412: the intercom-hub unit per box ROLE, and verify
 # item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs; issue
-# 1401: verify item 16's grade of the hub's memory lock.
+# 1401: verify item 16's grade of the hub's memory lock; issue 1467: verify item 16's hub version vs the
+# checkout + the decode_rejects note.
 #
 # The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
@@ -222,6 +223,104 @@ else:
     FAIL$'\t'*) bad "(intercom-hub) ${row#*$'\t'}" ;;
     *) bad "(intercom-hub) grading the hub memory lock failed: ${row:-no output}" ;;
   esac
+  return 0
+}
+
+# strih_intercom_hub_version_grade BASE_URL BOX [ROOT] [BIN] -> verify item 16's version + decode rows
+# (issue 1467) through the caller's ok / note; never a FAIL, always rc 0. 23.10.2026 the FOH console's
+# 24-bit VBAN stream was dropped silently by a hub binary built before the 24-bit decode, and a fresh
+# strih installed main's hub, older than its checkout. So:
+#   * the RUNNING hub's version (BASE_URL/api/version), else the version setup-strih recorded next to
+#     the binary (BIN.version, default /usr/local/bin/intercom-hub), against the checkout's workspace
+#     version (strih_checkout_version ROOT, default the checkout this lib lives in): OLDER = a NOTE with the reinstall line (the old binary is
+#     moved aside, never deleted: setup never replaces an installed hub); the same or newer = a PASS;
+#     nothing readable = a NOTE;
+#   * a VBAN participant with decode_rejects > 0 on /api/state (a known stream the hub cannot decode)
+#     = a NOTE naming the legs; an unreadable state adds nothing (the memory-lock row reports it).
+# STRIH_HUB_VERSION_JSON_FILE / STRIH_HUB_DECODE_STATE_FILE read the JSON from files (the test seams).
+strih_intercom_hub_version_grade() {
+  local base="${1:?hub base url required}" box="${2:-<box>}"
+  local root="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+  local bin="${4:-/usr/local/bin/intercom-hub}" want vjson recorded="" sjson rows row tmp
+  want="$(strih_checkout_version "$root" || true)"
+  if [ -n "${STRIH_HUB_VERSION_JSON_FILE:-}" ]; then
+    vjson="$(cat -- "$STRIH_HUB_VERSION_JSON_FILE" 2>/dev/null || true)"
+  else
+    vjson="$(curl -fsS --max-time 3 "${base}/api/version" 2>/dev/null || true)"
+  fi
+  [ -f "${bin}.version" ] && recorded="$(sed -n 's/^version=//p' "${bin}.version" 2>/dev/null | head -n 1 || true)"
+  if [ -n "${STRIH_HUB_DECODE_STATE_FILE:-}" ]; then
+    sjson="$(cat -- "$STRIH_HUB_DECODE_STATE_FILE" 2>/dev/null || true)"
+  else
+    sjson="$(curl -fsS --max-time 3 "${base}/api/state" 2>/dev/null || true)"
+  fi
+  # The two JSON answers go to python as FILES (an environment string is capped at 128 KB, issue 1467
+  # review); python reads its program from the heredoc.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/strih-hub-version.XXXXXX" 2>/dev/null)" || {
+    note "(intercom-hub) the hub version is not graded: no temp dir"
+    return 0
+  }
+  printf '%s' "$vjson" > "$tmp/version.json" 2>/dev/null || true
+  printf '%s' "$sjson" > "$tmp/state.json" 2>/dev/null || true
+  rows="$(python3 - "$want" "$recorded" "$bin" "$root" "$box" "$tmp/version.json" "$tmp/state.json" <<'PYHUBV' 2>&1 || true
+import json, re, sys
+want, recorded, binp, root, box, vfile, sfile = sys.argv[1:8]
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def key(v):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", v or "")
+    if not m:
+        return None
+    pre = m.group(4)
+    ids = []
+    for part in (pre.split(".") if pre else []):
+        ids.append((0, int(part), "") if part.isdigit() else (1, 0, part))
+    # a release sorts after every pre-release of the same triple (semver)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if pre else 1, ids)
+
+running = ""
+try:
+    running = str(load(vfile)["version"])
+except Exception:
+    running = ""
+have, source = (running, "runs") if running else (recorded if recorded not in ("", "unknown") else "", "recorded")
+if not have:
+    print("NOTE\tthe hub version is not readable (no /api/version answer, no recorded %s.version) -- not graded against this checkout's %s" % (binp, want or "unknown version"))
+elif key(want) is None or key(have) is None:
+    print("NOTE\tthe hub %s %s, this checkout is %s -- the versions cannot be compared" % (source, have, want or "unknown"))
+elif key(have) < key(want):
+    verb = "runs" if source == "runs" else "is installed (recorded version, the hub does not answer)"
+    print("NOTE\tthe hub %s %s, OLDER than this checkout's %s -- a VBAN format it cannot decode reads as a silent leg (issue 1467); reinstall: sudo mv %s %s.pre-%s && sudo GH_TOKEN=<token> %s/scripts/setup-strih.sh --box %s (step 13 installs the checkout's hub), then sudo systemctl restart intercom-hub"
+          % (verb, have, want, binp, binp, have, root, box))
+else:
+    print("OK\thub %s %s (this checkout %s)" % ("runs" if source == "runs" else "recorded", have, want))
+
+try:
+    state = load(sfile)
+    legs = [(p.get("name", "?"), int(p.get("decode_rejects") or 0)) for p in state.get("participants", [])
+            if isinstance(p, dict)]
+except Exception:
+    legs = []
+bad = ["%s=%d" % (n, c) for n, c in legs if c > 0]
+if bad:
+    print("NOTE\tdecode_rejects %s -- a known VBAN stream the hub cannot decode (its packets are dropped; journalctl -u intercom-hub names the stream, sender and reason, issue 1467)" % " ".join(bad))
+PYHUBV
+)"
+  rm -rf -- "$tmp" 2>/dev/null || true
+  while IFS= read -r row; do
+    case "$row" in
+      OK$'\t'*) ok "(intercom-hub) ${row#*$'\t'}" ;;
+      NOTE$'\t'*) note "(intercom-hub) ${row#*$'\t'}" ;;
+      '') ;;
+      *) note "(intercom-hub) grading the hub version failed: ${row}" ;;
+    esac
+  done <<<"$rows"
   return 0
 }
 

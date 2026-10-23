@@ -18,6 +18,13 @@ use crate::adaptive_target::AdaptiveTarget;
 use crate::vban_jitter::{stretch_block, NetworkFill, NetworkFillStats, PopPlan};
 use crate::vban_rate::VbanRateConverter;
 
+// The demux of a received datagram (issue 1467) lives in `vban_classify`; re-exported here, where the
+// receive path has always imported it from.
+pub use crate::vban_classify::{
+    classify_packet, note_decoded, note_undecodable, route_packet, vban_stream_name, DecodeRejects,
+    DecodeTransition, RoutedPacket, DECODE_LOG_FLOOR,
+};
+
 /// One decoded VBAN packet's audio, deinterleaved into planar channels.
 #[derive(Debug, Clone)]
 pub struct DecodedAudio {
@@ -121,6 +128,16 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
     };
 
     let frames = interleaved.len().checked_div(n_ch).unwrap_or(0);
+    if frames == 0 {
+        // issue 1467: a payload without one whole frame carries no audio. Pushing it would still
+        // mark the stream as receiving; it is a decode reject instead.
+        // The reason stays the same for every such packet of a stream (no byte count), so the
+        // decode-reject log keys one transition on it (issue 1467 review).
+        anyhow::bail!(
+            "malformed VBAN payload: no whole frame of {n_ch} ch (codec 0x{:02x})",
+            header.codec
+        );
+    }
     let mut channels = vec![Vec::with_capacity(frames); n_ch];
     for (i, &s) in interleaved.iter().enumerate() {
         if n_ch == 0 {
@@ -141,18 +158,6 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
         },
         header.sample_rate_checked().unwrap_or(0),
     ))
-}
-
-/// Decode + demux one packet: `Some((participant_id, audio, sample_rate))` if the stream name maps
-/// to a known participant, `None` if it decodes to an unknown name OR fails to decode (a
-/// foreign/garbage packet is silently ignored, exactly like the cambox receiver).
-pub fn route_packet(
-    known_streams: &HashMap<String, usize>,
-    data: &[u8],
-) -> Option<(usize, DecodedAudio, u32)> {
-    let (audio, sample_rate) = decode_packet(data).ok()?;
-    let id = *known_streams.get(&audio.stream_name)?;
-    Some((id, audio, sample_rate))
 }
 
 /// Bring one routed packet, sampled at `rate`, to the hub rate through its stream's `conv`

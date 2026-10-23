@@ -149,11 +149,14 @@ impl VbanRateConverter {
 }
 
 /// The lock-free per-stream slot the VBAN receive task publishes a converter's state into and the
-/// block loop reads for `/api/state`. A rate of 0 means "no packet yet".
+/// block loop reads for `/api/state`. A rate of 0 means "no packet yet". It also carries the
+/// stream's decode-reject count (issue 1467, `crate::vban_io::DecodeRejects`): the receive task
+/// owns both, so one slot per stream serves both counters.
 #[derive(Debug, Default)]
 pub struct VbanRateStats {
     sample_rate: AtomicU32,
     rate_rejects: AtomicU64,
+    decode_rejects: AtomicU64,
 }
 
 impl VbanRateStats {
@@ -178,5 +181,16 @@ impl VbanRateStats {
     /// The last published reject count.
     pub fn rate_rejects(&self) -> u64 {
         self.rate_rejects.load(Ordering::Relaxed)
+    }
+
+    /// Publish the stream's undecodable-packet count (issue 1467). [`VbanRateStats::publish`]
+    /// leaves it alone.
+    pub fn publish_decode_rejects(&self, count: u64) {
+        self.decode_rejects.store(count, Ordering::Relaxed);
+    }
+
+    /// The last published undecodable-packet count (issue 1467).
+    pub fn decode_rejects(&self) -> u64 {
+        self.decode_rejects.load(Ordering::Relaxed)
     }
 }

@@ -8,9 +8,11 @@
 //! NOTE: launching this against the live rig SENDS VBAN to the real camboxes. That is the M1b/M4
 //! supervisor step (via the cam1 env override first) — never run it from a dev lane.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -38,7 +40,8 @@ use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
-    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
+    classify_packet, note_decoded, note_undecodable, resolve_vban_addr, to_hub_rate, DecodeRejects,
+    JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
@@ -249,51 +252,19 @@ async fn main() -> Result<()> {
     // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
     // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
     // converters live in this task alone (no lock); their rate + reject count are published to the
-    // lock-free `rate_stats` slots the block loop reads for /api/state.
+    // lock-free `rate_stats` slots the block loop reads for /api/state. Issue 1467: the stream name
+    // is looked up BEFORE the payload is decoded, so a known stream the hub cannot decode is counted
+    // (`decode_rejects`, the same slot) and logged once per transition; unknown names stay silent.
     let rate_stats: Arc<Vec<VbanRateStats>> =
         Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
-    {
-        let jitter = jitter.clone();
-        let rate_stats = rate_stats.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            let mut converters: Vec<VbanRateConverter> = (0..n)
-                .map(|_| VbanRateConverter::new(sample_rate))
-                .collect();
-            loop {
-                match vban_socket.recv_from(&mut buf).await {
-                    Ok((len, _from)) => {
-                        if let Some((id, audio, rate)) = route_packet(&input_streams, &buf[..len]) {
-                            let Some(conv) = converters.get_mut(id) else {
-                                continue;
-                            };
-                            let converted = to_hub_rate(conv, audio, rate);
-                            if let Some(slot) = rate_stats.get(id) {
-                                slot.publish(conv);
-                            }
-                            if let Some(audio) = converted {
-                                // A program feed's target change is logged after the lock is
-                                // released: the real-time hub-mix thread takes the same lock
-                                // every block (issue 1401).
-                                let change = jitter.lock().ok().and_then(|mut jb| {
-                                    jb.get_mut(id).and_then(|b| {
-                                        b.push(&audio);
-                                        b.take_target_change()
-                                    })
-                                });
-                                if let Some(change) = change {
-                                    change.log();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "VBAN recv error");
-                    }
-                }
-            }
-        });
-    }
+    spawn_vban_receive(
+        vban_socket,
+        input_streams,
+        jitter.clone(),
+        rate_stats.clone(),
+        n,
+        sample_rate,
+    );
 
     // --- block/mix thread: pop a block from every buffer, mix N-1, send each cambox's stream --
     // One NON-BLOCKING send socket per output slot (issue 1401): one shared blocking socket let the
@@ -368,6 +339,78 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// The VBAN receive task (moved out of `main()` for its size, issue 1467): demux each datagram by its
+/// stream name ([`classify_packet`]), bring a known stream to the hub rate through its own converter
+/// (issue 1345) and push it into its jitter buffer; a known stream that does not decode is counted in
+/// its `decode_rejects` slot and logged (issue 1467); foreign traffic is ignored. The converters and
+/// the reject state live in this task alone (no lock); a program target change is logged after the
+/// jitter lock is released, since the real-time hub-mix thread takes that lock every block (issue 1401).
+fn spawn_vban_receive(
+    vban_socket: tokio::net::UdpSocket,
+    input_streams: HashMap<String, usize>,
+    jitter: Arc<Mutex<Vec<JitterBuffer>>>,
+    rate_stats: Arc<Vec<VbanRateStats>>,
+    n: usize,
+    sample_rate: u32,
+) {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut converters: Vec<VbanRateConverter> = (0..n)
+            .map(|_| VbanRateConverter::new(sample_rate))
+            .collect();
+        let mut decode_rejects: Vec<DecodeRejects> =
+            (0..n).map(|_| DecodeRejects::default()).collect();
+        loop {
+            match vban_socket.recv_from(&mut buf).await {
+                Ok((len, from)) => match classify_packet(&input_streams, &buf[..len]) {
+                    RoutedPacket::Audio {
+                        id,
+                        audio,
+                        sample_rate: rate,
+                    } => {
+                        if let Some(rejects) = decode_rejects.get_mut(id) {
+                            note_decoded(rejects, &audio.stream_name, from, Instant::now());
+                        }
+                        let Some(conv) = converters.get_mut(id) else {
+                            continue;
+                        };
+                        let converted = to_hub_rate(conv, audio, rate);
+                        if let Some(slot) = rate_stats.get(id) {
+                            slot.publish(conv);
+                        }
+                        if let Some(audio) = converted {
+                            // A program feed's target change is logged after the lock is
+                            // released: the real-time hub-mix thread takes the same lock
+                            // every block (issue 1401).
+                            let change = jitter.lock().ok().and_then(|mut jb| {
+                                jb.get_mut(id).and_then(|b| {
+                                    b.push(&audio);
+                                    b.take_target_change()
+                                })
+                            });
+                            if let Some(change) = change {
+                                change.log();
+                            }
+                        }
+                    }
+                    RoutedPacket::Undecodable { id, stream, reason } => {
+                        if let Some(rejects) = decode_rejects.get_mut(id) {
+                            note_undecodable(rejects, &stream, from, &reason, Instant::now());
+                            if let Some(slot) = rate_stats.get(id) {
+                                slot.publish_decode_rejects(rejects.count());
+                            }
+                        }
+                    }
+                    RoutedPacket::Foreign => {}
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "VBAN recv error");
+                }
+            }
+        }
+    });
 }
 
 /// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
@@ -536,6 +579,7 @@ fn run_block_loop(bl: BlockLoop) {
                     if let Some(slot) = rate_stats.get(id) {
                         rx_stats[id].sample_rate = slot.sample_rate();
                         rx_stats[id].rate_rejects = slot.rate_rejects();
+                        rx_stats[id].decode_rejects = slot.decode_rejects();
                     }
                 }
             }
