@@ -16,10 +16,12 @@
 //! * a reserved sample rate is still a RATE reject (counted by the converter), never a decode one.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use intercom_hub::vban_io::{
-    classify_packet, encode_packet, route_packet, to_hub_rate, DecodeRejects, DecodeTransition,
-    OutBlock, RoutedPacket,
+    classify_packet, encode_packet, note_decoded, note_undecodable, route_packet, to_hub_rate,
+    DecodeRejects, DecodeTransition, OutBlock, RoutedPacket, DECODE_LOG_FLOOR,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 use intercom_vban::{VbanCodec, VbanHeader};
@@ -182,6 +184,59 @@ fn the_count_grows_per_packet_and_the_log_fires_once_per_transition() {
         "rejecting again after a recovery is logged again"
     );
     assert_eq!(t.count(), 102);
+}
+
+#[test]
+fn a_malformed_reason_is_the_same_for_every_short_payload_of_a_stream() {
+    // review: a byte count in the reason made every differently-short packet a new transition.
+    let reason = |payload: &[u8]| match classify_packet(
+        &known(),
+        &raw("cam1", VbanCodec::Pcm16, 2, 1, payload),
+    ) {
+        RoutedPacket::Undecodable { reason, .. } => reason,
+        other => panic!("got {other:?}"),
+    };
+    assert_eq!(reason(&[1]), reason(&[1, 2, 3]));
+}
+
+#[test]
+fn the_log_floor_allows_one_line_per_stream_per_ten_seconds() {
+    assert_eq!(DECODE_LOG_FLOOR, Duration::from_secs(10));
+    let t0 = Instant::now();
+    let mut t = DecodeRejects::default();
+    assert_eq!(t.log_due(t0), Some(0), "the first transition logs");
+    // A sender that mixes good and bad packets flips every packet: within the floor all suppressed.
+    for i in 1..=50u64 {
+        assert_eq!(t.log_due(t0 + Duration::from_millis(100 * i)), None);
+    }
+    assert_eq!(
+        t.log_due(t0 + DECODE_LOG_FLOOR + Duration::from_millis(1)),
+        Some(50),
+        "the next line names how many transitions it suppressed"
+    );
+    assert_eq!(
+        t.log_due(t0 + DECODE_LOG_FLOOR * 3),
+        Some(0),
+        "and the count restarts"
+    );
+}
+
+#[test]
+fn the_notes_count_every_packet_whatever_the_floor() {
+    let from: SocketAddr = "10.77.7.30:6980".parse().unwrap();
+    let t0 = Instant::now();
+    let mut t = DecodeRejects::default();
+    for i in 0..10u64 {
+        note_undecodable(
+            &mut t,
+            "fohabl-strih",
+            from,
+            "bad",
+            t0 + Duration::from_millis(i),
+        );
+        note_decoded(&mut t, "fohabl-strih", from, t0 + Duration::from_millis(i));
+    }
+    assert_eq!(t.count(), 10, "the floor limits the log, never the count");
 }
 
 #[test]
