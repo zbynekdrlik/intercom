@@ -80,7 +80,9 @@ def test_fohabl_program_ref_into_cutters_at_minus_8_never_to_cams():
 
 def test_model_shape_and_roles():
     _hub, parts, points = _model()
-    assert len(points) == 216
+    # issue 1439 phase 2: the 216-point grid minus VASIO8's 4 program points (fohabl/lv1 ch1/2): the hub
+    # forwards nothing into the strih OBS, which takes the console's VBAN itself
+    assert len(points) == 212
     names = {p["name"] for p in parts}
     for want in (
         "cam1",
@@ -92,7 +94,6 @@ def test_model_shape_and_roles():
         "phones",
         "speakers",
         "line34",
-        "program_out",
     ):
         assert want in names, f"missing participant {want}"
     # The cutters carry 2 mics in + two stereo cans out (4 ch); phones are 2-in / 2-out.
@@ -135,7 +136,7 @@ def test_generated_toml_parses_into_the_matrix_shape():
     assert data["hub"]["vban_bind"] == "0.0.0.0:6980"
     _hub, parts, points = _model()
     assert len(data["participant"]) == len(parts)
-    assert len(data["point"]) == len(points) == 216
+    assert len(data["point"]) == len(points) == 212
     # A spot-check that a −8 dB program-ref point survives the render→parse round-trip.
     fohabl_cutters = [
         pt
@@ -148,25 +149,19 @@ def test_generated_toml_parses_into_the_matrix_shape():
 # --- issue 1344: the local PipeWire program-audio graph (VB-Matrix replacement) -----------------
 
 
-def test_vasio8_becomes_a_pipewire_program_out_sink():
-    """VASIO8 is the OBS `ASIO zvuk` program capture — the converter maps it to a `program_out`
-    pipewire sink (not the old M1 `program_monitor`), targeting the `strih-program` null sink."""
-    _hub, parts, _points = _model()
+def test_vasio8_is_not_carried_into_the_hub():
+    """issue 1439 phase 2 (owner ROZHODNUTE 22.10.2026, addendum 6338457001: "interkom-hub ma byt separatna
+    vec, nema nic preposielat do strih obs"): VASIO8 was the OBS `ASIO zvuk` program capture. The strih OBS
+    now receives the console's VBAN itself (the obs-vban source on UDP 6981), so the converter emits no
+    `program_out` participant and drops every point into VASIO8."""
+    _hub, parts, points = _model()
     names = {p["name"] for p in parts}
-    assert "program_out" in names, "VASIO8 must map to a program_out participant"
-    assert "program_monitor" not in names, "VASIO8 is the OBS program capture, not a monitor"
-    po = next(p for p in parts if p["name"] == "program_out")
-    assert po["role"] == "program_out"
-    assert po["adapter"] == "pipewire"
-    assert po["pipewire_target"] == "strih-program"
-
-
-def test_program_out_source_streams_are_the_vasio8_feeds():
-    """The program mix OBS captures = the VBAN streams routed into VASIO8 = fohabl-strih + lv1-strih
-    (the VBAN64 slot = VBANStreamIn index 9 = lv1-strih), both live named sources."""
-    _hub, parts, _points = _model()
-    po = next(p for p in parts if p["name"] == "program_out")
-    assert po["source_streams"] == ["fohabl-strih", "lv1-strih"], po["source_streams"]
+    assert "program_out" not in names and "program_monitor" not in names
+    assert not any(p["role"] == "program_out" for p in parts)
+    assert not any(pt["dst"] == "program_out" for pt in points)
+    # the program references keep their channel counts from their remaining (cutters / speakers) points
+    by_name = {p["name"]: p for p in parts}
+    assert (by_name["fohabl"]["in_channels"], by_name["lv1"]["in_channels"]) == (4, 2)
 
 
 def test_cutters_becomes_a_pipewire_talkback_capture():
@@ -192,8 +187,9 @@ def test_minifuse_capture_node_is_the_real_uppercase_arturia_alsa_name():
 def test_generated_toml_emits_the_pipewire_fields():
     text = conv.convert(_xml())
     assert 'adapter = "pipewire"' in text
-    assert 'pipewire_target = "strih-program"' in text
-    assert 'source_streams = ["fohabl-strih", "lv1-strih"]' in text
+    # issue 1439 phase 2: no strih-program sink and no program source streams (no program_out)
+    assert 'pipewire_target = "strih-program"' not in text
+    assert "source_streams" not in text
     assert "pipewire_source = " in text
     # No stale program_monitor participant survives.
     data = tomllib.loads(text)

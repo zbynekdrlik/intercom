@@ -5,7 +5,7 @@
 //! REJECTS at rig startup. This closes that Tier-0 gap: CI loads the real deployed matrix here.
 
 use intercom_hub::janus_rtp::JanusCodec;
-use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
+use intercom_hub::matrix::{Matrix, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
 const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-snv.toml");
 
@@ -14,8 +14,9 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     let m = Matrix::from_toml(DEPLOYED_TOML)
         .expect("the deployed intercom.strih-snv.toml must load through Matrix::from_toml");
 
-    assert_eq!(m.participants.len(), 15, "expected 15 participants");
-    assert_eq!(m.points.len(), 216, "expected the 216-point VB-Matrix grid");
+    // issue 1439 phase 2: the VB-Matrix grid minus VASIO8 (the old OBS program capture) and its 4 points.
+    assert_eq!(m.participants.len(), 14, "expected 14 participants");
+    assert_eq!(m.points.len(), 212, "expected the 216-point VB-Matrix grid minus VASIO8's 4");
 
     // 10 VBAN inputs (cam1..7 + fohabl/lv1/mbc), 7 active VBAN outputs (cam1..7).
     let vban_in = m
@@ -80,23 +81,19 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     // Issue 1345 (25.9.2026): the deployed phones leg is Opus with in-band FEC, not PCMU.
     assert_eq!(j.codec, JanusCodec::Opus);
 
-    // issue 1344: the local PipeWire program-audio graph. VASIO8 is now the `program_out` sink OBS
-    // captures (not the old M1 `program_monitor`), fed by the fohabl-strih + lv1-strih program feeds;
-    // the MiniFuse (cutters) is the pipewire talkback capture input.
-    let (po_id, target, streams) = m
-        .program_out()
-        .expect("the deployed matrix declares a program_out sink");
-    assert_eq!(m.participants[po_id].name, "program_out");
-    assert_eq!(m.participants[po_id].role, PROGRAM_OUT_ROLE);
-    assert_eq!(m.participants[po_id].adapter, ADAPTER_PIPEWIRE);
-    assert_eq!(target, "strih-program");
-    assert_eq!(
-        streams,
-        vec!["fohabl-strih".to_string(), "lv1-strih".to_string()]
+    // issue 1439 phase 2 (owner ROZHODNUTE 22.10.2026): the hub is the intercom only and forwards nothing
+    // into the strih OBS, which receives the console's VBAN program itself (the obs-vban source).
+    assert!(
+        m.program_out().is_none(),
+        "the strih-snv hub must declare no program_out sink"
+    );
+    assert!(
+        !m.participants.iter().any(|p| p.role == PROGRAM_OUT_ROLE),
+        "no program_out participant"
     );
     assert!(
         m.id_of("program_monitor").is_none(),
-        "VASIO8 is the OBS program capture (program_out), not a monitor"
+        "VASIO8 is not carried into the hub at all"
     );
 
     // The cutters carry the operator talkback mic as a pipewire capture input.
