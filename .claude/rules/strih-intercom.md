@@ -699,6 +699,39 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   block loop reads. The periodic status line appends `rate_rejects=N` when any packet was dropped (a
   rejected stream reads as silent -120 dBFS, so the line is what explains it). After a deploy,
   fohabl must read `sample_rate: 96000` with `overruns` ≈ 0.
+- **A known stream that does not decode is counted, never silent (issue 1467).** 23.10.2026 the
+  FOH console sent `fohabl-strih` as 24-bit PCM to a hub built before the PCM24 arm: the old
+  `route_packet` decoded BEFORE the name lookup, turned the error into `None`, and the cutters lost
+  FOH for ~90 min with no counter and no log.
+  - `vban_io::classify_packet` reads the stream name from the raw header (`vban_stream_name`: magic +
+    the 16-byte name, any sub-protocol), looks it up, and only then decodes:
+    `Audio` / `Undecodable { id, stream, reason }` / `Foreign` (unknown name or not VBAN, silent).
+    `route_packet` stays the audio-only wrapper.
+  - Undecodable = an unsupported codec (`unsupported VBAN codec 0x..`), a non-audio sub-protocol, or a
+    payload without one whole frame (`malformed VBAN payload`). A reserved rate index still decodes
+    to rate 0 and stays a `rate_rejects` count (the converter's).
+  - The receive task owns a `DecodeRejects` per participant: one warn per transition (the first
+    reject, a changed reason: stream, sender, reason, count) and one info when the stream decodes
+    again; the count is published through the same `VbanRateStats` slot
+    (`publish_decode_rejects`, which `publish` never resets).
+  - `/api/state`: `decode_rejects` on every VBAN participant; the status line appends
+    `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
+    count (`strih_intercom_hub_version_grade`, below).
+  - Tests: `intercom/hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
+    half, CI only; the status line + snapshot are mirrored in a stub-matrix replica of state.rs).
+- **The hub binary of the checkout's own commit (issue 1467).** setup-strih step 13
+  (`strih_intercom_hub_binary_install BIN ROOT`, `scripts/lib/strih-ci-artifact.sh`) fetches the
+  `intercom-hub-linux-amd64` artifact of the provisioning tree's commit (`strih_checkout_source_sha`:
+  a git checkout's HEAD when ROOT is its top level, else the `CAMERA_BOX_SOURCE_SHA` file the
+  strih-snv deploy writes into its staged tree, which also carries `Cargo.toml` now), `main` only
+  when that commit has no artifact (a WARNING names it), `STRIH_LX_HUB_SRC` still first. The log
+  names the ref; `<bin>.version` records version / source_sha / artifact_ref. An installed binary is
+  still kept (its version is recorded when the file is missing or differs). verify-strih item 16
+  (`strih_intercom_hub_version_grade BASE_URL BOX [ROOT] [BIN]`, `strih-intercom-hub-unit.sh`) grades
+  the RUNNING hub's `/api/version` (else the recorded version) against the checkout's workspace
+  version: OLDER = a NOTE with the reinstall line (`sudo mv` the binary to `.pre-<version>`, re-run
+  setup-strih, restart the hub), the same or newer = PASS, nothing readable = NOTE. Tests:
+  `tests/python/test_strih_hub_artifact_1467.py`.
 - **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
   the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
   bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
