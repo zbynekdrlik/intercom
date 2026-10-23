@@ -16,13 +16,17 @@ Slot → hub participant mapping (derived from the XML's own attributes, not a h
   VBAN in only — the stream name minus the `-strih` suffix).
 - `AMDevice` type 256 (the MiniFuse ASIO master) → `cutters`; type 4 (WDM out) → `speakers`; type 1
   (WDM in) → `line34`.
-- an online `VAIOSlot` (VAIO1) → `phones`; an online `VASIOSlot` (VASIO8) → `program_out`.
+- an online `VAIOSlot` (VAIO1) → `phones`.
+- an online `VASIOSlot` (VASIO8, the Windows OBS `ASIO zvuk` program capture) → NOTHING: issue 1439
+  phase 2 (owner ROZHODNUTE 22.10.2026, "interkom-hub ma byt separatna vec, nema nic preposielat do
+  strih obs") -- the strih OBS receives the console's VBAN program itself (the obs-vban source on UDP
+  6981), so the hub carries no `program_out` and every point into VASIO8 is dropped (issue 1344's
+  `program_out` pipewire sink is gone from this matrix; the hub still supports one for strih-pp).
 
 Adapters (issue 1344 wired the local PipeWire graph): VBAN legs are live; the `phones` participant is
-`janus` (M3a); VASIO8 → `program_out` is a `pipewire` sink (the OBS `ASIO zvuk` program capture, fed
-by the VBAN streams routed into it) and the `cutters` (MiniFuse) is a `pipewire` capture input (the
-operator talkback mic). The remaining interface participants (speakers/line34) stay `adapter = "none"`
-until a later local-monitor lane wires them.
+`janus` (M3a); the `cutters` (MiniFuse) is a `pipewire` capture input (the operator talkback mic) and
+plays its own N-1 bus to the cans. The remaining interface participants (speakers/line34) stay
+`adapter = "none"` until a later local-monitor lane wires them.
 
 Usage:
     python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-snv.toml
@@ -73,21 +77,17 @@ _ROLE_ORDER = {
     "phones": 3,
     "speakers": 4,
     "line34": 5,
-    "program_out": 6,
 }
 
 _STRIH_SUFFIX = "-strih"
 
-# issue 1344: the local PipeWire nodes the strih-snv audio graph binds.
-# - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures the loopback
-#   republish node strih-program-source (issue 1344 follow-up, 20.9.2026 live diagnosis --
-#   strih-program.monitor itself is NOT pulse-visible to OBS on this box).
+# issue 1344: the local PipeWire nodes the strih-snv audio graph binds (since issue 1439 phase 2 the
+# hub writes no program sink: the strih OBS takes the console's VBAN program itself).
 # - MINIFUSE_CAPTURE_NODE: the MiniFuse 4 pro-audio capture node the hub reads the operator talkback
 #   from. UPPERCASE "ARTURIA" -- confirmed live against `wpctl status` (issue 1344 follow-up,
 #   20.9.2026): a lowercase/title-case node name is a case-sensitive PipeWire mismatch the hub reads
 #   as a missing device. The exact node name is pinned by the WirePlumber rule setup-strih installs
 #   (pro-audio profile); re-confirm against `wpctl status` at any future live audio bring-up.
-_PROGRAM_SINK_NODE = "strih-program"
 _MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 
 # issue 1345 (24.9.2026): the MiniFuse 4 PLAYBACK node the cutters' N-1 mix is played to, so the
@@ -202,19 +202,20 @@ def build_model(xml_text):
             slot_to_part[e.get("uniq")] = "phones"
             break
 
-    # Program out (OBS `ASIO zvuk` program-audio capture, VASIO8) — the first online VASIOSlot.
-    # A pipewire sink: the hub writes the VBAN streams routed into VASIO8 (the program mix) to the
-    # `strih-program` null sink, which OBS captures as `strih-program.monitor` (issue 1344).
+    # VASIO8 (the Windows OBS `ASIO zvuk` program capture) -- the first online VASIOSlot -- is NOT
+    # carried into the hub (issue 1439 phase 2): the strih OBS takes the console's VBAN program itself,
+    # so its points are dropped below (`None` = a known slot with no hub participant).
     for e in root.iter("VASIOSlot"):
         if e.get("online") == "1":
-            add("program_out", "program_out", "pipewire", 0)
-            slot_to_part[e.get("uniq")] = "program_out"
+            slot_to_part[e.get("uniq")] = None
             break
 
     # Points (routing grid), in document order.
     points = []
     for e in root.iter("Point"):
         si, so = e.get("slotin"), e.get("slotout")
+        if slot_to_part.get(si, "") is None or slot_to_part.get(so, "") is None:
+            continue  # a point into / out of VASIO8 (issue 1439 phase 2)
         if si not in slot_to_part:
             raise ValueError(f"point slotin '{si}' has no participant")
         if so not in slot_to_part:
@@ -248,21 +249,6 @@ def build_model(xml_text):
         d = participants[pt["dst"]]
         s["in_channels"] = max(s["in_channels"], pt["in_ch"])
         d["out_channels"] = max(d["out_channels"], pt["out_ch"])
-
-    # issue 1344: the program_out pipewire sink target + its source streams. The source streams are
-    # DERIVED from the routing — the in_stream of every VBAN participant that routes INTO program_out
-    # (preserving exactly what VB-Matrix fed VASIO8), never a hard-coded guess: on this fixture that
-    # is fohabl-strih (VBAN8) + lv1-strih (the VBAN64 slot = VBANStreamIn index 9), both unity ch1/2.
-    po = participants.get("program_out")
-    if po is not None:
-        po["pipewire_target"] = _PROGRAM_SINK_NODE
-        srcs = []
-        for pt in points:
-            if pt["dst"] == "program_out":
-                src_in = participants.get(pt["src"], {}).get("in_stream")
-                if src_in and src_in not in srcs:
-                    srcs.append(src_in)
-        po["source_streams"] = srcs
 
     # issue 1345: the cutters also PLAY their own N-1 output bus to the MiniFuse (the operator's
     # headphones), one AUX port per output channel.
