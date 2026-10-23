@@ -360,7 +360,11 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   matrix.
 - **R3:** main.rs's `BlockLoop`, `run_block_loop`, `LocalAudioWiring`, the spawn + watch snippet
   and the receive task's push + target-change snippet, cut out and type-checked + clippy-linted
-  against the real modules with stub `Engine`, `watch::Sender` and stats types.
+  against the real modules with stub `Engine`, `watch::Sender` and stats types. Since issue 1467
+  the receive task is `spawn_vban_receive`: cut its `Ok((len, from)) => match classify_packet ...`
+  arm and SPLICE the text into a sync `match` over a list of datagrams with python (`include!` cannot
+  stand in for match arms), so the real arm runs against the real vban_io / vban_classify /
+  vban_rate. Every root that mounts `vban_io.rs` also mounts `vban_classify.rs`.
 - **CI only:** `vban_jitter_state_1401.rs` (serde_json + `Matrix::from_toml`) and the deployed-TOML
   tests (`adaptive_target_1401`'s and `vban_program_target_1401`'s). `vban_program_target_1401`'s
   three other tests run in a one-off root the same way (minus the matrix imports). A first cut of the lost-ticks
