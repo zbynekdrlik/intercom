@@ -76,6 +76,13 @@ the cutters' playback INTO the `strih-program` sink and their capture onto its m
 
 ## Rollout + rollback (supervisor)
 
+**Gate before the cut-over (the card must be free):** as the operator, read `pactl get-default-sink`,
+`pactl get-default-source` and the client nodes linked to the card (`pw-link -l`, or `pw-top`). An OBS
+or desktop input on the default source keeps the capture PCM open for good (idle suspend never fires),
+so arecord would get EBUSY on every retry. Move the defaults off the card (`wpctl set-default <another
+node>`) and remove any client of it before the hub restart; a WirePlumber deny rule is the main
+session's call (design: phase 4 removes WirePlumber).
+
 Deploy the hub binary FIRST, then the TOML (or re-run setup-strih: the guard keeps the old TOML until
 the hub loads the new one), then restart the hub. strih-pp first. Live check: `curl -s
 http://<box>:8790/api/state | jq '.participants[] | select(.name=="cutters") | .alsa'` -> present, both

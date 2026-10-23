@@ -184,6 +184,18 @@ for p in ps:
   return 0
 }
 
+# strih_intercom_hub_refusal_line OUTPUT -> the line of a refusing hub's output that says why: clap's
+# `error:` line (a hub from before --check-config; clap's LAST line is only its --help hint), else the
+# last non-empty line (anyhow's `Caused by:` cause). Always rc 0.
+strih_intercom_hub_refusal_line() {
+  local out="${1-}" line
+  line="$(printf '%s\n' "$out" | grep -m1 '^error:' || true)"
+  if [ -z "$line" ]; then
+    line="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+  fi
+  printf '%s\n' "${line#"${line%%[![:space:]]*}"}"
+}
+
 # strih_intercom_hub_config_install SRC DST BIN -> setup-strih step 13's install of the routing TOML
 # (issue 1438). Step 13 installs the checkout's routing file but keeps an already-installed hub binary
 # (the hub is upgraded by its own deploy). A routing file that needs a newer hub (the issue-1438 `alsa`
@@ -193,13 +205,14 @@ for p in ps:
 # names the reinstall. With no hub binary yet (a fresh box: the same step installs the checkout's own
 # build right after) the file is installed. Prints what it did; rc 0, or 1 when the copy itself fails.
 strih_intercom_hub_config_install() {
-  local src="${1:?routing file required}" dst="${2:?install path required}" bin="${3:?hub binary required}" why
+  local src="${1:?routing file required}" dst="${2:?install path required}" bin="${3:?hub binary required}" why said
   if [ -x "$bin" ] && ! why="$(timeout 15 "$bin" --check-config --config "$src" 2>&1)"; then
+    said="$(strih_intercom_hub_refusal_line "$why")"
     if [ -f "$dst" ]; then
-      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: $(printf '%s' "$why" | tail -n 1)" >&2
+      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: ${said}" >&2
       return 0
     fi
-    echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: $(printf '%s' "$why" | tail -n 1)" >&2
+    echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: ${said}" >&2
   fi
   install -Dm644 "$src" "$dst" || return 1
   echo "  routing file ${src} installed -> ${dst}"
