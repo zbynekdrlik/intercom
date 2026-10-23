@@ -240,6 +240,76 @@ fn the_notes_count_every_packet_whatever_the_floor() {
 }
 
 #[test]
+fn the_notes_consume_the_log_floor() {
+    // review round 2: a note that logged every transition (skipping the floor) passed the counts.
+    let from: SocketAddr = "10.77.7.30:6980".parse().unwrap();
+    let t0 = Instant::now();
+    let mut t = DecodeRejects::default();
+    assert!(note_undecodable(&mut t, "fohabl-strih", from, "bad", t0));
+    assert_eq!(
+        t.log_due(t0 + Duration::from_millis(1)),
+        None,
+        "the note used the floor"
+    );
+    let mut u = DecodeRejects::default();
+    assert!(note_undecodable(&mut u, "fohabl-strih", from, "bad", t0));
+    let later = t0 + DECODE_LOG_FLOOR + Duration::from_millis(1);
+    assert!(note_decoded(&mut u, "fohabl-strih", from, later));
+    assert_eq!(u.log_due(later + Duration::from_millis(1)), None);
+}
+
+#[test]
+fn a_stream_that_stays_rejected_after_a_suppressed_flip_is_logged_once_the_floor_passes() {
+    // review round 2: reject at t0, decodes at t11, rejects again at t12 (inside the floor) and
+    // never decodes again: the journal's last line must not stay "decodes again".
+    let from: SocketAddr = "10.77.7.30:6980".parse().unwrap();
+    let t0 = Instant::now();
+    let s = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut t = DecodeRejects::default();
+    assert!(note_undecodable(&mut t, "fohabl-strih", from, "bad", s(0)));
+    assert!(note_decoded(&mut t, "fohabl-strih", from, s(11)));
+    assert!(
+        !note_undecodable(&mut t, "fohabl-strih", from, "bad", s(12)),
+        "inside the floor"
+    );
+    assert!(!note_undecodable(
+        &mut t,
+        "fohabl-strih",
+        from,
+        "bad",
+        s(15)
+    ));
+    assert!(
+        note_undecodable(&mut t, "fohabl-strih", from, "bad", s(22)),
+        "the pending state is logged once the floor has passed"
+    );
+    assert!(
+        !note_undecodable(&mut t, "fohabl-strih", from, "bad", s(40)),
+        "and only once"
+    );
+    assert_eq!(t.count(), 5);
+}
+
+#[test]
+fn a_suppressed_recovery_is_logged_once_the_floor_passes() {
+    let from: SocketAddr = "10.77.7.30:6980".parse().unwrap();
+    let t0 = Instant::now();
+    let s = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut t = DecodeRejects::default();
+    assert!(note_undecodable(&mut t, "fohabl-strih", from, "bad", s(0)));
+    assert!(
+        !note_decoded(&mut t, "fohabl-strih", from, s(1)),
+        "inside the floor"
+    );
+    assert!(!note_decoded(&mut t, "fohabl-strih", from, s(5)));
+    assert!(
+        note_decoded(&mut t, "fohabl-strih", from, s(11)),
+        "the recovery is logged late"
+    );
+    assert!(!note_decoded(&mut t, "fohabl-strih", from, s(30)));
+}
+
+#[test]
 fn a_good_packet_after_the_rejects_flows_and_the_published_count_stays() {
     let streams = known();
     let mut t = DecodeRejects::default();
