@@ -125,6 +125,9 @@ pub struct RuntimeStats {
     pub sample_rate: Option<u32>,
     /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate (issue 1345).
     pub rate_rejects: u64,
+    /// VBAN packets of this participant's stream that could not be decoded (issue 1467: an
+    /// unsupported codec, a non-audio sub-protocol, a payload without one whole frame).
+    pub decode_rejects: u64,
     /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
     pub janus: Option<JanusStats>,
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
@@ -161,6 +164,11 @@ pub struct ParticipantState {
     /// every VBAN participant, omitted for the others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_rejects: Option<u64>,
+    /// VBAN packets of this participant's stream that could not be decoded (issue 1467): the name
+    /// is known but the codec / sub-protocol / payload is not, so the leg reads silent. Present for
+    /// every VBAN participant, omitted for the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_rejects: Option<u64>,
     /// The Janus audiobridge facet (joined / session age / rejoins / rtp packet counts), present
     /// only for the janus participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +243,7 @@ impl HubState {
                     level_dbfs: s.level_dbfs,
                     sample_rate: s.sample_rate.filter(|_| vban),
                     rate_rejects: vban.then_some(s.rate_rejects),
+                    decode_rejects: vban.then_some(s.decode_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
                     jitter: s.jitter.filter(|_| vban),
@@ -273,7 +282,8 @@ impl HubState {
     /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
     /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
     /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
-    /// after its one warn scrolls away.
+    /// after its one warn scrolls away, and a known stream's undecodable packets as
+    /// `decode_rejects=N(<worst leg>)` (issue 1467) for the same reason.
     pub fn status_line(&self) -> String {
         let total_rate_rejects: u64 = self
             .participants
@@ -288,6 +298,15 @@ impl HubState {
             .collect();
         let rejects = if total_rate_rejects > 0 {
             format!(" rate_rejects={total_rate_rejects}")
+        } else {
+            String::new()
+        };
+        let decode_rejects = |p: &ParticipantState| p.decode_rejects.unwrap_or(0);
+        let undecodable = if self.participants.iter().map(decode_rejects).sum::<u64>() > 0 {
+            format!(
+                " decode_rejects={}",
+                self.total_naming_worst(decode_rejects)
+            )
         } else {
             String::new()
         };
@@ -342,7 +361,7 @@ impl HubState {
             })
             .collect();
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
@@ -351,6 +370,7 @@ impl HubState {
             tx_dropped,
             servo,
             rejects,
+            undecodable,
             hdmi,
             levels.join(" ")
         )
@@ -421,6 +441,7 @@ out_channels = 4
                 level_dbfs: -12.0,
                 sample_rate: Some(48000),
                 rate_rejects: 0,
+                decode_rejects: 0,
                 janus: None,
                 local_audio: None,
                 jitter: None,

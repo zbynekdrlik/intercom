@@ -88,7 +88,10 @@ fn an_unknown_name_with_an_unsupported_codec_is_foreign_and_silent() {
 
 #[test]
 fn garbage_and_short_packets_are_foreign() {
-    assert!(matches!(classify_packet(&known(), b""), RoutedPacket::Foreign));
+    assert!(matches!(
+        classify_packet(&known(), b""),
+        RoutedPacket::Foreign
+    ));
     assert!(matches!(
         classify_packet(&known(), b"VBAN"),
         RoutedPacket::Foreign
@@ -148,7 +151,11 @@ fn a_good_packet_routes_as_audio() {
 fn the_count_grows_per_packet_and_the_log_fires_once_per_transition() {
     let mut t = DecodeRejects::default();
     assert_eq!(t.count(), 0);
-    assert_eq!(t.accept(), None, "a stream that always decoded logs nothing");
+    assert_eq!(
+        t.accept(),
+        None,
+        "a stream that always decoded logs nothing"
+    );
 
     let r = "unsupported VBAN codec 0x02 (only PCM16/PCM24/Float32)";
     assert_eq!(t.reject(r), Some(DecodeTransition::Rejecting));
@@ -210,7 +217,11 @@ fn a_good_packet_after_the_rejects_flows_and_the_published_count_stays() {
         other => panic!("got {other:?}"),
     }
     slot.publish(&conv);
-    assert_eq!(slot.decode_rejects(), 3, "the rate publish keeps the decode count");
+    assert_eq!(
+        slot.decode_rejects(),
+        3,
+        "the rate publish keeps the decode count"
+    );
     assert_eq!(slot.rate_rejects(), 0);
 }
 

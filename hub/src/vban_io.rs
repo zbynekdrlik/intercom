@@ -12,7 +12,7 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use intercom_vban::{VbanCodec, VbanHeader, VBAN_HEADER_SIZE};
+use intercom_vban::{VbanCodec, VbanHeader, VBAN_HEADER_SIZE, VBAN_MAGIC};
 
 use crate::adaptive_target::AdaptiveTarget;
 use crate::vban_jitter::{stretch_block, NetworkFill, NetworkFillStats, PopPlan};
@@ -121,6 +121,15 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
     };
 
     let frames = interleaved.len().checked_div(n_ch).unwrap_or(0);
+    if frames == 0 {
+        // issue 1467: a payload without one whole frame carries no audio. Pushing it would still
+        // mark the stream as receiving; it is a decode reject instead.
+        anyhow::bail!(
+            "malformed VBAN payload: {} bytes hold no whole frame of {n_ch} ch (codec 0x{:02x})",
+            payload.len(),
+            header.codec
+        );
+    }
     let mut channels = vec![Vec::with_capacity(frames); n_ch];
     for (i, &s) in interleaved.iter().enumerate() {
         if n_ch == 0 {
@@ -143,16 +152,148 @@ pub fn decode_packet(data: &[u8]) -> Result<(DecodedAudio, u32)> {
     ))
 }
 
+/// The VBAN stream name of a packet, read from the raw header bytes before anything else is
+/// decoded (issue 1467): the magic + the 16-byte name field, whatever the sub-protocol or codec.
+/// `None` for a datagram that is not VBAN (too short, another magic) or whose name is not UTF-8.
+pub fn vban_stream_name(data: &[u8]) -> Option<&str> {
+    if data.len() < VBAN_HEADER_SIZE || &data[0..4] != VBAN_MAGIC {
+        return None;
+    }
+    let field = &data[8..24];
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    std::str::from_utf8(&field[..end]).ok()
+}
+
+/// What one received datagram is to the hub (issue 1467).
+#[derive(Debug)]
+pub enum RoutedPacket {
+    /// A known stream that decoded: its participant, its planar audio and the header rate in Hz
+    /// (`0` for a reserved rate index, which the rate converter rejects and counts).
+    Audio {
+        id: usize,
+        audio: DecodedAudio,
+        sample_rate: u32,
+    },
+    /// A known stream (its name is in the matrix) whose packet cannot be decoded: an unsupported
+    /// codec / data type, a non-audio sub-protocol, a payload without one whole frame. Counted per
+    /// participant and logged once per transition, never dropped silently.
+    Undecodable {
+        id: usize,
+        stream: String,
+        reason: String,
+    },
+    /// Not VBAN, or a stream name the matrix does not know: foreign traffic, ignored silently
+    /// (exactly like the cambox receiver).
+    Foreign,
+}
+
+/// Classify one datagram (issue 1467): read the stream name from the header first, look it up,
+/// and only then decode the payload, so a known sender in a format the hub cannot read is told
+/// apart from foreign traffic. (The 23.10.2026 FOH outage: a 24-bit `fohabl-strih` against a hub
+/// without the PCM24 decode read exactly like a sender that had stopped.)
+pub fn classify_packet(known_streams: &HashMap<String, usize>, data: &[u8]) -> RoutedPacket {
+    let Some(name) = vban_stream_name(data) else {
+        return RoutedPacket::Foreign;
+    };
+    let Some(&id) = known_streams.get(name) else {
+        return RoutedPacket::Foreign;
+    };
+    match decode_packet(data) {
+        Ok((audio, sample_rate)) => RoutedPacket::Audio {
+            id,
+            audio,
+            sample_rate,
+        },
+        Err(e) => RoutedPacket::Undecodable {
+            id,
+            stream: name.to_string(),
+            reason: format!("{e:#}"),
+        },
+    }
+}
+
 /// Decode + demux one packet: `Some((participant_id, audio, sample_rate))` if the stream name maps
-/// to a known participant, `None` if it decodes to an unknown name OR fails to decode (a
-/// foreign/garbage packet is silently ignored, exactly like the cambox receiver).
+/// to a known participant and the packet decodes, `None` otherwise. The receive task uses
+/// [`classify_packet`], which also reports a known stream that does not decode (issue 1467).
 pub fn route_packet(
     known_streams: &HashMap<String, usize>,
     data: &[u8],
 ) -> Option<(usize, DecodedAudio, u32)> {
-    let (audio, sample_rate) = decode_packet(data).ok()?;
-    let id = *known_streams.get(&audio.stream_name)?;
-    Some((id, audio, sample_rate))
+    match classify_packet(known_streams, data) {
+        RoutedPacket::Audio {
+            id,
+            audio,
+            sample_rate,
+        } => Some((id, audio, sample_rate)),
+        RoutedPacket::Undecodable { .. } | RoutedPacket::Foreign => None,
+    }
+}
+
+/// A transition of a stream's decode state that is logged once (issue 1467).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeTransition {
+    /// The stream started to be rejected, or the reason changed: one warning.
+    Rejecting,
+    /// The stream decodes again after rejects: one info line.
+    Recovered,
+}
+
+/// One known VBAN stream's decode-reject count and its current reject reason (issue 1467). It lives
+/// in the receive task (no lock); the count is published through
+/// [`crate::vban_rate::VbanRateStats::publish_decode_rejects`] for `/api/state` + the status line.
+#[derive(Debug, Clone, Default)]
+pub struct DecodeRejects {
+    count: u64,
+    rejecting: Option<String>,
+}
+
+impl DecodeRejects {
+    /// Count one undecodable packet with `reason`. `Some(Rejecting)` when it is the first reject
+    /// since the stream last decoded (or ever) or the reason changed: the caller logs it once.
+    pub fn reject(&mut self, reason: &str) -> Option<DecodeTransition> {
+        self.count += 1;
+        if self.rejecting.as_deref() == Some(reason) {
+            return None;
+        }
+        self.rejecting = Some(reason.to_string());
+        Some(DecodeTransition::Rejecting)
+    }
+
+    /// A packet of the stream decoded. `Some(Recovered)` once after rejects; the count stays.
+    pub fn accept(&mut self) -> Option<DecodeTransition> {
+        self.rejecting.take().map(|_| DecodeTransition::Recovered)
+    }
+
+    /// Undecodable packets of this stream since the hub started.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+}
+
+/// Count an undecodable packet of a known stream and log the transition once (issue 1467): the
+/// stream, the sender and the reason, so a silent leg names its cause in the journal.
+pub fn note_undecodable(rejects: &mut DecodeRejects, stream: &str, from: SocketAddr, reason: &str) {
+    if rejects.reject(reason).is_some() {
+        tracing::warn!(
+            stream = %stream,
+            sender = %from,
+            reason = %reason,
+            decode_rejects = rejects.count(),
+            "VBAN stream of a known participant cannot be decoded: its packets are DROPPED (issue 1467)"
+        );
+    }
+}
+
+/// A packet of a known stream decoded: log once when it follows rejects.
+pub fn note_decoded(rejects: &mut DecodeRejects, stream: &str, from: SocketAddr) {
+    if rejects.accept().is_some() {
+        tracing::info!(
+            stream = %stream,
+            sender = %from,
+            decode_rejects = rejects.count(),
+            "VBAN stream decodes again (issue 1467)"
+        );
+    }
 }
 
 /// Bring one routed packet, sampled at `rate`, to the hub rate through its stream's `conv`

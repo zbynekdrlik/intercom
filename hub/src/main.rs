@@ -38,7 +38,8 @@ use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
-    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
+    classify_packet, note_decoded, note_undecodable, resolve_vban_addr, to_hub_rate, DecodeRejects,
+    JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
@@ -249,7 +250,9 @@ async fn main() -> Result<()> {
     // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
     // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
     // converters live in this task alone (no lock); their rate + reject count are published to the
-    // lock-free `rate_stats` slots the block loop reads for /api/state.
+    // lock-free `rate_stats` slots the block loop reads for /api/state. Issue 1467: the stream name
+    // is looked up BEFORE the payload is decoded, so a known stream the hub cannot decode is counted
+    // (`decode_rejects`, the same slot) and logged once per transition; unknown names stay silent.
     let rate_stats: Arc<Vec<VbanRateStats>> =
         Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
     {
@@ -260,10 +263,19 @@ async fn main() -> Result<()> {
             let mut converters: Vec<VbanRateConverter> = (0..n)
                 .map(|_| VbanRateConverter::new(sample_rate))
                 .collect();
+            let mut decode_rejects: Vec<DecodeRejects> =
+                (0..n).map(|_| DecodeRejects::default()).collect();
             loop {
                 match vban_socket.recv_from(&mut buf).await {
-                    Ok((len, _from)) => {
-                        if let Some((id, audio, rate)) = route_packet(&input_streams, &buf[..len]) {
+                    Ok((len, from)) => match classify_packet(&input_streams, &buf[..len]) {
+                        RoutedPacket::Audio {
+                            id,
+                            audio,
+                            sample_rate: rate,
+                        } => {
+                            if let Some(rejects) = decode_rejects.get_mut(id) {
+                                note_decoded(rejects, &audio.stream_name, from);
+                            }
                             let Some(conv) = converters.get_mut(id) else {
                                 continue;
                             };
@@ -286,7 +298,16 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                    }
+                        RoutedPacket::Undecodable { id, stream, reason } => {
+                            if let Some(rejects) = decode_rejects.get_mut(id) {
+                                note_undecodable(rejects, &stream, from, &reason);
+                                if let Some(slot) = rate_stats.get(id) {
+                                    slot.publish_decode_rejects(rejects.count());
+                                }
+                            }
+                        }
+                        RoutedPacket::Foreign => {}
+                    },
                     Err(e) => {
                         tracing::warn!(error = %e, "VBAN recv error");
                     }
@@ -536,6 +557,7 @@ fn run_block_loop(bl: BlockLoop) {
                     if let Some(slot) = rate_stats.get(id) {
                         rx_stats[id].sample_rate = slot.sample_rate();
                         rx_stats[id].rate_rejects = slot.rate_rejects();
+                        rx_stats[id].decode_rejects = slot.decode_rejects();
                     }
                 }
             }
