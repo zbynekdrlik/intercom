@@ -6,7 +6,7 @@
 //! participant's [`JitterBuffer`] (unknown names ignored, exactly like `src/intercom.rs`), and
 //! SENDS each cambox's mixed output back as a `camN` stereo PCM16 stream to `camN.lan:6980`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
@@ -737,6 +737,7 @@ impl VbanSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
