@@ -154,25 +154,35 @@ impl DecodeRejects {
     /// [`DECODE_LOG_FLOOR`] (`n` = the transitions suppressed since the last line, then reset),
     /// `None` when it is suppressed (counted, and its state left pending for [`Self::pending_due`]).
     pub fn log_due(&mut self, now: Instant) -> Option<u64> {
-        if let Some(last) = self.last_log {
-            if now.saturating_duration_since(last) < DECODE_LOG_FLOOR {
-                self.suppressed += 1;
-                self.pending = true;
-                return None;
-            }
+        if self.within_floor(now) {
+            self.suppressed += 1;
+            self.pending = true;
+            return None;
         }
-        self.last_log = Some(now);
-        self.pending = false;
-        Some(std::mem::take(&mut self.suppressed))
+        Some(self.stamp(now))
     }
 
     /// A packet that is NOT a transition: `Some(n)` once the floor has passed since the last line
     /// while a suppressed transition is pending (log the current state, `n` suppressed), else `None`.
+    /// It never counts: only transitions are `suppressed_transitions` (review round 3).
     pub fn pending_due(&mut self, now: Instant) -> Option<u64> {
-        if !self.pending {
+        if !self.pending || self.within_floor(now) {
             return None;
         }
-        self.log_due(now)
+        Some(self.stamp(now))
+    }
+
+    /// A line was logged within [`DECODE_LOG_FLOOR`] before `now`.
+    fn within_floor(&self, now: Instant) -> bool {
+        self.last_log
+            .is_some_and(|last| now.saturating_duration_since(last) < DECODE_LOG_FLOOR)
+    }
+
+    /// A line is logged at `now`: stamp it, clear the pending state, hand out the suppressed count.
+    fn stamp(&mut self, now: Instant) -> u64 {
+        self.last_log = Some(now);
+        self.pending = false;
+        std::mem::take(&mut self.suppressed)
     }
 
     /// Whether the transition `t` of this packet (or a pending earlier one) is to be logged now.
