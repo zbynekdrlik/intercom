@@ -291,6 +291,32 @@ fn a_stream_that_stays_rejected_after_a_suppressed_flip_is_logged_once_the_floor
 }
 
 #[test]
+fn a_pending_line_reports_only_the_suppressed_transitions_never_the_packets() {
+    // review round 3: every ordinary packet while a transition was pending counted as one more
+    // "suppressed transition" (~9 000 in a 10 s window at FOH's ~934 pkt/s).
+    let t0 = Instant::now();
+    let mut t = DecodeRejects::default();
+    assert_eq!(t.log_due(t0), Some(0));
+    assert_eq!(
+        t.log_due(t0 + Duration::from_secs(1)),
+        None,
+        "one suppressed transition"
+    );
+    for i in 0..100u64 {
+        assert_eq!(
+            t.pending_due(t0 + Duration::from_millis(1000 + 10 * i)),
+            None
+        );
+    }
+    assert_eq!(t.pending_due(t0 + DECODE_LOG_FLOOR), Some(1));
+    assert_eq!(
+        t.pending_due(t0 + DECODE_LOG_FLOOR * 2),
+        None,
+        "nothing pending any more"
+    );
+}
+
+#[test]
 fn a_suppressed_recovery_is_logged_once_the_floor_passes() {
     let from: SocketAddr = "10.77.7.30:6980".parse().unwrap();
     let t0 = Instant::now();
