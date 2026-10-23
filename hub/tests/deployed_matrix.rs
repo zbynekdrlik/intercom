@@ -16,7 +16,11 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
 
     // issue 1439 phase 2: the VB-Matrix grid minus VASIO8 (the old OBS program capture) and its 4 points.
     assert_eq!(m.participants.len(), 14, "expected 14 participants");
-    assert_eq!(m.points.len(), 212, "expected the 216-point VB-Matrix grid minus VASIO8's 4");
+    assert_eq!(
+        m.points.len(),
+        212,
+        "expected the 216-point VB-Matrix grid minus VASIO8's 4"
+    );
 
     // 10 VBAN inputs (cam1..7 + fohabl/lv1/mbc), 7 active VBAN outputs (cam1..7).
     let vban_in = m
