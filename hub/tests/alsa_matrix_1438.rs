@@ -303,3 +303,23 @@ fn an_s32_pipe_carries_four_bytes_a_sample_and_reads_its_fill_in_frames() {
         "the prime is silence"
     );
 }
+
+#[test]
+fn the_playback_pipe_must_fit_a_linux_pipe_at_its_trim_mark() {
+    use intercom_hub::alsa_spec::{playback_pipe_trim_bytes, LINUX_PIPE_BYTES};
+    // 9 periods of the card's channels at up to 4 bytes a sample
+    assert_eq!(playback_pipe_trim_bytes(256, 6), 9 * 256 * 6 * 4);
+    assert!(playback_pipe_trim_bytes(303, 6) <= LINUX_PIPE_BYTES);
+    assert!(playback_pipe_trim_bytes(304, 6) > LINUX_PIPE_BYTES);
+    // the MiniFuse at one hub block fits
+    matrix(CUTTERS);
+    // an 8-channel card at 256 frames does not: a write would block before the trim acts
+    let err = refused(&CUTTERS.replace("alsa_out_channels = 6", "alsa_out_channels = 8"));
+    assert!(err.contains("does not fit the aplay pipe"), "{err}");
+    // a shorter period fits again
+    matrix(
+        &CUTTERS
+            .replace("alsa_out_channels = 6", "alsa_out_channels = 8")
+            .replace("alsa_period_frames = 256", "alsa_period_frames = 128"),
+    );
+}
