@@ -8,6 +8,7 @@
 //! and `amixer -c 0 cget iface=PCM,name=ELD,device=D`. Std-only (no serde, no tokio), so a plain
 //! rustc replica runs it under Tier-0.
 
+use intercom_hub::asrc::ASRC_LOOKAHEAD;
 use intercom_hub::drm_output_audio_match::{
     eld_monitor_id, AudioPcm, AMBIGUOUS, MATCH, NO_EDID, NO_MATCH, NO_MONITOR,
 };
@@ -17,7 +18,7 @@ use intercom_hub::hdmi_audio::{
     HdmiResolution, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES,
 };
 use intercom_hub::pipe_fill::{
-    pipe_servo_setpoint, pipe_servo_setpoint_for, PipeFillControl, PipeFillPlan, PIPE_HIGH_FRAMES,
+    pipe_setpoint, pipe_setpoint_for, PipeFillControl, PipeFillPlan, PIPE_HIGH_FRAMES,
     PIPE_TARGET_FRAMES, PW_GRAPH_BURST_FRAMES,
 };
 
@@ -257,18 +258,22 @@ fn the_aplay_leg_holds_its_pipe_at_its_own_read_size_and_pw_cat_keeps_1024() {
     // pw-cat reads a 1024-frame graph quantum: unchanged
     assert_eq!(PIPE_TARGET_FRAMES, 2 * PW_GRAPH_BURST_FRAMES);
     assert_eq!(PIPE_HIGH_FRAMES, 4 * PW_GRAPH_BURST_FRAMES);
-    assert_eq!(pipe_servo_setpoint(256), 1792);
-    assert_eq!(pipe_servo_setpoint_for(256, PW_GRAPH_BURST_FRAMES), 1792);
+    assert_eq!(pipe_setpoint(256), 1792);
+    assert_eq!(pipe_setpoint_for(256, PW_GRAPH_BURST_FRAMES), 1792);
     // aplay reads one period (256 frames): two periods primed, 640 frames held (13.3 ms)
-    assert_eq!(pipe_servo_setpoint_for(256, ALSA_HDMI_PERIOD_FRAMES), 640);
+    assert_eq!(pipe_setpoint_for(256, ALSA_HDMI_PERIOD_FRAMES), 640);
     let mut c = PipeFillControl::with_quantum(48000, ALSA_HDMI_PERIOD_FRAMES);
+    // Issue 1461: the prime's silence also covers the resampler's 16-frame look-ahead the first
+    // rendered block falls short of a block, so the pipe still holds two periods + a block.
+    let prime = c.plan_block(0, 0, 256);
     assert_eq!(
-        c.plan_block(0, 0, 256).plan,
+        prime.plan,
         PipeFillPlan::TopUp {
-            silence_frames: 512
+            silence_frames: 512 + ASRC_LOOKAHEAD
         },
         "the prime is two aplay periods, not two pw-cat quanta"
     );
+    assert_eq!(prime.written_frames(), 512 + 256);
     assert_eq!(
         c.plan_block(5_333_333, 768, 256).plan,
         PipeFillPlan::StartHold,
@@ -278,7 +283,7 @@ fn the_aplay_leg_holds_its_pipe_at_its_own_read_size_and_pw_cat_keeps_1024() {
     assert!(c.started(), "aplay's first read ends the start hold");
     let r = c.plan_block(10_666_666, 512, 256);
     assert_eq!(r.plan, PipeFillPlan::Write);
-    assert_eq!(c.servo_depth().map(|d| d.setpoint_frames), Some(640));
+    assert_eq!(c.asrc_stats().map(|d| d.setpoint_frames), Some(640));
     assert_eq!(
         c.plan_block(16_000_000, 1100, 256).plan,
         PipeFillPlan::Drop,
@@ -289,7 +294,7 @@ fn the_aplay_leg_holds_its_pipe_at_its_own_read_size_and_pw_cat_keeps_1024() {
     assert_eq!(
         pw.plan_block(0, 0, 256).plan,
         PipeFillPlan::TopUp {
-            silence_frames: 2048
+            silence_frames: 2048 + ASRC_LOOKAHEAD
         }
     );
 }
@@ -342,11 +347,13 @@ fn the_eld_watch_ends_aplay_once_the_pcm_carries_another_monitor() {
 fn before_aplays_first_read_a_block_is_held_never_trimmed() {
     use intercom_hub::hdmi_leg::aplay_pipe_control;
     let mut c = aplay_pipe_control(48000);
-    // the prime: pipe target + aplay's ALSA buffer + the period it holds
+    // the prime: pipe target + aplay's ALSA buffer (+ the period it holds, less the one read it
+    // keeps taking in step with the hub, issue 1461) + the resampler's look-ahead the first
+    // rendered block falls short of a block
     assert_eq!(
         c.plan_block(0, 0, 256).plan,
         PipeFillPlan::TopUp {
-            silence_frames: 512 + 1024 + 256
+            silence_frames: 512 + 1024 + ASRC_LOOKAHEAD
         }
     );
     // aplay has not read: the prime still sits in the pipe, the block is the start hold
@@ -385,7 +392,7 @@ fn an_aplay_xrun_rearms_one_prime_and_otherwise_never_tops_up() {
     assert_eq!(
         r.plan,
         PipeFillPlan::TopUp {
-            silence_frames: 512 - 10 + 1024 + 256
+            silence_frames: 512 - 10 + 1024
         }
     );
 }

@@ -10,8 +10,11 @@
 //! The spawn must not starve the pipe (the prime carries aplay's buffer + the period it holds), a
 //! late aplay start is the start hold (never a trim), a block-loop stall that aplay's own buffer
 //! rides out must never get silence written into it, and the pipe must sit at the 640-frame setpoint.
+//! Since issue 1461 the HDMI clock is crossed by the resampler: the ratio follows the drift and the
+//! depth keeps the phase its spawn gave it inside the dead band (+-160), no correction is counted.
 //! Std-only (Tier-0 replica).
 
+use intercom_hub::asrc::ASRC_LOOKAHEAD;
 use intercom_hub::hdmi_audio::{ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES};
 use intercom_hub::hdmi_leg::aplay_pipe_control;
 use intercom_hub::pipe_fill::PipeFillPlan;
@@ -28,10 +31,11 @@ struct Run {
     trims: u32,
     start_holds: u32,
     xruns: u32,
-    corrections: u32,
     first: Option<PipeFillPlan>,
     depth_end: usize,
     setpoint: usize,
+    /// The resampler's ratio at the end, ppm.
+    rate_ppm: f64,
 }
 
 struct Case {
@@ -100,13 +104,12 @@ fn run(k: &Case) -> Run {
         let mut wrote = false;
         while !stalled(t) && t as f64 >= next_tick {
             let rep = c.plan_block(t, pipe, BLOCK);
-            pipe += rep.plan.written_frames(BLOCK);
+            pipe += rep.written_frames();
             match rep.plan {
                 PipeFillPlan::TopUp { .. } if rep.first => r.first = Some(rep.plan),
                 PipeFillPlan::TopUp { .. } => r.topups_after_prime += 1,
                 PipeFillPlan::Drop => r.trims += 1,
                 PipeFillPlan::StartHold => r.start_holds += 1,
-                PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => r.corrections += 1,
                 PipeFillPlan::Write => {}
             }
             next_tick += tick_ns;
@@ -120,9 +123,10 @@ fn run(k: &Case) -> Run {
         }
         t += STEP_NS;
     }
-    if let Some(d) = c.servo_depth() {
+    if let Some(d) = c.asrc_stats() {
         r.depth_end = d.depth_frames;
         r.setpoint = d.setpoint_frames;
+        r.rate_ppm = d.rate_ppm;
     }
     r
 }
@@ -133,17 +137,17 @@ fn the_spawn_primes_aplays_buffer_and_the_pipe_never_starves() {
     assert_eq!(
         r.first,
         Some(PipeFillPlan::TopUp {
-            silence_frames: 512 + ALSA_HDMI_BUFFER_FRAMES + ALSA_HDMI_PERIOD_FRAMES
+            silence_frames: 512 + ALSA_HDMI_BUFFER_FRAMES + ASRC_LOOKAHEAD
         }),
-        "the prime = the pipe target + aplay's ALSA buffer + the period it holds"
+        "the prime = the pipe target + aplay's ALSA buffer + the period it holds, less the one read it keeps taking in step (+ the resampler's look-ahead)"
     );
     assert_eq!(r.topups_after_prime, 0, "no refill after the prime");
     assert_eq!(r.trims, 0);
     assert_eq!(r.xruns, 0);
     assert_eq!(r.setpoint, 640);
     assert!(
-        r.depth_end.abs_diff(640) <= 40,
-        "the pipe sits at the setpoint: {}",
+        r.depth_end.abs_diff(640) <= 200,
+        "the pipe sits inside the dead band of the setpoint: {}",
         r.depth_end
     );
 }
@@ -168,8 +172,8 @@ fn a_late_aplay_start_is_the_start_hold_never_a_trim() {
             );
         }
         assert!(
-            r.depth_end.abs_diff(640) <= 40,
-            "{connect_ms} ms: walked in to the setpoint, depth {}",
+            r.depth_end.abs_diff(640) <= 200,
+            "{connect_ms} ms: inside the dead band of the setpoint, depth {}",
             r.depth_end
         );
     }
@@ -191,8 +195,8 @@ fn a_block_loop_stall_aplays_buffer_rides_out_gets_no_silence() {
             assert_eq!(r.xruns, 0, "{stall_ms} ms stall, {ppm} ppm: no xrun");
             assert_eq!(r.trims, 0, "{stall_ms} ms stall, {ppm} ppm: no trim");
             assert!(
-                r.depth_end.abs_diff(640) <= 160,
-                "{stall_ms} ms stall, {ppm} ppm: the servo walks the pipe back, depth {}",
+                r.depth_end.abs_diff(640) <= 200,
+                "{stall_ms} ms stall, {ppm} ppm: the pipe is back inside the dead band, depth {}",
                 r.depth_end
             );
         }
@@ -200,15 +204,24 @@ fn a_block_loop_stall_aplays_buffer_rides_out_gets_no_silence() {
 }
 
 #[test]
-fn a_drifting_hdmi_clock_is_held_by_the_servo_without_refills_or_xruns() {
+fn a_drifting_hdmi_clock_is_followed_by_the_resampler_without_refills_or_xruns() {
     for ppm in [-200.0, -50.0, 50.0, 200.0] {
         let r = run(&case(120, ppm));
         assert_eq!(r.topups_after_prime, 0, "{ppm} ppm: no refill");
         assert_eq!(r.trims, 0, "{ppm} ppm: no trim");
         assert_eq!(r.xruns, 0, "{ppm} ppm: no xrun");
-        assert!(r.corrections > 0, "{ppm} ppm: the servo corrects the drift");
+        // Issue 1461 re-pin (was: the servo corrects the drift): the ratio IS the HDMI clock, hub
+        // frames per written frame. Measured over 40..240 s: within 4.6 ppm (the 1 ms readings
+        // place aplay's period reads with a bias that turns with the read/write phase), the depth
+        // within 183 frames of 640 (the walk before the first fit; the dead band is 480).
+        let want = (1.0 / (1.0 + ppm * 1e-6) - 1.0) * 1e6;
         assert!(
-            r.depth_end.abs_diff(640) <= 160,
+            (r.rate_ppm - want).abs() < 6.0,
+            "{ppm} ppm: the ratio {:+.1} follows the HDMI clock ({want:+.1})",
+            r.rate_ppm
+        );
+        assert!(
+            r.depth_end.abs_diff(640) <= 200,
             "{ppm} ppm: depth {} held near 640",
             r.depth_end
         );

@@ -1,19 +1,22 @@
-//! Issue 1401, egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274): a fixed start depth and a drift
-//! servo on every `pw-cat` playback pipe (the strih program sink and the cutters' MiniFuse cans).
+//! Issue 1401, egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274): a fixed start depth and a held
+//! depth on every playback pipe (the strih program sink and the cutters' cans); since issue 1461
+//! lane 2 the depth is held by the resampler, never by a single-frame servo.
 //!
 //! - **Start hold.** pw-cat reads nothing until its stream runs, and the hub kept writing on top of
 //!   the prime: a spawn started 62-85 ms deep, different after every restart. Until pw-cat first
 //!   reads, a block that would take the fill above the target is now dropped, so its first read
 //!   always finds exactly the prime.
-//! - **Drift servo.** The cans' sink is clocked by the MiniFuse crystal, not the hub's timer, and
-//!   the bound-only guards turned +-50 ppm into a dropped 5.3 ms block every ~107 s or a refill gap
-//!   every ~14 min. The VBAN legs' servo (since issue 1461 `pipe_drift_servo::DriftServo`, the
-//!   ingress moved to the resampler) now holds the pipe at the depth the start hold leaves, with
-//!   single-frame drops / repeats spread across a block.
-//! - **The servo reads the time-weighted fill.** pw-cat takes four hub blocks at once, so the
-//!   pre-write readings see a drift only as a whole-block step at each read/write phase crossing,
-//!   and the servo would answer in bursts (design question 5979620130). The sink thread reads the
-//!   pipe about every 1 ms between blocks, and the servo gets the trapezoid mean of those readings.
+//! - **The clock crossing.** The cans' sink is clocked by the card's crystal, not the hub's timer,
+//!   and the bound-only guards turned +-50 ppm into a dropped 5.3 ms block every ~107 s or a refill
+//!   gap every ~14 min. Issue 1401 held the pipe with the VBAN legs' single-frame servo; issue 1461
+//!   (design comment 6376769274) replaced it with lane 1's resampler: the ratio follows the reader's
+//!   rate (the least-squares slope of its consumed frames over 64 s), a phase term acts only outside
+//!   +-1/4 of the fixed setpoint. No frame is inserted or dropped (graded on a tone in
+//!   `egress_asrc_1461.rs`); here the frame-count bench pins the depth and the guards.
+//! - **The depth is the time-weighted fill.** pw-cat takes four hub blocks at once, so the
+//!   pre-write readings see a drift only as a whole-block step at each read/write phase crossing
+//!   (design question 5979620130). The sink thread reads the pipe about every 1 ms between blocks,
+//!   and each block's depth is the trapezoid mean of those readings.
 //! - **A refill needs a starved pipe (step 4, design 5981457044).** The fill must read under one
 //!   block on every reading for at least one hub period: a momentary low between a pw-cat read and
 //!   the next write or catch-up burst is not starvation. The prime and the trim act on one reading.
@@ -26,16 +29,11 @@
 
 use intercom_hub::janus_pacing::hub_block_period;
 use intercom_hub::local_audio::{
-    pipe_fill_bytes, pipe_write_bytes, LocalAudioStats, PipeFillWriter, PW_GRAPH_BURST_FRAMES,
-};
-use intercom_hub::pipe_drift_servo::{
-    servo_corrections, stretch_block, DriftServo, ServoStep, SERVO_DEADBAND_FRAMES,
-    SERVO_GENTLE_DIV, SERVO_KNEE_FRAMES, SERVO_MIN_SPACING_FRAMES, SERVO_STEEP_DIV,
-    SERVO_WINDOW_FRAMES,
+    pipe_fill_bytes, LocalAudioStats, PipeFillWriter, PW_GRAPH_BURST_FRAMES,
 };
 use intercom_hub::pipe_fill::{
-    pipe_servo_setpoint, stretch_interleaved, PipeFillControl, PipeFillPlan, PipeServoDepth,
-    PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL, PIPE_TARGET_FRAMES,
+    pipe_setpoint, EgressQueue, PipeAsrcStats, PipeFillControl, PipeFillPlan, PipeWriteReport,
+    PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL, PIPE_TARGET_FRAMES,
 };
 
 /// The hub block on strih-snv (`[hub].block_frames`).
@@ -46,7 +44,9 @@ const RATE: u32 = 48_000;
 const QUANTUM: usize = PW_GRAPH_BURST_FRAMES;
 /// The prime: the silence up to the target plus the prime's own block.
 const PRIME: usize = PIPE_TARGET_FRAMES + BLOCK;
-const SETPOINT: usize = pipe_servo_setpoint(BLOCK);
+const SETPOINT: usize = pipe_setpoint(BLOCK);
+/// The phase term's dead band: a quarter of the setpoint (448 frames).
+const BAND: f64 = SETPOINT as f64 / 4.0;
 
 // --- the pieces ----------------------------------------------------------------------------------
 
@@ -58,7 +58,7 @@ fn the_setpoint_is_the_prime_minus_half_a_quantum() {
     );
     assert_eq!(SETPOINT, 1792, "37.3 ms at 48 kHz");
     // It follows the block: half a quantum under whatever the prime is.
-    assert_eq!(pipe_servo_setpoint(512), PIPE_TARGET_FRAMES + 512 - 512);
+    assert_eq!(pipe_setpoint(512), PIPE_TARGET_FRAMES + 512 - 512);
     assert_eq!(
         PIPE_SAMPLE_INTERVAL.as_millis(),
         1,
@@ -94,126 +94,50 @@ fn the_setpoint_is_the_time_average_the_start_hold_leaves() {
 }
 
 #[test]
-fn the_servo_budget_is_gentle_below_the_knee_steep_past_it_and_never_the_whole_error() {
-    // Moved from the ingress tests with the servo itself (issue 1461): only the pipes use it now.
-    assert_eq!(servo_corrections(0), 0);
-    assert_eq!(servo_corrections(SERVO_DEADBAND_FRAMES), 0, "the band");
-    assert_eq!(servo_corrections(SERVO_DEADBAND_FRAMES + 1), 1);
-    let gentle_max = servo_corrections(SERVO_KNEE_FRAMES);
-    assert_eq!(
-        gentle_max,
-        (SERVO_KNEE_FRAMES - SERVO_DEADBAND_FRAMES).div_ceil(SERVO_GENTLE_DIV)
-    );
-    assert!(gentle_max <= 7, "{gentle_max}");
-    assert_eq!(
-        servo_corrections(SERVO_KNEE_FRAMES + 2 * SERVO_STEEP_DIV),
-        gentle_max + 2
-    );
-    let cap = SERVO_WINDOW_FRAMES / SERVO_MIN_SPACING_FRAMES;
-    assert_eq!(servo_corrections(100_000), cap);
-    let mut prev = 0;
-    for e in 0..4_000 {
-        let n = servo_corrections(e);
-        assert!(n >= prev, "monotone at {e}");
-        assert!(n <= e.saturating_sub(SERVO_DEADBAND_FRAMES), "{e}: {n}");
-        prev = n;
-    }
-}
-
-#[test]
-fn the_pipe_servo_spaces_its_corrections_over_the_next_second() {
-    // A fill held 100 frames high: after the first 1 s window the servo plans
-    // servo_corrections(100) drops for the next second, at least 1000 output frames apart.
-    let mut servo = DriftServo::new(SETPOINT, 4096);
-    let mut at = Vec::new();
-    for i in 0..(2 * SERVO_WINDOW_FRAMES / BLOCK) {
-        if servo.servo_step(SETPOINT + 100, BLOCK) != ServoStep::Keep {
-            at.push(i * BLOCK);
-        }
-    }
-    assert_eq!(at.len(), servo_corrections(100), "{at:?}");
-    assert!(at
-        .windows(2)
-        .all(|w| w[1] - w[0] >= SERVO_MIN_SPACING_FRAMES));
-    assert_eq!(servo.stats().servo_drops as usize, at.len());
-    assert_eq!(servo.target(), SETPOINT);
-    // A restart (a guard refilled the pipe) forgets the planned budget.
-    servo.restart();
-    assert_eq!(servo.servo_step(SETPOINT + 100, BLOCK), ServoStep::Keep);
-}
-
-#[test]
-fn stretch_block_keeps_both_ends_and_spreads_one_frame() {
-    let ramp = |n: usize| (0..n).map(|i| i as i16).collect::<Vec<i16>>();
-    assert_eq!(stretch_block(&ramp(BLOCK), BLOCK), ramp(BLOCK));
-    let out = stretch_block(&ramp(BLOCK + 1), BLOCK);
-    assert_eq!((out[0], out[BLOCK - 1]), (0, BLOCK as i16));
-    let steps: Vec<i16> = out.windows(2).map(|w| w[1] - w[0]).collect();
-    assert_eq!(steps.iter().filter(|&&d| d == 2).count(), 1);
-    let out = stretch_block(&ramp(BLOCK - 1), BLOCK);
-    let steps: Vec<i16> = out.windows(2).map(|w| w[1] - w[0]).collect();
-    assert_eq!(steps.iter().filter(|&&d| d == 0).count(), 1);
-    assert_eq!(stretch_block(&[], 4), vec![0; 4]);
-    assert_eq!(stretch_block(&[9], 3), vec![9; 3]);
-    assert!(stretch_block(&[1, 2], 0).is_empty());
-}
-
-#[test]
-fn stretch_interleaved_stretches_every_channel_on_its_own_and_keeps_both_ends() {
-    // Left a ramp, right a constant: a correction must never mix the channels.
-    let frames = BLOCK;
-    let interleaved: Vec<i16> = (0..frames).flat_map(|f| [(f as i16) * 10, -700]).collect();
-    for out in [frames - 1, frames + 1] {
-        let s = stretch_interleaved(&interleaved, 2, out);
-        assert_eq!(s.len(), out * 2);
-        let left: Vec<i16> = s.iter().step_by(2).copied().collect();
-        let right: Vec<i16> = s.iter().skip(1).step_by(2).copied().collect();
-        assert_eq!(left[0], 0);
-        assert_eq!(*left.last().unwrap(), ((frames - 1) as i16) * 10);
-        assert!(
-            left.windows(2).all(|w| w[0] <= w[1]),
-            "the ramp stays a ramp"
-        );
-        assert!(
-            right.iter().all(|&r| r == -700),
-            "the right channel untouched"
-        );
-    }
-    // Same length = unchanged; four channels keep their own frames too.
-    assert_eq!(stretch_interleaved(&interleaved, 2, frames), interleaved);
-    let four: Vec<i16> = (0..frames * 4).map(|i| (i % 4) as i16).collect();
-    let s = stretch_interleaved(&four, 4, frames + 1);
-    assert_eq!(s.len(), (frames + 1) * 4);
-    assert!(s.as_chunks::<4>().0.iter().all(|c| *c == [0, 1, 2, 3]));
-}
-
-#[test]
-fn each_plan_writes_exactly_its_frames() {
+fn each_write_puts_exactly_its_reports_frames_into_the_pipe() {
+    // Issue 1461 re-pin: the plan no longer stretches a block by one frame; every write is the
+    // top-up's silence plus what the resampler rendered, and a trimmed or held block writes nothing
+    // but still leaves the queue (the queue never falls behind the controller).
+    let mut c = PipeFillControl::new(RATE);
+    let mut q = EgressQueue::new(2);
     let block: Vec<i16> = (0..BLOCK * 2).map(|i| i as i16 + 1).collect();
-    let bytes = |plan| pipe_write_bytes(plan, &block, 2).map(|b| b.len() / 4);
-    for plan in [
-        PipeFillPlan::Write,
-        PipeFillPlan::ServoDrop,
-        PipeFillPlan::ServoRepeat,
-        PipeFillPlan::TopUp {
-            silence_frames: 300,
-        },
-        PipeFillPlan::Drop,
-        PipeFillPlan::StartHold,
-    ] {
-        let written = plan.written_frames(BLOCK);
-        let expect = if written == 0 { None } else { Some(written) };
-        assert_eq!(bytes(plan), expect, "{plan:?}");
-    }
-    assert_eq!(PipeFillPlan::ServoDrop.written_frames(BLOCK), BLOCK - 1);
-    assert_eq!(PipeFillPlan::ServoRepeat.written_frames(BLOCK), BLOCK + 1);
-    // A corrected block is the stretched block, both ends kept.
-    let drop = pipe_write_bytes(PipeFillPlan::ServoDrop, &block, 2).unwrap();
-    let expect: Vec<u8> = stretch_interleaved(&block, 2, BLOCK - 1)
-        .iter()
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
-    assert_eq!(drop, expect);
+    let ms = 1_000_000u64;
+    let mut t = 0;
+    let mut check = |c: &mut PipeFillControl, fill: usize, t: u64| -> PipeWriteReport {
+        let r = c.plan_block(t, fill, BLOCK);
+        let written = q.render(&r, &block).map_or(0, |s| s.len() / 2);
+        assert_eq!(written, r.written_frames(), "{r:?}");
+        r
+    };
+    let prime = check(&mut c, 0, t);
+    assert!(
+        matches!(prime.plan, PipeFillPlan::TopUp { .. }) && prime.first,
+        "{prime:?}"
+    );
+    assert_eq!(
+        prime.written_frames(),
+        PRIME,
+        "the prime: the target plus one block"
+    );
+    t += 5 * ms;
+    assert_eq!(check(&mut c, PRIME, t).plan, PipeFillPlan::StartHold);
+    c.sample(t + ms, PRIME - QUANTUM);
+    t += 5 * ms;
+    let w = check(&mut c, PRIME - QUANTUM, t);
+    assert_eq!(w.plan, PipeFillPlan::Write);
+    assert_eq!(
+        w.written_frames(),
+        BLOCK,
+        "ratio 1 before the first fit: a whole block"
+    );
+    t += 5 * ms;
+    let trim = check(&mut c, PIPE_HIGH_FRAMES + 1, t);
+    assert_eq!(trim.plan, PipeFillPlan::Drop);
+    assert_eq!(trim.written_frames(), 0);
+    assert!(
+        trim.render.consume > 0,
+        "a trimmed block still leaves the queue"
+    );
 }
 
 // --- the start hold ------------------------------------------------------------------------------
@@ -223,16 +147,10 @@ fn the_start_hold_drops_blocks_until_pw_cat_first_reads() {
     let mut c = PipeFillControl::new(RATE);
     let ms = 1_000_000u64;
     let prime = c.plan_block(0, 0, BLOCK);
-    assert_eq!(
-        prime,
-        PipeWriteReport {
-            fill_frames: 0,
-            plan: PipeFillPlan::TopUp {
-                silence_frames: PIPE_TARGET_FRAMES
-            },
-            first: true,
-        }
-    );
+    assert_eq!(prime.fill_frames, 0);
+    assert!(prime.first);
+    assert_eq!(prime.written_frames(), PRIME);
+    assert!(matches!(prime.plan, PipeFillPlan::TopUp { .. }));
     assert!(!c.started());
     // pw-cat is still connecting: every block is held back and the pipe stays at the prime.
     for k in 1..30u64 {
@@ -241,19 +159,22 @@ fn the_start_hold_drops_blocks_until_pw_cat_first_reads() {
         assert_eq!(r.plan, PipeFillPlan::StartHold, "block {k}");
         assert!(!r.first);
     }
-    assert!(c.servo_depth().is_none(), "no servo before pw-cat reads");
+    assert!(
+        c.asrc_stats().is_none(),
+        "no resampler numbers before pw-cat reads"
+    );
     // pw-cat's first read: the hold is over, and the block is written.
     c.sample(200 * ms, PRIME - QUANTUM);
     assert!(c.started());
     let r = c.plan_block(201 * ms, PRIME - QUANTUM, BLOCK);
     assert_eq!(r.plan, PipeFillPlan::Write);
-    assert_eq!(c.servo_depth().map(|d| d.setpoint_frames), Some(SETPOINT));
+    assert_eq!(c.asrc_stats().map(|d| d.setpoint_frames), Some(SETPOINT));
 }
 
 #[test]
-fn the_servo_measures_from_pw_cats_first_read() {
+fn the_depth_is_measured_from_pw_cats_first_read() {
     // The hold ends either at a 1 ms reading (here after a 400 ms hub stall, so the hold level
-    // would weigh in heavily) or at the pre-write reading itself. Either way the servo's first
+    // would weigh in heavily) or at the pre-write reading itself. Either way the depth's first
     // sample is the fill after the read, never the hold level before it.
     let step = 5 * MS;
     let after_read = PRIME - QUANTUM;
@@ -276,10 +197,10 @@ fn the_servo_measures_from_pw_cats_first_read() {
             t += step;
             c.plan_block(t, after_read, BLOCK);
         }
-        // One full servo window (188 blocks): the first sample (1280) and 187 trapezoids of 1408.
-        let expected = (after_read + 187 * later) / 188;
+        // One full second (188 blocks): the first sample (1280) and 187 trapezoids of 1408.
+        let expected = ((after_read + 187 * later) as f64 / 188.0).round() as usize;
         assert_eq!(
-            c.servo_depth().map(|d| d.depth_frames),
+            c.asrc_stats().map(|d| d.depth_frames),
             Some(expected),
             "drop seen at a sample: {drop_seen_at_a_sample}"
         );
@@ -287,28 +208,31 @@ fn the_servo_measures_from_pw_cats_first_read() {
 }
 
 #[test]
-fn a_guard_forgets_the_servos_pending_corrections() {
-    // A trim or a refill is the last resort. The budget the servo planned from the fill before it
-    // must not run on afterwards (a VBAN leg restarts its window on an underrun / overrun too).
-    let step = 16_000_000 / 3;
-    let high = SETPOINT + 400;
+fn a_guard_restarts_the_rate_fit_and_keeps_the_ratio() {
+    // Issue 1461 re-pin (was: a guard forgets the servo's pending corrections). A trim or a refill
+    // is the last resort, and the reads around it are a step in the reader's consumed-frames
+    // series: the fit starts over (like a VBAN leg's underrun / resync), the ratio stays.
     for guard_fill in [PIPE_HIGH_FRAMES + 1, 0] {
         let mut c = PipeFillControl::new(RATE);
         c.plan_block(0, 0, BLOCK);
-        c.sample(step / 2, PRIME - QUANTUM);
+        let step = 16_000_000 / 3;
         let mut t = step;
-        // 250 blocks far above the setpoint: the first window (188 blocks) plans a full budget of
-        // drops, and the guard comes in the middle of spending it.
-        let mut drops = 0;
-        for _ in 0..250 {
-            if c.plan_block(t, high, BLOCK).plan == PipeFillPlan::ServoDrop {
-                drops += 1;
+        let mut fill = PRIME;
+        // 20 s of pw-cat reading a quantum every four blocks, the hub writing what it renders.
+        for k in 0..3750u64 {
+            if k % 4 == 3 {
+                c.sample(t - step / 2, fill - QUANTUM);
+                fill -= QUANTUM;
             }
+            let r = c.plan_block(t, fill, BLOCK);
+            fill += r.written_frames();
             t += step;
         }
-        assert!(drops > 5, "the servo was correcting ({drops})");
-        // The guard fill is read for longer than a hub period: a starved pipe needs that (design
-        // 5981457044), the trim acts on any reading.
+        let before = c.asrc_stats().expect("running");
+        assert!(
+            before.rate_fit_ppm.is_some(),
+            "a fit after 20 s: {before:?}"
+        );
         c.sample(t, guard_fill);
         t += 6 * MS;
         let guard = c.plan_block(t, guard_fill, BLOCK).plan;
@@ -316,12 +240,17 @@ fn a_guard_forgets_the_servos_pending_corrections() {
             matches!(guard, PipeFillPlan::Drop | PipeFillPlan::TopUp { .. }),
             "{guard:?}"
         );
-        // The same high fill for 150 more blocks, less than one window: no stale correction.
-        for i in 0..150 {
-            t += step;
-            let plan = c.plan_block(t, high, BLOCK).plan;
-            assert_eq!(plan, PipeFillPlan::Write, "block {i} after {guard:?}");
+        if matches!(guard, PipeFillPlan::TopUp { .. }) {
+            // A refill re-primes: the start hold again until pw-cat's next read.
+            assert!(c.asrc_stats().is_none(), "held after the refill");
+            c.sample(t + MS, PRIME - QUANTUM);
         }
+        let after = c.asrc_stats().expect("running");
+        assert_eq!(
+            after.rate_fit_ppm, None,
+            "the fit starts over after {guard:?}"
+        );
+        assert_eq!(after.rate_ppm, before.rate_ppm, "the ratio is kept");
     }
 }
 
@@ -350,7 +279,7 @@ fn a_real_pipe_holds_the_prime_until_it_is_read() {
     sink.sample_fill().unwrap();
     let r = sink.write_block(&block).unwrap();
     stats.record_write(&r);
-    stats.record_servo_depth(sink.servo_depth());
+    stats.record_asrc_stats(sink.asrc_stats());
     assert_eq!(r.plan, PipeFillPlan::Write);
     assert_eq!(fill(), PRIME - QUANTUM + BLOCK);
     let f = stats.snapshot();
@@ -389,49 +318,59 @@ fn a_pw_cat_that_exits_during_the_start_hold_is_noticed() {
 }
 
 #[test]
-fn the_facet_counts_holds_and_servo_corrections() {
+fn the_facet_counts_holds_and_shows_the_resampler() {
     let stats = LocalAudioStats::default();
     let report = |plan| PipeWriteReport {
         fill_frames: 1800,
         plan,
-        first: false,
+        ..Default::default()
     };
     stats.record_write(&report(PipeFillPlan::StartHold));
-    stats.record_write(&report(PipeFillPlan::ServoDrop));
-    stats.record_write(&report(PipeFillPlan::ServoDrop));
-    stats.record_write(&report(PipeFillPlan::ServoRepeat));
     stats.record_write(&report(PipeFillPlan::Write));
-    stats.record_servo_depth(Some(PipeServoDepth {
+    stats.record_write(&report(PipeFillPlan::Write));
+    let f = stats.snapshot();
+    assert_eq!(f.pipe_rate_fit_ppm, None, "no fit before the first one");
+    stats.record_asrc_stats(Some(PipeAsrcStats {
         depth_frames: 1801,
         setpoint_frames: SETPOINT,
+        rate_ppm: -49.8,
+        rate_fit_ppm: Some(-50.1),
+        phase_frames: 9.0,
     }));
     // None (a respawned pw-cat that has not read yet) keeps the last published values.
-    stats.record_servo_depth(None);
+    stats.record_asrc_stats(None);
     let f = stats.snapshot();
     assert_eq!(f.pipe_start_holds, 1);
-    assert_eq!((f.pipe_servo_drops, f.pipe_servo_repeats), (2, 1));
-    assert_eq!(f.tx_blocks, 4, "a corrected block is still a written block");
+    assert_eq!(f.tx_blocks, 2);
     assert_eq!((f.pipe_trims, f.pipe_refills), (0, 0));
     assert_eq!(
         (f.pipe_depth_frames, f.pipe_setpoint_frames),
         (1801, SETPOINT as u64)
     );
+    assert_eq!(f.pipe_rate_ppm, -49.8);
+    assert_eq!(f.pipe_rate_fit_ppm, Some(-50.1));
+    assert_eq!(f.pipe_asrc_phase_frames, 9.0);
     let v = serde_json::to_value(f).unwrap();
     for key in [
         "pipe_start_holds",
-        "pipe_servo_drops",
-        "pipe_servo_repeats",
+        "pipe_rate_ppm",
+        "pipe_rate_fit_ppm",
+        "pipe_asrc_phase_frames",
         "pipe_depth_frames",
         "pipe_setpoint_frames",
     ] {
         assert!(v.get(key).is_some(), "{key} in {v}");
+    }
+    for gone in ["pipe_servo_drops", "pipe_servo_repeats"] {
+        assert!(v.get(gone).is_none(), "{gone} is gone: {v}");
     }
 }
 
 #[test]
 fn the_sink_thread_reads_the_pipe_between_blocks() {
     // The sink thread spawns pw-cat and is not unit-testable; anchor that it waits for a block at
-    // most one sample interval, reads the pipe when none came, and publishes the servo's depth.
+    // most one sample interval, reads the pipe when none came, and publishes the resampler's
+    // numbers.
     let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/local_audio.rs");
     let src = std::fs::read_to_string(&p).expect("read local_audio.rs");
     let sink_loop = src.find("fn local_sink_loop(").expect("the sink thread");
@@ -453,7 +392,7 @@ fn the_sink_thread_reads_the_pipe_between_blocks() {
         .find("break e;")
         .expect("a failed reading breaks the loop");
     assert!(brk < after.find('}').expect("the if block"), "{after:.120}");
-    assert!(body.contains("stats.record_servo_depth(sink.servo_depth())"));
+    assert!(body.contains("stats.record_asrc_stats(sink.asrc_stats())"));
     assert!(body.contains("Err(RecvTimeoutError::Disconnected) => return"));
 }
 
@@ -503,6 +442,7 @@ fn one_low_reading_is_no_refill_only_a_whole_hub_period_of_them_is() {
             silence_frames: PIPE_TARGET_FRAMES - 100
         }
     );
+    assert_eq!(r.written_frames(), PIPE_TARGET_FRAMES - 100 + BLOCK);
     assert!(!r.first);
 }
 
@@ -640,26 +580,17 @@ struct Outcome {
     holds: u64,
     /// pw-cat reads that found less than a quantum (would block its callback: an xrun).
     starved: u64,
-    drops: u64,
-    repeats: u64,
-    /// Servo corrections in each second of hub time.
-    corrections: Vec<u32>,
     /// The TRUE time-weighted pipe fill in each second, from the exact event times.
     depth: Vec<f64>,
     /// The fill as the hub can see it in each second: the trapezoids of its own readings (before
-    /// and after each write, and every sample in between), what the servo is fed.
+    /// and after each write, and every sample in between), what the phase term is fed.
     seen: Vec<f64>,
+    /// The resampler's ratio (ppm) and last fit at the end.
+    rate_ppm: f64,
+    rate_fit_ppm: Option<f64>,
 }
 
 impl Outcome {
-    fn total_corrections(&self) -> u64 {
-        self.drops + self.repeats
-    }
-
-    fn max_corrections_from(&self, s: usize) -> u32 {
-        self.corrections[s..].iter().copied().max().unwrap_or(0)
-    }
-
     fn max_error(values: &[f64]) -> f64 {
         values
             .iter()
@@ -684,10 +615,7 @@ impl Outcome {
 fn run(sp: Spawn) -> Outcome {
     let mut rng = Rng(sp.seed);
     let mut c = PipeFillControl::new(RATE);
-    let mut out = Outcome {
-        corrections: vec![0; sp.secs as usize],
-        ..Default::default()
-    };
+    let mut out = Outcome::default();
     let end = sp.secs * NS;
     // The hub's block k is due at k x 5.333 ms; tokio wakes it at the next whole ms, then the OS
     // and the channel hop add up to 50 us.
@@ -736,22 +664,13 @@ fn run(sp: Spawn) -> Outcome {
         seen_t = t;
         if next_block <= next_sample {
             let r = c.plan_block(t, fill, BLOCK);
-            let sec = (t / NS) as usize;
             match r.plan {
                 PipeFillPlan::Drop => out.trims += 1,
                 PipeFillPlan::StartHold => out.holds += 1,
                 PipeFillPlan::TopUp { .. } if !r.first => out.refills += 1,
-                PipeFillPlan::ServoDrop => {
-                    out.drops += 1;
-                    out.corrections[sec] += 1;
-                }
-                PipeFillPlan::ServoRepeat => {
-                    out.repeats += 1;
-                    out.corrections[sec] += 1;
-                }
                 _ => {}
             }
-            fill += r.plan.written_frames(BLOCK);
+            fill += r.written_frames();
             k += 1;
             next_block = block_at(k, &mut rng).max(t + 1);
         } else {
@@ -763,6 +682,10 @@ fn run(sp: Spawn) -> Outcome {
     }
     out.depth = true_area.means(sp.secs);
     out.seen = seen_area.means(sp.secs);
+    if let Some(s) = c.asrc_stats() {
+        out.rate_ppm = s.rate_ppm;
+        out.rate_fit_ppm = s.rate_fit_ppm;
+    }
     out
 }
 
@@ -775,10 +698,17 @@ fn spawn(sink_ppm: f64, secs: u64, seed: u64) -> Spawn {
     }
 }
 
+/// The ratio a sink `ppm` fast needs: hub frames per written frame, in ppm off 1.
+fn ratio_ppm(sink_ppm: f64) -> f64 {
+    (1.0 / (1.0 + sink_ppm * 1e-6) - 1.0) * 1e6
+}
+
 #[test]
-fn every_spawn_starts_at_the_prime_and_settles_to_the_same_depth() {
+fn every_spawn_starts_at_the_prime_and_holds_its_depth_inside_the_band() {
     // 16 connect delays, 3..~120 ms, so pw-cat's first read falls at every phase of a hub block.
-    let mut depths = Vec::new();
+    // Issue 1461 re-pin: the single-frame servo walked every spawn to within 48 frames of the
+    // setpoint; the resampler's phase term acts only outside +-1/4 of it (the design), so a spawn
+    // keeps the depth its first read's phase gave it (+-128 frames, +-2.7 ms), fixed for the run.
     for i in 0..16u64 {
         let connect_ns = 3 * MS + i * 7_770_000;
         let o = run(Spawn {
@@ -794,84 +724,67 @@ fn every_spawn_starts_at_the_prime_and_settles_to_the_same_depth() {
         );
         assert!(o.holds > 0 || connect_ns < 6 * MS, "{at}");
         assert_eq!((o.trims, o.refills, o.starved), (0, 0, 0), "{at}");
-        let first = &o.corrections[..20];
-        assert!(o.max_corrections_from(0) <= 12, "{at}: {first:?}");
-        // What the servo holds (the fill its readings show) is within 20 frames by 60 s.
-        let seen = o.max_seen_error_from(60);
-        assert!(seen <= 20.0, "{at}: the measured depth is off by {seen:.1}");
-        // The true depth: the 1 ms readings place each read only within a millisecond, which
-        // leaves a few frames on top of the servo's 16-frame band.
-        let truth = o.max_depth_error_from(60);
-        assert!(truth <= 30.0, "{at}: the true depth is off by {truth:.1}");
-        depths.push(o.mean_depth_from(60));
+        // Measured: within 133 frames, true and seen, over the 16 phases.
+        let truth = o.max_depth_error_from(10);
+        assert!(truth <= 150.0, "{at}: the true depth is off by {truth:.1}");
+        let seen = o.max_seen_error_from(10);
+        assert!(
+            seen <= 150.0,
+            "{at}: the measured depth is off by {seen:.1}"
+        );
+        // Fixed from the start: the depth of the first measured seconds is the depth at the end.
+        let early = o.depth[10..20].iter().sum::<f64>() / 10.0;
+        let late = o.mean_depth_from(100);
+        assert!(
+            (early - late).abs() <= 20.0,
+            "{at}: the depth moved {early:.1} -> {late:.1}"
+        );
     }
-    // The same depth after every restart: all 16 within 1 ms (48 frames) of each other (the
-    // rejected per-spawn setpoint varied by about 5 ms).
-    let lo = depths.iter().copied().fold(f64::MAX, f64::min);
-    let hi = depths.iter().copied().fold(f64::MIN, f64::max);
-    assert!(hi - lo <= 48.0, "{lo:.1}..{hi:.1}");
 }
 
 #[test]
-fn a_sink_at_the_hubs_rate_gets_no_corrections_after_settling() {
+fn a_sink_at_the_hubs_rate_holds_its_depth_with_no_guard() {
+    // Measured: true 97, seen 97 (the spawn's read phase), ratio 0.0.
     let o = run(spawn(0.0, 3600, 7));
     assert_eq!((o.trims, o.refills, o.starved), (0, 0, 0));
-    assert_eq!(o.max_corrections_from(60), 0, "{:?}", &o.corrections[..80]);
-    assert!(o.max_seen_error_from(60) <= 20.0);
-    assert!(o.max_depth_error_from(60) <= 30.0);
+    assert!(o.max_seen_error_from(10) <= 150.0);
+    assert!(o.max_depth_error_from(10) <= 150.0);
+    assert!(o.rate_ppm.abs() < 1.0, "ratio {:+.1} ppm", o.rate_ppm);
+}
+
+/// One drifting sink for an hour: no guard, the depth inside the dead band (no phase term needed),
+/// the ratio (and its fit) the sink's clock within 1 ppm.
+fn assert_held(ppm: f64, seed: u64) {
+    let o = run(spawn(ppm, 3600, seed));
+    assert_eq!((o.trims, o.refills, o.starved), (0, 0, 0), "{ppm} ppm");
+    let err = o.max_depth_error_from(60);
+    assert!(err <= 160.0, "{ppm} ppm: the true depth is off by {err:.1}");
+    let seen = o.max_seen_error_from(60);
+    assert!(
+        seen < BAND,
+        "{ppm} ppm: the measured depth is off by {seen:.1}"
+    );
+    let want = ratio_ppm(ppm);
+    assert!(
+        (o.rate_ppm - want).abs() < 1.0,
+        "{ppm} ppm: ratio {:+.1} vs {want:+.1}",
+        o.rate_ppm
+    );
+    let fit = o.rate_fit_ppm.expect("a fit");
+    assert!((fit - want).abs() < 1.0, "{ppm} ppm: fit {fit:+.1}");
 }
 
 #[test]
-fn a_50_ppm_sink_is_held_for_an_hour_with_a_few_corrections_a_second() {
-    for (ppm, seed) in [(50.0, 11), (-50.0, 12)] {
-        let o = run(spawn(ppm, 3600, seed));
-        assert_eq!((o.trims, o.refills, o.starved), (0, 0, 0), "{ppm} ppm");
-        let max = o.max_corrections_from(60);
-        assert!(max <= 4, "{ppm} ppm: {max} corrections in one second");
-        let err = o.max_depth_error_from(120);
-        assert!(err <= 60.0, "{ppm} ppm: the true depth is off by {err:.1}");
-        // What the servo itself sees (and `pipe_depth_frames` shows) runs ~10 frames further off
-        // at this drift, because the 1 ms readings place each read only within a millisecond:
-        // measured 60-62 here, so the live check allows +-70.
-        let seen = o.max_seen_error_from(120);
-        assert!(
-            seen <= 70.0,
-            "{ppm} ppm: the measured depth is off by {seen:.1}"
-        );
-        // The corrections are the drift itself: 50 ppm = 2.4 frames a second.
-        let expected = 50e-6 * 48_000.0 * 3600.0;
-        let net = o.drops as f64 - o.repeats as f64;
-        assert!(
-            (net.abs() - expected).abs() < expected * 0.05,
-            "{ppm} ppm: net {net} vs {expected}"
-        );
-        assert_eq!(net > 0.0, ppm < 0.0, "a slow sink fills the pipe: drops");
-    }
+fn a_50_ppm_sink_is_held_for_an_hour_by_the_ratio() {
+    // Measured: true depth off by 87 / 114, seen 95 / 124 (the spawn's phase plus the walk before
+    // the first fit), the ratio within 0.5 ppm of the sink.
+    assert_held(50.0, 11);
+    assert_held(-50.0, 12);
 }
 
 #[test]
 fn a_200_ppm_sink_is_held_for_an_hour_without_a_guard() {
-    for (ppm, seed) in [(200.0, 21), (-200.0, 22)] {
-        let o = run(spawn(ppm, 3600, seed));
-        assert_eq!((o.trims, o.refills, o.starved), (0, 0, 0), "{ppm} ppm");
-        // About 10 a second: the drift is 9.6 frames a second.
-        let rate = o.total_corrections() as f64 / 3600.0;
-        assert!((9.0..=11.0).contains(&rate), "{ppm} ppm: {rate:.2}/s");
-        let mut per_second = o.corrections[60..].to_vec();
-        per_second.sort_unstable();
-        let median = per_second[per_second.len() / 2];
-        assert!((9..=11).contains(&median), "{ppm} ppm: median {median}/s");
-        // At this drift the 1 s mean error rides just past the 128-frame knee (about 128..146),
-        // where the steep slope gives a second's budget of up to 15; the average stays the drift.
-        let max = o.max_corrections_from(60);
-        assert!(max <= 15, "{ppm} ppm: {max} corrections in one second");
-        let err = o.max_depth_error_from(120);
-        assert!(err <= 150.0, "{ppm} ppm: the true depth is off by {err:.1}");
-        // The servo's own view runs ~8 frames further off (measured 145-147).
-        let seen = o.max_seen_error_from(120);
-        assert!(
-            seen <= 160.0,
-            "{ppm} ppm: the measured depth is off by {seen:.1}"
-        );
-    }
+    // Measured: true 55 / 133, seen 62 / 140, the ratio within 0.3 ppm.
+    assert_held(200.0, 21);
+    assert_held(-200.0, 22);
 }

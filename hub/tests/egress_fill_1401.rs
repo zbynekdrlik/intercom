@@ -16,6 +16,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+use intercom_hub::asrc::ASRC_LOOKAHEAD;
 use intercom_hub::local_audio::{
     pipe_fill_bytes, pipe_fill_plan, LocalAudioStats, PipeFillPlan, PipeFillWriter,
     PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_TARGET_FRAMES, PW_GRAPH_BURST_FRAMES,
@@ -117,27 +118,30 @@ fn a_sink_writer_tops_an_empty_pipe_up_to_the_target_and_then_writes_the_block()
     let mut sink = PipeFillWriter::new(writer, 2, RATE);
     let block = stereo_block();
 
-    // The first write after a spawn primes the pipe to the target, then writes the block.
+    // The first write after a spawn primes the pipe to the target, then writes the block. Since
+    // issue 1461 the block goes through the resampler, whose 16-frame look-ahead the first
+    // rendered block falls short of a block: the top-up's silence covers it, and the audio (at
+    // ratio 1 the resampler is the identity) follows the silence.
     let report = sink.write_block(&block).unwrap();
-    assert_eq!(
-        report,
-        PipeWriteReport {
-            fill_frames: 0,
-            plan: top_up(PIPE_TARGET_FRAMES),
-            first: true,
-        }
-    );
+    assert_eq!(report.fill_frames, 0);
+    assert!(report.first);
+    assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES + ASRC_LOOKAHEAD));
+    assert_eq!(report.render.frames, BLOCK - ASRC_LOOKAHEAD);
     // Bytes per frame = channels x 2 (s16).
     assert_eq!(
         pipe_fill_bytes(&probe).unwrap(),
         (PIPE_TARGET_FRAMES + BLOCK) * 2 * 2
     );
-    let mut silence = vec![0xffu8; PIPE_TARGET_FRAMES * 4];
+    let mut silence = vec![0xffu8; (PIPE_TARGET_FRAMES + ASRC_LOOKAHEAD) * 4];
     reader.read_exact(&mut silence).unwrap();
     assert!(silence.iter().all(|&b| b == 0), "the top-up is silence");
-    let mut audio = vec![0u8; BLOCK * 4];
+    let mut audio = vec![0u8; (BLOCK - ASRC_LOOKAHEAD) * 4];
     reader.read_exact(&mut audio).unwrap();
-    assert_eq!(audio, le_bytes(&block), "the block follows the silence");
+    assert_eq!(
+        audio,
+        le_bytes(&block[..(BLOCK - ASRC_LOOKAHEAD) * 2]),
+        "the block follows the silence"
+    );
 
     // pw-cat took everything and the pipe stays empty for a whole hub period (a 1 ms reading now,
     // the pre-write reading 6 ms later): the next write is a REFILL (not the first write any more).
@@ -148,14 +152,19 @@ fn a_sink_writer_tops_an_empty_pipe_up_to_the_target_and_then_writes_the_block()
     assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES));
     assert!(!report.first);
 
-    // A healthy pipe takes the block as it is.
+    // A refill re-primes (issue 1461): the start hold again until pw-cat's next read.
     let report = sink.write_block(&block).unwrap();
     assert_eq!(report.fill_frames, PIPE_TARGET_FRAMES + BLOCK);
+    assert_eq!(report.plan, PipeFillPlan::StartHold);
+    // pw-cat reads a quantum: a healthy pipe takes the block as it is.
+    let mut quantum = vec![0u8; PW_GRAPH_BURST_FRAMES * 4];
+    reader.read_exact(&mut quantum).unwrap();
+    sink.sample_fill().unwrap();
+    let report = sink.write_block(&block).unwrap();
+    let after_read = PIPE_TARGET_FRAMES + BLOCK - PW_GRAPH_BURST_FRAMES;
+    assert_eq!(report.fill_frames, after_read);
     assert_eq!(report.plan, PipeFillPlan::Write);
-    assert_eq!(
-        pipe_fill_bytes(&probe).unwrap(),
-        (PIPE_TARGET_FRAMES + 2 * BLOCK) * 4
-    );
+    assert_eq!(pipe_fill_bytes(&probe).unwrap(), (after_read + BLOCK) * 4);
 
     // Above the trim mark the block is dropped and nothing is written.
     let extra = PIPE_HIGH_FRAMES * 4;
@@ -175,7 +184,7 @@ fn a_four_channel_sink_measures_its_fill_in_four_channel_frames() {
     let mut sink = PipeFillWriter::new(writer, 4, RATE);
     let block: Vec<i16> = vec![1; BLOCK * 4];
     let report = sink.write_block(&block).unwrap();
-    assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES));
+    assert_eq!(report.plan, top_up(PIPE_TARGET_FRAMES + ASRC_LOOKAHEAD));
     assert_eq!(
         pipe_fill_bytes(&probe).unwrap(),
         (PIPE_TARGET_FRAMES + BLOCK) * 8
@@ -220,6 +229,7 @@ fn the_local_audio_facet_counts_refills_trims_and_the_last_fill_but_not_the_prim
         fill_frames: 0,
         plan: top_up(2048),
         first: true,
+        ..Default::default()
     });
     let f = stats.snapshot();
     assert_eq!(
@@ -230,17 +240,17 @@ fn the_local_audio_facet_counts_refills_trims_and_the_last_fill_but_not_the_prim
     stats.record_write(&PipeWriteReport {
         fill_frames: 100,
         plan: top_up(1948),
-        first: false,
+        ..Default::default()
     });
     stats.record_write(&PipeWriteReport {
         fill_frames: 1500,
         plan: PipeFillPlan::Write,
-        first: false,
+        ..Default::default()
     });
     stats.record_write(&PipeWriteReport {
         fill_frames: 5000,
         plan: PipeFillPlan::Drop,
-        first: false,
+        ..Default::default()
     });
     let f = stats.snapshot();
     assert_eq!(f.tx_blocks, 3, "a dropped block is not written");

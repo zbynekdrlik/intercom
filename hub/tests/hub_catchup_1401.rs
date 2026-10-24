@@ -426,7 +426,7 @@ impl Pipe {
             PipeFillPlan::TopUp { .. } if !r.first => self.refills += 1,
             _ => {}
         }
-        self.fill += r.plan.written_frames(BLOCK);
+        self.fill += r.written_frames();
         self.next_sample = t + self.sample_wait();
     }
 }

@@ -310,7 +310,7 @@ fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
             vban_legs += 1;
             BufferKind::VbanLeg
         } else if p.adapter == ADAPTER_JANUS {
-            BufferKind::LocalCapture
+            BufferKind::JanusCapture
         } else if local_inputs.contains(&id) {
             BufferKind::CardCapture
         } else {
@@ -319,7 +319,9 @@ fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
         assert_eq!(b.kind(), want, "{} ({}, {})", p.name, p.role, p.adapter);
         assert_eq!(
             b.network_stats().is_some(),
-            want == BufferKind::VbanLeg || want == BufferKind::CardCapture
+            want == BufferKind::VbanLeg
+                || want == BufferKind::CardCapture
+                || want == BufferKind::JanusCapture
         );
         if p.role == PROGRAM_OUT_ROLE {
             assert_eq!(
