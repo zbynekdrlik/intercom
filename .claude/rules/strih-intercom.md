@@ -154,7 +154,7 @@ strih, and a second hub sending VBAN back to them is double talkback.
   (19.9.: a per-block DNS lookup — destinations are now resolved once, off the hot path).
 - The cambox headset ADC runs ~+540 ppm against the hub's timer (cam1 `capture 48026 samp/s`) —
   without a per-stream rate handling that was one 128-frame overrun every ~5 s. Since issue 1461 the
-  VBAN leg's resampler follows it up to its +-500 ppm clamp (see "VBAN legs" below); past the clamp
+  VBAN leg's resampler follows it (its clamp is +-1000 ppm) (see "VBAN legs" below); past the clamp
   the rest is counted as resyncs.
 - **Put cam1 BACK on main's release build the moment the test ends** (`CAMERA_SET=cam1
   scripts/deploy-fleet.sh` with no `--run` = main's latest artifact). The M1b test needs the DEV
@@ -352,7 +352,9 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - The cutters' local capture (the card's `arecord`, or a `pw-cat --record`) ->
     `JitterBuffer::card_capture` (`BufferKind::CardCapture`): the SAME resampler leg, since the
     card crystal is a foreign clock too. Target `target_ms` or `CARD_CAPTURE_TARGET_FRAMES` 2048,
-    cap the 32 blocks the capture ring had.
+    cap the 32 blocks the capture ring had. The 2048 are two `pw-cat` bursts; the deployed
+    `arecord` delivers 256-frame periods, so a smaller `target_ms` (3-4 blocks) is likely enough
+    once its live jitter is read.
   - Janus (phones) -> `local_capture` (unchanged; its crossing is issue 1461's second lane).
   - Everything else (no ingress) -> the plain `new`.
   - Every cap is DERIVED, never typed (design 5981457044): `vban_cap_blocks(target)` = target +
@@ -381,7 +383,13 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     comes 4 s after the first packet. A phase term acts only when the 1 s mean depth leaves +-1/4
     of the target, then brings it back to +-1/8 (a Schmitt trigger: a depth a clock step pushed
     out otherwise parked on the band's edge where the jitter poked it out again). Clamped to
-    +-500 ppm (`ASRC_MAX_PPM`);
+    +-1000 ppm (`ASRC_MAX_PPM`; the design said +-500, review round 1 raised it: cam1's headset ADC
+    measured +540 ppm and would have been cut every ~13 min);
+  - the arrival time is taken BEFORE the jitter lock (`push_at(&audio, arrived)` in the receive
+    task, the card leg and the pw-cat capture), so the time a push waits for the hub-mix thread
+    never enters the fit. The polyphase table is built when a leg is constructed
+    (`asrc::warm`), never on the real-time thread. A fanned mono packet renders ch1 once and copies
+    it; the coefficients are computed once per frame for all channels (`asrc::render_planar`);
   - after the prime the depth is never trimmed or padded: an underrun = ONE whole silent block and
     a re-prime to the SAME target; above the cap ONE counted resync to the target
     (`NetworkFillStats::resyncs`, the buffer's `overruns` counts it too). Both also restart the
@@ -405,8 +413,10 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
 - **Observability.**
   - `/api/state`, every resampler leg (VBAN and the card capture): `jitter: {target_frames (fixed),
     depth_frames (1 s mean pre-pop depth ahead of the read point), depth_min_frames, rate_ppm (the
-    ratio, 0.1 ppm), asrc_phase_frames (the last second's mean depth minus the target), resyncs,
-    stalls, primed}`. No servo or adaptive field is left.
+    ratio, 0.1 ppm), rate_fit_ppm (the last fit; null before the first after a (re)start; past
+    the clamp it says how far), asrc_phase_frames (the last second's mean depth minus the target),
+    resyncs, stalls, primed}`. No servo or adaptive field is left. A ran-dry or restarted leg
+    clears its depth numbers, so no stale second shows.
   - The 1 s mean depth rides the packet / pop phase by up to one packet (or one block for bursts
     longer than a block), so `asrc_phase_frames` wanders by that much inside the band; the true
     latency does not move.
@@ -414,7 +424,8 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - The status line is `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>)
     [stalls=<sum>(<worst program leg>)] [lost=<n>] [tx_dropped=<sum>(<worst leg>)]
     [resyncs=<sum>(<worst leg>)] ... [asrc=<leg>:rate_ppm=+0.5:asrc_phase_frames=-3.0:underruns=0:resyncs=0]...`,
-    one `asrc=` group per resampler leg that has received a packet. The total still leads, so a
+    one `asrc=` group per resampler leg that is playing now (primed; a muted cambox is left
+    out). The total still leads, so a
     `underruns=(\d+)` parser keeps working. Built off the real-time thread like the rest.
 - **The program audio delay is fixed** (computed, see `.claude/rules/audio-clock-map.md`): the
   program-feed target 37.3 ms, plus on strih-pp the pw-cat pipe held at 1792 frames (37.3 ms) by
@@ -427,7 +438,8 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     well above 256 + 16.
   - The status line: `underruns=` flat, no `resyncs=`, no `stalls=` unless a sender really
     stopped, no `lost=`, one `asrc=` group per live leg.
-  - A cambox headset ADC past 500 ppm reads `rate_ppm=+500.0` and counted `resyncs` (the clamp).
+  - A sender past 1000 ppm reads `rate_ppm=+1000.0`, a larger `rate_fit_ppm`, and counted
+    `resyncs` (the clamp).
 - **The egress: a fill target on every pw-cat pipe, one non-blocking socket per VBAN destination
   (design comment 5979128757, live findings 5979008527 + 5979112926, 4.10.2026).** The "extreme"
   chopping after a production was the egress, not the ingress.
@@ -616,19 +628,19 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   fixed program target, the live check and the Tier-0 replicas.
 - **Tests + the bench.**
   - `tests/asrc_1461.rs`: the resampler (unity ratio at phase 0 = a delayed identity, DC gain 1 at
-    every phase and ratio, a 100 Hz / 1 kHz / 5 kHz sine read at -500..+500 ppm from four start
+    every phase and ratio, a 100 Hz / 1 kHz / 5 kHz sine read at -1000..+1000 ppm from four start
     phases lands under -85 dB of the continuous sine, rendering block by block = one pass, the
     interleaved render = the planar one, `frames_needed`, the least-squares fit, `target_ms`
-    rounding) and a two-clock bench on frame counts: a jittered cambox at +-50 and +-500 ppm for
+    rounding) and a two-clock bench on frame counts: a jittered cambox at +-50, +-500 and +540 ppm (cam1) for
     2 h, a 0 -> +100 ppm step, the FOH burst pattern at its fixed target, a lost tick every 30 s,
-    a 600 ppm sender (counted resyncs, the target never moves).
+    an 1100 ppm sender (counted resyncs, the target never moves).
   - `tests/asrc_leg_1461.rs` (black box through the real `JitterBuffer`): a 1 kHz sine from a
     cambox at +-50 / +-500 ppm and across a 100 ppm step, every 50 ms window fitted with a
     free-frequency sine: THD+N under -80 dB in every window (the issue-1401 servo failed 24 / 75
     of 600 windows at -29 dB, the RED), and the grader's own control (one cut frame fails it).
   - `tests/vban_jitter_1401.rs` (the policy re-pinned on the resampler leg),
     `tests/vban_jitter_bench_1401.rs` (the issue-1401 scenarios: 8 h at +-20 ppm FOH and cambox,
-    the +500 ppm clamp, bursts, lost ticks every 30 s and every 0.5 s, mutes every 20 s, 60 ms
+    the +540 ppm cam1 ADC, bursts, lost ticks every 30 s and every 0.5 s, mutes every 20 s, 60 ms
     stalls, the old-policy control; graded on no silent block / skip / resync, the depth inside
     the band, the ratio within 3 ppm of the sender), `tests/vban_jitter_state_1401.rs` (facet,
     status line, `input_buffers` on the deployed TOML), `tests/vban_program_target_1401.rs`

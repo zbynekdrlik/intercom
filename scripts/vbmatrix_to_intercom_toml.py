@@ -107,7 +107,9 @@ TALKBACK_MAKEUP_DB = 0.0
 # issue 1461: every ingress resampler leg's FIXED target depth in ms (the hub rounds it up to whole
 # 256-frame blocks and reads it at start only, never adapting it): a cambox 3 blocks (16 ms), a
 # program feed 7 blocks (37.33 ms: the FOH sender's largest measured gap 27.6 ms + a block + half
-# a burst), the cutters' card capture 8 blocks (42.67 ms: two of the card's 1024-frame bursts).
+# a burst), the cutters' card capture 8 blocks (42.67 ms: the issue-1345 capture ring's depth, two
+# pw-cat bursts; the alsa adapter's arecord delivers 256-frame periods, so it can likely go lower
+# once its live jitter is read).
 TARGET_MS_CAMBOX = "16.0"
 TARGET_MS_PROGRAM = "37.33"
 TARGET_MS_CARD = "42.67"
