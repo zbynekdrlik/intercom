@@ -250,9 +250,9 @@ pub struct Participant {
     #[serde(default)]
     pub alsa_in_channel_map: Option<String>,
     /// The fixed target depth of this participant's ingress resampler leg in ms (issue 1461): a
-    /// VBAN leg or the card / PipeWire capture. Rounded up to whole hub blocks, read at start
-    /// only, never adapted. Absent = the kind's default (a cambox 16 ms, a program feed 37.3 ms,
-    /// the card capture 42.7 ms; [`crate::vban_jitter`]).
+    /// VBAN leg, the card / PipeWire capture or the phones' Janus room mix. Rounded up to whole hub
+    /// blocks, read at start only, never adapted. Absent = the kind's default (a cambox 16 ms, a
+    /// program feed 37.3 ms, the card capture and the phones 42.7 ms; [`crate::vban_jitter`]).
     #[serde(default)]
     pub target_ms: Option<f64>,
     /// Number of input channels the matrix routes FROM this participant.
@@ -432,9 +432,12 @@ impl Matrix {
                 );
             }
             // The ingress resampler leg's fixed target (issue 1461): only where there is one (a
-            // VBAN leg, or a card / PipeWire capture), never on an output-only participant.
+            // VBAN leg, a card / PipeWire capture, the phones' Janus ingress), never on an
+            // output-only participant.
             if let Some(ms) = p.target_ms {
-                let capture = (p.adapter == ADAPTER_ALSA || p.adapter == ADAPTER_PIPEWIRE)
+                let capture = (p.adapter == ADAPTER_ALSA
+                    || p.adapter == ADAPTER_PIPEWIRE
+                    || p.adapter == ADAPTER_JANUS)
                     && p.in_channels > 0
                     && p.role != PROGRAM_OUT_ROLE;
                 if p.adapter != ADAPTER_VBAN && !capture {

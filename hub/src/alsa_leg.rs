@@ -3,7 +3,7 @@
 //! (`hw:CARD=<id>,DEV=<n>`), no PipeWire node and no sound server in between.
 //!
 //! - **Playback** reuses the HDMI leg's [`AplaySink`]: the pipe fill guard built for aplay's period
-//!   read ([`aplay_pipe_control_for`]), the start hold and the drift servo that carries the clock
+//!   read ([`aplay_pipe_control_for`]), the start hold and the resampler that carries the clock
 //!   crossing (the card's crystal is not the hub's clock). The participant's channels are spread
 //!   onto the card's hw channels first ([`spread_to_hw`]); unmapped hw outputs play silence.
 //! - **Capture** is its twin: `arecord` on the same card, its stdout framed into hub blocks, the
@@ -199,7 +199,7 @@ fn alsa_playback_loop(
                     )) {
                         Ok(report) => {
                             stats.record_write(&report);
-                            stats.record_servo_depth(sink.servo_depth());
+                            stats.record_asrc_stats(sink.asrc_stats());
                             if report.first {
                                 // The prime of every spawn: a busy PCM retried each backoff cycle
                                 // must not repeat an info line (the side logs once per change).
@@ -222,7 +222,7 @@ fn alsa_playback_loop(
                 playing = true;
                 leg.playback.set_running(true);
             }
-            // aplay xrun'd and refills its whole buffer from the pipe: one prime, not a servo walk.
+            // aplay xrun'd and refills its whole buffer from the pipe: one prime, not a phase walk.
             let xruns = leg.playback.snapshot().xruns;
             if xruns != xruns_seen {
                 xruns_seen = xruns;

@@ -906,9 +906,12 @@ fn push_room_mix(
         channels: vec![decoded.samples],
         frames,
     };
+    // The arrival time, before the lock: the phones' resampler leg times every packet by it
+    // (issue 1461 lane 2).
+    let arrived = Instant::now();
     if let Ok(mut jb) = jitter.lock() {
         if let Some(b) = jb.get_mut(phones_id) {
-            b.push(&audio);
+            b.push_at(&audio, arrived);
         }
     }
     stats.rx_packets.fetch_add(1, Ordering::Relaxed);

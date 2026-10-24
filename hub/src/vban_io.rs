@@ -253,6 +253,8 @@ pub enum BufferKind {
     VbanLeg,
     /// [`JitterBuffer::card_capture`]: the same resampler leg, fed by the cutters' card.
     CardCapture,
+    /// [`JitterBuffer::janus_capture`]: the same resampler leg, fed by the phones' Janus room mix.
+    JanusCapture,
 }
 
 /// The fill policy a [`JitterBuffer`] runs, with its state (see the type doc).
@@ -319,6 +321,13 @@ impl JitterBuffer {
     /// card's `arecord` (or a `pw-cat --record`) bursts on the card's own crystal.
     pub fn card_capture(cap_frames: usize, target_frames: usize, rate: u32) -> Self {
         Self::resampler_leg(cap_frames, target_frames, rate, BufferKind::CardCapture)
+    }
+
+    /// The phones' JANUS ingress (issue 1461 lane 2): the same resampler leg again, fed by the
+    /// decoded room mix (960-frame packets on Janus's / the browsers' clock). It replaced the
+    /// trim-only local-capture ring.
+    pub fn janus_capture(cap_frames: usize, target_frames: usize, rate: u32) -> Self {
+        Self::resampler_leg(cap_frames, target_frames, rate, BufferKind::JanusCapture)
     }
 
     fn resampler_leg(cap_frames: usize, target_frames: usize, rate: u32, kind: BufferKind) -> Self {

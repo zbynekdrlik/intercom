@@ -4,7 +4,7 @@
 //! The same egress shape as the pw-cat playback legs ([`crate::local_audio`]): an OS thread owns the
 //! child, the block loop `try_send`s one interleaved PCM16 block per tick, and every write goes
 //! through the pipe fill guard ([`PipeFillWriter`]: FIONREAD before every block and about every
-//! millisecond between them, the prime, the start hold and the drift servo, since the HDMI PCM
+//! millisecond between them, the prime, the start hold and the resampler, since the HDMI PCM
 //! runs on the GPU's audio clock, not the hub's). aplay reads one 256-frame ALSA period at a time,
 //! so the guard is built for that read size: 640 frames held in the pipe (13.3 ms) plus the
 //! 1024-frame ALSA buffer, where a pw-cat pipe holds 1792. Its ALSA buffer is the reserve, so after
@@ -42,7 +42,7 @@ use crate::local_audio::{
     log_pipe_write, restart_backoff, LocalAudioSink, LocalAudioStats, PipeFillWriter,
     EGRESS_QUEUE_BLOCKS, PIPE_SAMPLE_INTERVAL,
 };
-use crate::pipe_fill::{PipeFillControl, PipeServoDepth, PipeWriteReport};
+use crate::pipe_fill::{PipeAsrcStats, PipeFillControl, PipeWriteReport};
 
 /// An aplay that ran this long before it exited is not counted toward the backoff (an unplugged
 /// converter after an hour of playing retries at once, a PCM that is busy at every open backs off).
@@ -184,7 +184,9 @@ impl AplaySink {
         };
         Ok(AplaySink {
             child,
-            stdin: PipeFillWriter::with_control(stdin, channels, control).with_format(format),
+            stdin: PipeFillWriter::with_control(stdin, channels, control)
+                .with_format(format)
+                .with_reader("aplay"),
             stderr_reader: Some(stderr_reader),
             pcm_moved: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -251,8 +253,8 @@ impl LocalAudioSink for AplaySink {
         self.stdin.sample_fill()
     }
 
-    fn servo_depth(&self) -> Option<PipeServoDepth> {
-        self.stdin.servo_depth()
+    fn asrc_stats(&self) -> Option<PipeAsrcStats> {
+        self.stdin.asrc_stats()
     }
 }
 
@@ -266,8 +268,8 @@ impl Drop for AplaySink {
 
 /// A fixed lip-sync delay line in samples (issue 1424, 14.10.2026): the vestibule picture runs
 /// ~250-290 ms behind the stage, the hub's audio path ~75-80 ms, so the program was heard ~170-210 ms
-/// early. The leg delays its N-1 bus by `hdmi_delay_ms` BEFORE the aplay pipe, so the pipe servo's
-/// depth (and every guard) is untouched. One block in, one block out; while it fills it plays
+/// early. The leg delays its N-1 bus by `hdmi_delay_ms` BEFORE the aplay pipe, so the pipe's depth
+/// (and every guard) is untouched. One block in, one block out; while it fills it plays
 /// silence. A reset (every aplay spawn) refills it with silence, so audio queued before a gap never
 /// plays late.
 pub struct SampleDelay {
@@ -423,7 +425,7 @@ fn alsa_hdmi_sink_loop(
                 Ok(block) => match sink.write_block(&delay.process(&block)) {
                     Ok(report) => {
                         stats.record_write(&report);
-                        stats.record_servo_depth(sink.servo_depth());
+                        stats.record_asrc_stats(sink.asrc_stats());
                         log_pipe_write(label, &hw, &report);
                     }
                     Err(e) => break e,
@@ -444,7 +446,7 @@ fn alsa_hdmi_sink_loop(
                 playing = true;
                 hdmi.set_running(true);
             }
-            // aplay xrun'd and refills its whole buffer from the pipe: one prime, not a servo walk.
+            // aplay xrun'd and refills its whole buffer from the pipe: one prime, not a phase walk.
             let xruns = hdmi.snapshot().xruns;
             if xruns != xruns_seen {
                 xruns_seen = xruns;

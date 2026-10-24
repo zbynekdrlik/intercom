@@ -17,8 +17,8 @@
 //! sink thread also reads it about every millisecond between blocks. [`crate::pipe_fill`] decides
 //! each write from those readings (issue 1401): the refill and trim guards (pw-cat reads a whole
 //! graph quantum per cycle, so a pipe the hub let drain would otherwise xrun on every cycle until a
-//! restart), the start hold (every spawn starts at the same depth) and the drift servo on the
-//! time-weighted fill (the sink's clock is not the hub's).
+//! restart), the start hold (every spawn starts at the same depth) and, since issue 1461, the
+//! resampler that crosses the sink's clock into the hub's (never a frame inserted or dropped).
 //!
 //! INGRESS ([`PwCatSource`]): the MiniFuse 4 capture (the strih operator's talkback mic) is read as
 //! PCM and pushed into the `cutters` participant's [`JitterBuffer`] the engine already pops into the
@@ -32,7 +32,7 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::alsa_card::PcmFormat;
-use crate::pipe_fill::{stretch_interleaved, EgressQueue, PipeFillControl, PipeServoDepth};
+use crate::pipe_fill::{EgressQueue, PipeAsrcStats, PipeFillControl};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
 // The pipe's fill controller (and the graph quantum it is built on) lives in `pipe_fill`; these
@@ -113,39 +113,9 @@ pub fn pipe_reader_gone<F: AsFd>(pipe: F) -> io::Result<bool> {
     Ok(pfd.revents & libc::POLLERR != 0)
 }
 
-/// The bytes one block write puts into the pipe for `plan`, or `None` when the block is not written
-/// (a trim or the start hold): the silence of a top-up in front of the block, or the block stretched
-/// by one frame for a servo correction ([`stretch_interleaved`]).
-pub fn pipe_write_bytes(
-    plan: PipeFillPlan,
-    interleaved: &[i16],
-    channels: usize,
-) -> Option<Vec<u8>> {
-    let n_ch = channels.max(1);
-    let block_frames = interleaved.len() / n_ch;
-    match plan {
-        PipeFillPlan::Drop | PipeFillPlan::StartHold => None,
-        PipeFillPlan::Write => Some(interleaved_to_le_bytes(interleaved)),
-        PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => {
-            let out_frames = plan.written_frames(block_frames);
-            Some(interleaved_to_le_bytes(&stretch_interleaved(
-                interleaved,
-                n_ch,
-                out_frames,
-            )))
-        }
-        PipeFillPlan::TopUp { silence_frames } => {
-            // One write: the silence, then the block.
-            let mut bytes = vec![0u8; silence_frames * n_ch * 2];
-            bytes.extend_from_slice(&interleaved_to_le_bytes(interleaved));
-            Some(bytes)
-        }
-    }
-}
-
 /// The fill guard on a `pw-cat --playback` stdin pipe (issue 1401): measures the pipe before every
 /// block and between blocks ([`PipeFillWriter::sample_fill`]), and writes what its
-/// [`PipeFillControl`] plans (the guards, the start hold, the drift servo). Generic over the pipe's
+/// [`PipeFillControl`] plans (the guards, the start hold, the resampler). Generic over the pipe's
 /// write end so a test can drive it over a real `std::io::pipe`.
 pub struct PipeFillWriter<W> {
     pipe: W,
@@ -156,6 +126,8 @@ pub struct PipeFillWriter<W> {
     control: PipeFillControl,
     /// The samples each planned write puts into the pipe.
     queue: EgressQueue,
+    /// The reader child's binary, for the error when it closed its end (`pw-cat`, `aplay`).
+    reader: &'static str,
     /// The controller's clock: nanoseconds since this writer (this pw-cat child) was created.
     epoch: Instant,
 }
@@ -176,6 +148,7 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
             format: PcmFormat::S16Le,
             control,
             queue: EgressQueue::new(usize::from(channels.max(1))),
+            reader: "pw-cat",
             epoch: Instant::now(),
         }
     }
@@ -187,13 +160,20 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         self
     }
 
-    /// The pipe fill in frames, or `BrokenPipe` once pw-cat closed its end: every reading, held or
-    /// written, notices a dead child, so the sink thread respawns it.
+    /// The same guard on a pipe that `reader` takes from (issue 1461: the card and HDMI legs'
+    /// aplay), named in the error when it closes its end. pw-cat by default.
+    pub fn with_reader(mut self, reader: &'static str) -> Self {
+        self.reader = reader;
+        self
+    }
+
+    /// The pipe fill in frames, or `BrokenPipe` once the reader closed its end: every reading, held
+    /// or written, notices a dead child, so the sink thread respawns it.
     fn fill_frames(&self) -> io::Result<usize> {
         if pipe_reader_gone(&self.pipe)? {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "pw-cat closed its stdin pipe",
+                format!("{} closed its stdin pipe", self.reader),
             ));
         }
         Ok(pipe_fill_bytes(&self.pipe)? / (self.channels * self.format.bytes_per_sample()))
@@ -203,7 +183,8 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// Read the pipe fill between blocks, for the servo's time-weighted fill. The sink thread calls
+    /// Read the pipe fill between blocks, for the time-weighted fill and the read times of the
+    /// resampler's rate fit. The sink thread calls
     /// this about every [`PIPE_SAMPLE_INTERVAL`] while it waits for the next block.
     pub fn sample_fill(&mut self) -> io::Result<()> {
         let fill_frames = self.fill_frames()?;
@@ -229,9 +210,9 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         Ok(report)
     }
 
-    /// The drift servo's depth and setpoint, once pw-cat has started reading.
-    pub fn servo_depth(&self) -> Option<PipeServoDepth> {
-        self.control.servo_depth()
+    /// The resampler leg's depth, setpoint and rate, once the reader has started reading.
+    pub fn asrc_stats(&self) -> Option<PipeAsrcStats> {
+        self.control.asrc_stats()
     }
 
     /// The reader has read from the pipe since its spawn (the start hold is over).
@@ -370,8 +351,12 @@ pub struct LocalAudioStats {
     pipe_trims: AtomicU64,
     pipe_fill_frames: AtomicU64,
     pipe_start_holds: AtomicU64,
-    pipe_servo_drops: AtomicU64,
-    pipe_servo_repeats: AtomicU64,
+    /// f64 bits (issue 1461): the resampler's ratio, its last fit (valid while `pipe_rate_fitted`)
+    /// and its phase.
+    pipe_rate_ppm: AtomicU64,
+    pipe_rate_fit_ppm: AtomicU64,
+    pipe_rate_fitted: AtomicBool,
+    pipe_asrc_phase_frames: AtomicU64,
     pipe_depth_frames: AtomicU64,
     pipe_setpoint_frames: AtomicU64,
 }
@@ -397,25 +382,29 @@ pub struct LocalAudioFacet {
     pub pipe_trims: u64,
     /// The playback pipe's fill measured before the last write, in frames. It rides pw-cat's
     /// quantum reads (from about the held depth - 640 to the depth + 384 at the 256-frame block),
-    /// so read the servo's `pipe_depth_frames` for the held depth.
+    /// so read `pipe_depth_frames` for the held depth.
     pub pipe_fill_frames: u64,
     /// Blocks dropped by the start hold: written while pw-cat had not read since its spawn, so
     /// every spawn starts at the same depth (issue 1401). It grows only around a spawn: by pw-cat's
     /// connect time / one hub block, plus, after a respawn, up to the 63 blocks the egress queue
     /// filled during the restart backoff. A count that keeps climbing means pw-cat is not reading.
     pub pipe_start_holds: u64,
-    /// Single frames the pipe's drift servo dropped (the hub's clock runs ahead of the sink's).
-    pub pipe_servo_drops: u64,
-    /// Single frames the pipe's drift servo repeated (the sink's clock runs ahead of the hub's).
-    pub pipe_servo_repeats: u64,
-    /// The servo's mean time-weighted pipe fill over its last complete 1 s window, in frames:
-    /// within a few tens of frames of `pipe_setpoint_frames` once settled (up to ~70 off at a
-    /// 50 ppm sink). 0 until the first window after pw-cat's first read completes; after a
-    /// respawn it keeps the previous child's value until the new child's first read, then reads 0
-    /// until that child's first 1 s window completes.
+    /// The resampler's ratio in ppm off 1 (issue 1461): hub frames per written frame, so a sink
+    /// running fast against the hub reads negative (a 50 ppm fast MiniFuse: about -50).
+    pub pipe_rate_ppm: f64,
+    /// The last least-squares fit of the sink's rate in the same sense; null before the first fit
+    /// after a (re)spawn or a guard.
+    pub pipe_rate_fit_ppm: Option<f64>,
+    /// The last second's mean time-weighted fill minus the setpoint: the phase term acts only
+    /// outside +-1/4 of the setpoint and brings it back to +-1/8.
+    pub pipe_asrc_phase_frames: f64,
+    /// The mean time-weighted pipe fill over the last complete 1 s, in frames: within the dead
+    /// band (+-1/4) of `pipe_setpoint_frames` once settled. 0 until the first second after the
+    /// reader's first read completes; after a respawn it keeps the previous child's value until the
+    /// new child's first read, then reads 0 until that child's first second completes.
     pub pipe_depth_frames: u64,
-    /// The depth the servo holds: the time-average the start hold leaves, 1792 frames at the
-    /// 256-frame block. 0 until pw-cat's first read after the hub start.
+    /// The fixed depth the resampler holds: the time-average the start hold leaves, 1792 frames for
+    /// a pw-cat pipe, 640 for aplay. 0 until the reader's first read after the hub start.
     pub pipe_setpoint_frames: u64,
 }
 
@@ -432,16 +421,22 @@ impl LocalAudioStats {
             pipe_trims: self.pipe_trims.load(Ordering::Relaxed),
             pipe_fill_frames: self.pipe_fill_frames.load(Ordering::Relaxed),
             pipe_start_holds: self.pipe_start_holds.load(Ordering::Relaxed),
-            pipe_servo_drops: self.pipe_servo_drops.load(Ordering::Relaxed),
-            pipe_servo_repeats: self.pipe_servo_repeats.load(Ordering::Relaxed),
+            pipe_rate_ppm: f64::from_bits(self.pipe_rate_ppm.load(Ordering::Relaxed)),
+            pipe_rate_fit_ppm: self
+                .pipe_rate_fitted
+                .load(Ordering::Relaxed)
+                .then(|| f64::from_bits(self.pipe_rate_fit_ppm.load(Ordering::Relaxed))),
+            pipe_asrc_phase_frames: f64::from_bits(
+                self.pipe_asrc_phase_frames.load(Ordering::Relaxed),
+            ),
             pipe_depth_frames: self.pipe_depth_frames.load(Ordering::Relaxed),
             pipe_setpoint_frames: self.pipe_setpoint_frames.load(Ordering::Relaxed),
         }
     }
 
-    /// Count one playback write: a written block (topped up, servo-corrected or not) is a
-    /// `tx_block`, a trimmed one a `pipe_trim`, a held one a `pipe_start_hold`, a top-up that is
-    /// not the prime a `pipe_refill`, a servo correction a `pipe_servo_drop` / `_repeat`.
+    /// Count one playback write: a written block (topped up or not) is a `tx_block`, a trimmed one
+    /// a `pipe_trim`, a held one a `pipe_start_hold`, a top-up that is not the prime a
+    /// `pipe_refill`.
     pub fn record_write(&self, report: &PipeWriteReport) {
         self.pipe_fill_frames
             .store(report.fill_frames as u64, Ordering::Relaxed);
@@ -454,14 +449,6 @@ impl LocalAudioStats {
             }
             PipeFillPlan::Write => {
                 self.tx_blocks.fetch_add(1, Ordering::Relaxed);
-            }
-            PipeFillPlan::ServoDrop => {
-                self.tx_blocks.fetch_add(1, Ordering::Relaxed);
-                self.pipe_servo_drops.fetch_add(1, Ordering::Relaxed);
-            }
-            PipeFillPlan::ServoRepeat => {
-                self.tx_blocks.fetch_add(1, Ordering::Relaxed);
-                self.pipe_servo_repeats.fetch_add(1, Ordering::Relaxed);
             }
             PipeFillPlan::TopUp { silence_frames } => {
                 self.tx_blocks.fetch_add(1, Ordering::Relaxed);
@@ -489,14 +476,24 @@ impl LocalAudioStats {
         self.exits.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Publish the pipe servo's depth and setpoint. `None` (before pw-cat's first read) leaves the
-    /// last published values.
-    pub fn record_servo_depth(&self, depth: Option<PipeServoDepth>) {
-        if let Some(d) = depth {
+    /// Publish the resampler leg's depth, setpoint and rate. `None` (before the reader's first
+    /// read) leaves the last published values.
+    pub fn record_asrc_stats(&self, asrc: Option<PipeAsrcStats>) {
+        if let Some(d) = asrc {
             self.pipe_depth_frames
                 .store(d.depth_frames as u64, Ordering::Relaxed);
             self.pipe_setpoint_frames
                 .store(d.setpoint_frames as u64, Ordering::Relaxed);
+            self.pipe_rate_ppm
+                .store(d.rate_ppm.to_bits(), Ordering::Relaxed);
+            if let Some(fit) = d.rate_fit_ppm {
+                self.pipe_rate_fit_ppm
+                    .store(fit.to_bits(), Ordering::Relaxed);
+            }
+            self.pipe_rate_fitted
+                .store(d.rate_fit_ppm.is_some(), Ordering::Relaxed);
+            self.pipe_asrc_phase_frames
+                .store(d.phase_frames.to_bits(), Ordering::Relaxed);
         }
     }
 }
@@ -507,12 +504,12 @@ pub trait LocalAudioSink: Send {
     /// means the underlying child died (the supervisor respawns).
     fn write_block(&mut self, interleaved: &[i16]) -> io::Result<PipeWriteReport>;
 
-    /// Read the sink's buffer between blocks (the pw-cat pipe's fill, for the drift servo's
+    /// Read the sink's buffer between blocks (the pipe's fill, for the resampler's
     /// time-weighted fill, issue 1401); an `Err` means the underlying child died.
     fn sample_fill(&mut self) -> io::Result<()>;
 
-    /// The drift servo's depth and setpoint, once it runs.
-    fn servo_depth(&self) -> Option<PipeServoDepth>;
+    /// The resampler leg's depth, setpoint and rate, once the reader runs.
+    fn asrc_stats(&self) -> Option<PipeAsrcStats>;
 }
 
 /// A local audio INGRESS source: read one fixed-size raw block from a PipeWire node.
@@ -565,8 +562,8 @@ impl LocalAudioSink for PwCatSink {
         self.stdin.sample_fill()
     }
 
-    fn servo_depth(&self) -> Option<PipeServoDepth> {
-        self.stdin.servo_depth()
+    fn asrc_stats(&self) -> Option<PipeAsrcStats> {
+        self.stdin.asrc_stats()
     }
 }
 
@@ -683,13 +680,13 @@ fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<Loca
                         Ok(block) => match sink.write_block(&block) {
                             Ok(report) => {
                                 stats.record_write(&report);
-                                stats.record_servo_depth(sink.servo_depth());
+                                stats.record_asrc_stats(sink.asrc_stats());
                                 log_pipe_write(label, &target, &report);
                             }
                             // The child died mid-write — break to respawn.
                             Err(e) => break e,
                         },
-                        // No block yet: read the pipe for the servo's time-weighted fill.
+                        // No block yet: read the pipe for the time-weighted fill and the reads.
                         Err(RecvTimeoutError::Timeout) => {
                             if let Err(e) = sink.sample_fill() {
                                 break e;
@@ -713,8 +710,7 @@ fn local_sink_loop(cfg: LocalSinkConfig, rx: Receiver<Vec<i16>>, stats: Arc<Loca
 
 /// Log a playback write the fill guard acted on: the prime after a spawn at info, a refill (the
 /// pipe drained under a running pw-cat, issue 1401) as one warn line, a trim and a start-hold drop
-/// at debug (a stalled pw-cat trims every block; `pipe_trims` / `pipe_start_holds` count them). The
-/// servo's single-frame corrections are only counted (`pipe_servo_drops` / `_repeats`).
+/// at debug (a stalled pw-cat trims every block; `pipe_trims` / `pipe_start_holds` count them).
 pub(crate) fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport) {
     match report.plan {
         PipeFillPlan::TopUp { silence_frames } if report.first => {
@@ -729,7 +725,7 @@ pub(crate) fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport
         PipeFillPlan::StartHold => {
             tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} pw-cat not reading yet — block dropped by the start hold");
         }
-        PipeFillPlan::Write | PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => {}
+        PipeFillPlan::Write => {}
     }
 }
 

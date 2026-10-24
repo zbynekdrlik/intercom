@@ -32,8 +32,10 @@ pub fn ingress_target_frames(matrix: &Matrix, p: &Participant, default_frames: u
 ///   capture) gets the same resampler leg ([`JitterBuffer::card_capture`]): the card crystal is a
 ///   foreign clock too. Its target is its `target_ms`, else [`CARD_CAPTURE_TARGET_FRAMES`] (two of
 ///   the card's 1024-frame bursts), its cap the issue-1345 ring's 32 blocks;
-/// - the Janus (phones) ingress keeps the local-capture target-fill ring that absorbs its
-///   960-frame bursts (issue 1345; its crossing is issue 1461's second lane);
+/// - the Janus (phones) ingress gets the same resampler leg ([`JitterBuffer::janus_capture`],
+///   issue 1461 lane 2): Janus mixes on its own timer from the browsers' clocks. Its target is its
+///   `target_ms`, else [`LOCAL_CAPTURE_TARGET_FRAMES`] (2048 = two of its 960-frame packets plus
+///   margin), its cap the issue-1345 ring's 32 blocks;
 /// - a participant with no ingress (`adapter = "none"`, the `program_out` sink) gets the plain
 ///   buffer.
 ///
@@ -60,10 +62,9 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
         .enumerate()
         .map(|(id, p)| {
             let jb = if p.adapter == ADAPTER_JANUS {
-                JitterBuffer::local_capture(
-                    block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
-                    LOCAL_CAPTURE_TARGET_FRAMES,
-                )
+                let target = ingress_target_frames(matrix, p, LOCAL_CAPTURE_TARGET_FRAMES);
+                let cap = (block_frames * LOCAL_CAPTURE_CAP_BLOCKS).max(target + block_frames);
+                JitterBuffer::janus_capture(cap, target, rate)
             } else if capture_ids.contains(&id) {
                 let target = ingress_target_frames(matrix, p, CARD_CAPTURE_TARGET_FRAMES);
                 let cap = (block_frames * LOCAL_CAPTURE_CAP_BLOCKS).max(target + block_frames);

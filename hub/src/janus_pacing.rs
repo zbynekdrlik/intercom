@@ -8,11 +8,13 @@
 //! Now the block loop only feeds a [`PacedRing`], and a sender with its own monotonic
 //! [`PaceSchedule`] pops exactly one [`FRAME_48K`] frame per [`TICK`]:
 //!
+//! - the ring is a resampler leg (issue 1461 lane 2): the same frame-count controller as a VBAN
+//!   leg ([`crate::vban_jitter::NetworkFill`] over [`crate::asrc`]) with a fixed target, so a fill
+//!   that drifts (a lost mix tick, a rate offset between the block loop's grid and the sender's)
+//!   is followed by the ratio, never by a 1 ms splice;
 //! - a short underflow is bridged with a whole silent frame, then the ring re-primes to its target
 //!   (never a partial zero-splice);
-//! - a fill that drifts (a lost mix tick, a rate offset) is pulled back by a gentle 1 ms/s
-//!   servo, long before either edge case below;
-//! - an overflow trims the oldest samples back to the target;
+//! - an overflow above the cap is one counted resync back to the target;
 //! - one packet per tick keeps the RTP timestamps contiguous by construction.
 //!
 //! [`hub_block_period`] is the block loop's exact period, shared by `main.rs` and the tests.
@@ -26,6 +28,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::asrc;
+use crate::vban_jitter::{NetworkFill, NetworkFillStats, PopPlan};
+
 /// One 20 ms frame of 48 kHz mono audio: the unit every Janus packet carries.
 pub const FRAME_48K: usize = 960;
 
@@ -37,8 +42,8 @@ pub const TICK: Duration = Duration::from_millis(20);
 /// up to ~5 ms, or a sender tick that catches up a short stall, still finds a whole frame.
 pub const RING_TARGET_FRAMES: usize = 2 * FRAME_48K;
 
-/// Above this fill the oldest samples are trimmed back to [`RING_TARGET_FRAMES`] (100 ms). It is
-/// only reached when the sender stalled for a long time.
+/// Above this fill the ring resyncs back to [`RING_TARGET_FRAMES`] (100 ms). It is only reached
+/// when the sender stalled for a long time.
 pub const RING_CAP_FRAMES: usize = 5 * FRAME_48K;
 
 /// A sender that falls further behind its grid than this skips to a fresh grid instead of firing
@@ -52,13 +57,6 @@ pub const MAX_CONCEAL_FRAMES: u16 = 5;
 /// `MAX_MISORDER`). A bigger backward jump is a new sender or a stray packet: a restart, so one
 /// bad packet can never lock the real stream out.
 pub const MAX_MISORDER: u16 = 100;
-
-/// The fill servo acts only after the pre-pop fill has stayed past a threshold for this many
-/// consecutive ticks (1 s): the normal 256-sample ripple of the block feed never triggers it.
-pub const SERVO_TICKS: u32 = 50;
-
-/// What one servo action moves: 1 ms of audio, dropped or repeated inside a frame.
-pub const SERVO_STEP_FRAMES: usize = 48;
 
 /// The hub block loop's period, exact to the nanosecond. Whole microseconds are NOT exact:
 /// 256 frames at 48 kHz is 5333.33 µs, and the old `5333 µs` made the loop run 62.5 ppm fast, so
@@ -82,154 +80,100 @@ pub enum PopKind {
     Underflow,
 }
 
-/// What the fill servo decided before a pop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServoAction {
-    None,
-    /// The fill sat high for a second: skip 1 ms mid-frame.
-    Drop,
-    /// The fill sat low for a second: take 1 ms less and play 1 ms twice mid-frame.
-    Repeat,
-}
-
 /// The ring between the block loop (push, 256 frames every 5.33 ms) and the paced sender (pop,
 /// 960 frames every 20 ms). Mono 48 kHz samples.
 ///
 /// The two sides run on the same monotonic clock, but a lost mix tick (since issue 1401 only the
 /// part of a late wake beyond the four ticks the hub-mix thread runs late) loses a block and any
-/// rounding in the block period is a slow rate offset. So a gentle fill servo keeps the pre-pop
-/// fill inside a band: after [`SERVO_TICKS`] pops in a row above `target + FRAME/2` it drops
-/// [`SERVO_STEP_FRAMES`]; after as many below `target - FRAME/4` it repeats 1 ms inside the frame
-/// (both splices are crossfaded mid-frame, so neither clicks).
-/// The 60 ms trim and the silent underflow frame stay as the last resort.
+/// rounding in the block period is a slow rate offset. Since issue 1461 the ring crosses that the
+/// way every hub input crosses its sender's clock: a [`NetworkFill`] resampler leg at a fixed
+/// target ([`RING_TARGET_FRAMES`]). Every push is a point of its rate fit, timed by the moment the
+/// block left the mix ([`PacedRing::push_at`], stamped before the ring's lock); every pop renders
+/// exactly one frame from a fractional read point. The silent underflow frame and the resync above
+/// the cap stay as the last resort, both counted.
 #[derive(Debug, Clone)]
 pub struct PacedRing {
     buf: VecDeque<i16>,
-    target: usize,
-    cap: usize,
-    primed: bool,
+    fill: NetworkFill,
+    /// The pushes' time origin (the first push).
+    origin: Option<Instant>,
     underflows: u64,
     trims: u64,
-    high_ticks: u32,
-    low_ticks: u32,
-    servo_drops: u64,
-    servo_repeats: u64,
 }
 
 impl PacedRing {
-    /// A ring that primes to `target` samples and trims back to it above `cap`.
+    /// A ring that primes to `target` samples and resyncs back to it above `cap`.
     pub fn new(target: usize, cap: usize) -> Self {
         let target = target.max(FRAME_48K);
+        let cap = cap.max(target + FRAME_48K);
         PacedRing {
-            buf: VecDeque::with_capacity(cap.max(target) + FRAME_48K),
-            target,
-            cap: cap.max(target + FRAME_48K),
-            primed: false,
+            buf: VecDeque::with_capacity(cap + FRAME_48K),
+            fill: NetworkFill::new(target, cap),
+            origin: None,
             underflows: 0,
             trims: 0,
-            high_ticks: 0,
-            low_ticks: 0,
-            servo_drops: 0,
-            servo_repeats: 0,
         }
     }
 
-    /// Track the pre-pop fill against the servo band and decide this pop's correction.
-    fn servo(&mut self, fill: usize) -> ServoAction {
-        if fill > self.target + FRAME_48K / 2 {
-            self.high_ticks += 1;
-            self.low_ticks = 0;
-        } else if fill < self.target - FRAME_48K / 4 {
-            self.low_ticks += 1;
-            self.high_ticks = 0;
-        } else {
-            self.high_ticks = 0;
-            self.low_ticks = 0;
-        }
-        if self.high_ticks >= SERVO_TICKS {
-            self.high_ticks = 0;
-            ServoAction::Drop
-        } else if self.low_ticks >= SERVO_TICKS {
-            self.low_ticks = 0;
-            ServoAction::Repeat
-        } else {
-            ServoAction::None
-        }
-    }
-
-    /// Append mixed samples that left the mix at `at` (taken before the ring's lock). See
-    /// [`PacedRing::push`].
+    /// Append mixed samples that left the mix at `at` (taken before the ring's lock): one point of
+    /// the ring's rate fit. Above the cap, drop the OLDEST samples back to the target (one counted
+    /// resync).
     pub fn push_at(&mut self, mono: &[i16], at: Instant) {
-        let _ = at;
-        self.push(mono);
-    }
-
-    /// Append mixed samples. Above the cap, drop the OLDEST samples back to the target.
-    pub fn push(&mut self, mono: &[i16]) {
+        let origin = *self.origin.get_or_insert(at);
+        self.fill.note_arrival(
+            mono.len(),
+            at.saturating_duration_since(origin).as_secs_f64(),
+        );
         self.buf.extend(mono.iter().copied());
-        if self.buf.len() > self.cap {
-            let excess = self.buf.len() - self.target;
+        if let Some(keep) = self.fill.overrun_keep(self.buf.len()) {
+            let excess = self.buf.len() - keep;
             self.buf.drain(..excess);
             self.trims += 1;
         }
     }
 
-    /// Take exactly one [`FRAME_48K`] frame. Silence while priming or on an underflow; an underflow
-    /// keeps any partial samples and re-primes to the target (if the refill then overshoots the
-    /// target, the oldest samples, i.e. those kept ones, are the ones drained).
-    pub fn pop_frame(&mut self) -> (Vec<i16>, PopKind) {
-        if !self.primed {
-            if self.buf.len() < self.target {
-                return (vec![0; FRAME_48K], PopKind::Priming);
-            }
-            // Nothing is consumed while priming, so the fill can overshoot the target by up to a
-            // tick of mix blocks. Start exactly at the target: the excess is the OLDEST audio and
-            // silence went out in its place, so dropping it is inaudible and keeps the latency at
-            // the target (the servo would otherwise spend seconds dropping it 1 ms at a time).
-            let excess = self.buf.len() - self.target;
-            self.buf.drain(..excess);
-            self.primed = true;
-        }
-        if self.buf.len() >= FRAME_48K {
-            match self.servo(self.buf.len()) {
-                ServoAction::None => {}
-                ServoAction::Drop => {
-                    // Above the high threshold, so a frame + 1 ms is always there.
-                    let x: Vec<i16> = self.buf.drain(..FRAME_48K + SERVO_STEP_FRAMES).collect();
-                    self.servo_drops += 1;
-                    return (splice_drop(&x), PopKind::Audio);
-                }
-                ServoAction::Repeat => {
-                    let x: Vec<i16> = self.buf.drain(..FRAME_48K - SERVO_STEP_FRAMES).collect();
-                    self.servo_repeats += 1;
-                    return (splice_repeat(&x), PopKind::Audio);
-                }
-            }
-            return (self.buf.drain(..FRAME_48K).collect(), PopKind::Audio);
-        }
-        self.primed = false;
-        self.high_ticks = 0;
-        self.low_ticks = 0;
-        self.underflows += 1;
-        (vec![0; FRAME_48K], PopKind::Underflow)
+    /// Append mixed samples now. See [`PacedRing::push_at`].
+    pub fn push(&mut self, mono: &[i16]) {
+        self.push_at(mono, Instant::now());
     }
 
-    /// Empty the ring and re-prime.
+    /// Take exactly one [`FRAME_48K`] frame. Silence while priming or on an underflow (then the
+    /// ring re-primes to the target); audio otherwise, rendered by the resampler.
+    pub fn pop_frame(&mut self) -> (Vec<i16>, PopKind) {
+        match self.fill.plan_pop(self.buf.len(), FRAME_48K) {
+            PopPlan::Silent { ran_dry } => {
+                let kind = if ran_dry {
+                    self.underflows += 1;
+                    PopKind::Underflow
+                } else {
+                    PopKind::Priming
+                };
+                (vec![0; FRAME_48K], kind)
+            }
+            PopPlan::Audio {
+                skip,
+                read,
+                consume,
+            } => {
+                self.buf.drain(..skip.min(self.buf.len()));
+                let mut out = vec![0i16; FRAME_48K];
+                asrc::render(read, self.buf.make_contiguous(), &mut out);
+                self.buf.drain(..consume.min(self.buf.len()));
+                (out, PopKind::Audio)
+            }
+        }
+    }
+
+    /// Empty the ring and re-prime (a new session). The ratio is kept.
     pub fn reset(&mut self) {
         self.buf.clear();
-        self.primed = false;
-        self.high_ticks = 0;
-        self.low_ticks = 0;
+        self.fill.restart();
+        self.origin = None;
     }
 
-    /// 1 ms drops the servo made because the fill sat high.
-    pub fn servo_drops(&self) -> u64 {
-        self.servo_drops
-    }
-
-    /// 1 ms repeats the servo made because the fill sat low.
-    pub fn servo_repeats(&self) -> u64 {
-        self.servo_repeats
+    /// The resampler leg's numbers (target, depth, rate, phase, resyncs).
+    pub fn stats(&self) -> NetworkFillStats {
+        self.fill.stats()
     }
 
     /// Samples currently buffered.
@@ -242,44 +186,10 @@ impl PacedRing {
         self.underflows
     }
 
-    /// Overflow trims back to the target.
+    /// Resyncs back to the target above the cap.
     pub fn trims(&self) -> u64 {
         self.trims
     }
-}
-
-/// Where inside a frame the servo splices (mid-frame, so both sides of the crossfade are in hand).
-const SPLICE_AT: usize = FRAME_48K / 2 - SERVO_STEP_FRAMES / 2;
-
-/// A linear crossfade of `SERVO_STEP_FRAMES` samples from `from` (fading out) to `to` (fading in).
-fn crossfade<'a>(from: &'a [i16], to: &'a [i16]) -> impl Iterator<Item = i16> + 'a {
-    let n = SERVO_STEP_FRAMES as f32 + 1.0;
-    from.iter().zip(to).enumerate().map(move |(i, (&a, &b))| {
-        let w = (i as f32 + 1.0) / n;
-        (f32::from(a) * (1.0 - w) + f32::from(b) * w).round() as i16
-    })
-}
-
-/// Build one frame from `FRAME + 1 ms` of audio, skipping 1 ms mid-frame with a crossfade (no
-/// click): the audio before the splice fades into the audio 1 ms later.
-fn splice_drop(x: &[i16]) -> Vec<i16> {
-    let (j, s) = (SPLICE_AT, SERVO_STEP_FRAMES);
-    let mut y = Vec::with_capacity(FRAME_48K);
-    y.extend_from_slice(&x[..j]);
-    y.extend(crossfade(&x[j..j + s], &x[j + s..j + 2 * s]));
-    y.extend_from_slice(&x[j + 2 * s..]);
-    y
-}
-
-/// Build one frame from `FRAME - 1 ms` of audio, playing 1 ms twice mid-frame with a crossfade (no
-/// click): after the splice point the audio fades back to 1 ms earlier and continues from there.
-fn splice_repeat(x: &[i16]) -> Vec<i16> {
-    let (j, s) = (SPLICE_AT, SERVO_STEP_FRAMES);
-    let mut y = Vec::with_capacity(FRAME_48K);
-    y.extend_from_slice(&x[..j + s]);
-    y.extend(crossfade(&x[j + s..j + 2 * s], &x[j..j + s]));
-    y.extend_from_slice(&x[j + s..]);
-    y
 }
 
 /// The sender's deadlines: exact multiples of [`TICK`] from its start, so the grid never drifts

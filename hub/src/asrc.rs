@@ -267,6 +267,9 @@ pub fn render_interleaved(read: ReadPoint, input: &[i16], channels: usize, out: 
 pub struct RateControl {
     /// The hub rate in Hz (output frames per second).
     rate: f64,
+    /// An EGRESS crossing ([`RateControl::egress`]): the points are the reader's consumed frames,
+    /// and the ratio is the inverse of their slope.
+    egress: bool,
     ratio: f64,
     /// The ratio has reached its goal once since the hub started.
     acquired: bool,
@@ -294,6 +297,7 @@ impl RateControl {
     pub fn new(rate: u32) -> Self {
         RateControl {
             rate: f64::from(rate.max(1)),
+            egress: false,
             ratio: 1.0,
             acquired: false,
             goal: None,
@@ -307,6 +311,20 @@ impl RateControl {
             err_sum: 0.0,
             err_n: 0,
             phasing: false,
+        }
+    }
+
+    /// A controller for an EGRESS crossing (issue 1461 lane 2): the hub writes a pipe that a reader
+    /// on a foreign clock (a card, an HDMI codec, a PipeWire graph) takes from. Each point
+    /// ([`RateControl::arrival`]) is then a detected read: its time on the hub's clock and the
+    /// reader's frames consumed so far (written minus the measured fill, the fill's drift being
+    /// the clock offset). The fitted slope is the reader's frames per hub frame; the resampler
+    /// renders hub frames into reader frames, so its ratio (hub frames per written frame) is the
+    /// inverse. Everything else (the follow, the phase term, the clamp) is the ingress rule.
+    pub fn egress(rate: u32) -> Self {
+        RateControl {
+            egress: true,
+            ..Self::new(rate)
         }
     }
 
@@ -371,7 +389,11 @@ impl RateControl {
         self.bin_n = 0;
         if self.bins.len() >= RATE_MIN_FIT_SECONDS {
             if let Some(slope) = least_squares_slope(&self.bins) {
-                self.fitted = Some(slope);
+                if !self.egress {
+                    self.fitted = Some(slope);
+                } else if slope > 0.0 {
+                    self.fitted = Some(1.0 / slope);
+                }
             }
         }
     }

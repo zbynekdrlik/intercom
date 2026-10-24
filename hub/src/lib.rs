@@ -41,7 +41,6 @@ pub mod matrix;
 pub mod mix_thread;
 pub mod mulaw;
 pub mod ndi_video;
-pub mod pipe_drift_servo;
 pub mod pipe_fill;
 pub mod state;
 pub mod turn;
