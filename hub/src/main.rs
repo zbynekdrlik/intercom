@@ -362,8 +362,8 @@ async fn main() -> Result<()> {
 /// stream name ([`classify_packet`]), bring a known stream to the hub rate through its own converter
 /// (issue 1345) and push it into its jitter buffer; a known stream that does not decode is counted in
 /// its `decode_rejects` slot and logged (issue 1467); foreign traffic is ignored. The converters and
-/// the reject state live in this task alone (no lock); a program target change is logged after the
-/// jitter lock is released, since the real-time hub-mix thread takes that lock every block (issue 1401).
+/// the reject state live in this task alone (no lock); nothing is logged under the jitter lock, since
+/// the real-time hub-mix thread takes that lock every block (issue 1401).
 fn spawn_vban_receive(
     vban_socket: tokio::net::UdpSocket,
     input_streams: HashMap<String, usize>,
@@ -398,17 +398,12 @@ fn spawn_vban_receive(
                             slot.publish(conv);
                         }
                         if let Some(audio) = converted {
-                            // A program feed's target change is logged after the lock is
-                            // released: the real-time hub-mix thread takes the same lock
-                            // every block (issue 1401).
-                            let change = jitter.lock().ok().and_then(|mut jb| {
-                                jb.get_mut(id).and_then(|b| {
+                            // Held only for the append: the real-time hub-mix thread takes the
+                            // same lock every block (issue 1401). Nothing is logged under it.
+                            if let Ok(mut jb) = jitter.lock() {
+                                if let Some(b) = jb.get_mut(id) {
                                     b.push(&audio);
-                                    b.take_target_change()
-                                })
-                            });
-                            if let Some(change) = change {
-                                change.log();
+                                }
                             }
                         }
                     }
@@ -592,7 +587,7 @@ fn run_block_loop(bl: BlockLoop) {
                     rx_stats[id].overruns = b.overruns;
                     rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
                     rx_stats[id].level_dbfs = b.last_level_dbfs();
-                    // The VBAN leg's target / depth / servo corrections (issue 1401).
+                    // The resampler leg's target / depth / rate / phase (issues 1401 + 1461).
                     rx_stats[id].jitter = b.network_stats().map(Into::into);
                     if let Some(slot) = rate_stats.get(id) {
                         rx_stats[id].sample_rate = slot.sample_rate();

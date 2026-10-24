@@ -21,8 +21,9 @@
 //!   take the fill above [`PIPE_TARGET_FRAMES`] is dropped. So pw-cat's first read always finds
 //!   exactly the prime (the target plus the prime's own block), whatever its connect time.
 //! - **The drift servo.** Any rate offset between the hub and the sink walks the fill. The VBAN
-//!   legs' servo ([`NetworkFill::servo_step`]: the 1 s mean, the gentle-then-steep budget, at
-//!   least 1000 frames between corrections) keeps the fill at [`pipe_servo_setpoint`] with
+//!   legs' former servo ([`DriftServo::servo_step`], kept for the egress until issue 1461's
+//!   second lane: the 1 s mean, the gentle-then-steep budget, at least 1000 frames between
+//!   corrections) keeps the fill at [`pipe_servo_setpoint`] with
 //!   single-frame drops and repeats, spread across the written block by [`stretch_interleaved`].
 //!
 //! **The servo reads the TIME-WEIGHTED fill, not the pre-write readings.** pw-cat takes four hub
@@ -41,7 +42,7 @@
 use std::time::Duration;
 
 use crate::janus_pacing::hub_block_period;
-use crate::vban_jitter::{stretch_block, NetworkFill, ServoStep};
+use crate::pipe_drift_servo::{stretch_block, DriftServo, ServoStep};
 
 /// The PipeWire graph quantum the MiniFuse drives on strih-snv (`clock.quantum 1024`, ALSA
 /// `period-size 1024`, live-read 24.9.2026): a `pw-cat --record` child hands the hub its capture in
@@ -225,7 +226,7 @@ pub struct PipeFillControl {
     area2: u128,
     period_at: u64,
     /// The drift servo, built at the first block (its setpoint depends on the block size).
-    servo: Option<NetworkFill>,
+    servo: Option<DriftServo>,
 }
 
 impl PipeFillControl {
@@ -402,7 +403,7 @@ impl PipeFillControl {
         };
         let (read_frames, high) = (self.read_frames, self.high_frames());
         let servo = self.servo.get_or_insert_with(|| {
-            NetworkFill::new(pipe_servo_setpoint_for(block_frames, read_frames), high)
+            DriftServo::new(pipe_servo_setpoint_for(block_frames, read_frames), high)
         });
         match servo.servo_step(mean, block_frames) {
             ServoStep::Keep => PipeFillPlan::Write,

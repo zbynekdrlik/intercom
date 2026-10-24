@@ -2,8 +2,9 @@
 //!
 //! Per participant: name/role/adapter/host plus the live counters a dev1 watchdog reads — rx/tx
 //! packets, jitter underruns/overruns, the age of the last received packet, and the input level in
-//! dBFS. A VBAN leg also carries its jitter-buffer facet (target, depth, servo corrections, issue
-//! 1401). The whole snapshot is rebuilt each block-status tick from the jitter buffers.
+//! dBFS. A resampler leg (a VBAN leg, the cutters' card capture) also carries its jitter-buffer
+//! facet (fixed target, depth, the resampler's rate and phase, resyncs; issues 1401 + 1461). The
+//! whole snapshot is rebuilt each block-status tick from the jitter buffers.
 
 use serde::Serialize;
 
@@ -15,37 +16,31 @@ use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
 use crate::vban_jitter::NetworkFillStats;
 
-/// A VBAN leg's jitter buffer as `/api/state` shows it (issue 1401): the target and the measured
-/// depth in frames (the hub `sample_rate` turns them into ms), and how often the drift servo
-/// dropped or repeated a single frame.
+/// A resampler leg's jitter buffer as `/api/state` shows it (issues 1401 + 1461): the fixed target
+/// and the measured depth in frames (the hub `sample_rate` turns them into ms), the resampler's
+/// ratio and phase, and the counted faults.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct JitterFacet {
-    /// The target pre-pop fill: live, a program feed's follows its sender's gaps.
+    /// The target pre-pop depth: fixed from the start (the TOML `target_ms` or the kind's default).
     pub target_frames: usize,
-    /// The mean pre-pop fill over the last 1 s window (0 before the first window).
+    /// The mean pre-pop depth over the last 1 s window (0 before the first window).
     pub depth_frames: usize,
-    /// The lowest pre-pop fill in that window (the underrun margin is this minus one block).
+    /// The lowest pre-pop depth in that window (the underrun margin is this minus one block and
+    /// the resampler's 16-frame look-ahead).
     pub depth_min_frames: usize,
-    /// Single frames dropped because the fill sat high (the sender runs fast).
-    pub servo_drops: u64,
-    /// Single frames repeated because the fill sat low (the sender runs slow).
-    pub servo_repeats: u64,
-    /// The fill the servo holds now: `target_frames`, or while a target change is walked in (about
-    /// 37 s a block), the point the walk has reached. `depth_frames` follows this, not the target.
-    pub setpoint_frames: usize,
-    /// How many of `servo_drops` + `servo_repeats` walked a target change in (at most 7 a second);
-    /// the rest corrected the sender's drift.
-    pub servo_walk_steps: u64,
+    /// The resampler's ratio in ppm off 1 (0.1 ppm resolution): the sender's clock against the
+    /// hub's, plus the phase term while the depth sits outside +-1/4 of the target.
+    pub rate_ppm: f64,
+    /// The last second's mean depth minus the target, in frames (0.1 resolution).
+    pub asrc_phase_frames: f64,
+    /// Times the queue went above its cap and was resynced to the target (each also counts in
+    /// `overruns`).
+    pub resyncs: u64,
     /// Times the stream stopped for more than 500 ms and came back: a sender outage on a program
     /// feed, simply a mute on a cambox (it sends only while unmuted).
     pub stalls: u64,
     /// Audio is flowing (false while priming: before the first packet or after an underrun).
     pub primed: bool,
-    /// A program feed's largest gap between two packets in the last 10 min, in ms (0.1 ms
-    /// resolution): what its adaptive target follows. Omitted for a leg with a fixed target (the
-    /// camboxes).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_gap_ms_10min: Option<f64>,
 }
 
 /// The hub's HDMI audio leg as `/api/state` shows it (issue 1424 part 3): the connector the matrix
@@ -167,15 +162,11 @@ impl From<NetworkFillStats> for JitterFacet {
             target_frames: s.target_frames,
             depth_frames: s.depth_frames,
             depth_min_frames: s.depth_min_frames,
-            servo_drops: s.servo_drops,
-            servo_repeats: s.servo_repeats,
-            setpoint_frames: s.setpoint_frames,
-            servo_walk_steps: s.servo_walk_steps,
+            rate_ppm: s.rate_ppm,
+            asrc_phase_frames: s.asrc_phase_frames,
+            resyncs: s.resyncs,
             stalls: s.stalls,
             primed: s.primed,
-            max_gap_ms_10min: s
-                .max_gap_us_10min
-                .map(|us| (us as f64 / 100.0).round() / 10.0),
         }
     }
 }
@@ -205,7 +196,8 @@ pub struct RuntimeStats {
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
     /// `program_out` sink + the talkback capture (issue 1344).
     pub local_audio: Option<LocalAudioFacet>,
-    /// The VBAN leg's jitter-buffer facet (issue 1401), `None` for the other participants.
+    /// The resampler leg's jitter-buffer facet (issues 1401 + 1461), `None` for the other
+    /// participants.
     pub jitter: Option<JitterFacet>,
     /// The HDMI audio leg facet (issue 1424 part 3), `None` for every non-`alsa_hdmi` participant.
     pub hdmi: Option<HdmiLegFacet>,
@@ -251,8 +243,9 @@ pub struct ParticipantState {
     /// `pipewire`-adapter participant — omitted from the JSON for every other participant (issue 1344).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_audio: Option<LocalAudioFacet>,
-    /// The VBAN leg's jitter buffer (target / depth / servo drops + repeats, issue 1401), present
-    /// only for a VBAN participant — omitted from the JSON for every other participant.
+    /// The resampler leg's jitter buffer (target / depth / rate / phase / resyncs, issues 1401 +
+    /// 1461), present only for a VBAN participant and the cutters' card capture — omitted from the
+    /// JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jitter: Option<JitterFacet>,
     /// The HDMI audio leg (issue 1424 part 3), present only for an `alsa_hdmi` participant.
@@ -323,7 +316,7 @@ impl HubState {
                     decode_rejects: vban.then_some(s.decode_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
-                    jitter: s.jitter.filter(|_| vban),
+                    jitter: s.jitter,
                     hdmi: s
                         .hdmi
                         .filter(|_| p.adapter == crate::matrix::ADAPTER_ALSA_HDMI)
@@ -360,8 +353,10 @@ impl HubState {
     /// stops on every mute, so it is left out), the block loop's lost ticks as `lost=N` (a block
     /// lost on every output; a tick it caught up is no loss and stays off the line), the VBAN
     /// packets dropped on a backed-up send socket as
-    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
-    /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
+    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the resampler legs'
+    /// resyncs as `resyncs=N(<worst leg>)` and, for every leg that has received audio, its
+    /// resampler as `asrc=<leg>:rate_ppm=..:asrc_phase_frames=..:underruns=..:resyncs=..` (issue
+    /// 1461), and dropped wrong-rate VBAN packets as
     /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
     /// after its one warn scrolls away, and a known stream's undecodable packets as
     /// `decode_rejects=N(<worst leg>)` (issue 1467) for the same reason.
@@ -391,18 +386,26 @@ impl HubState {
         } else {
             String::new()
         };
-        let (drops, repeats) = self
-            .participants
-            .iter()
-            .filter_map(|p| p.jitter)
-            .fold((0u64, 0u64), |(d, r), j| {
-                (d + j.servo_drops, r + j.servo_repeats)
-            });
-        let servo = if drops + repeats > 0 {
-            format!(" servo={drops}/{repeats}")
+        let leg_resyncs = |p: &ParticipantState| p.jitter.map_or(0, |j| j.resyncs);
+        let resyncs = if self.participants.iter().map(leg_resyncs).sum::<u64>() > 0 {
+            format!(" resyncs={}", self.total_naming_worst(leg_resyncs))
         } else {
             String::new()
         };
+        // Every resampler leg that has received audio (issue 1461): where its clock sits against
+        // the hub's and how far its depth is off the target.
+        let asrc: String = self
+            .participants
+            .iter()
+            .filter(|p| p.rx_packets > 0)
+            .filter_map(|p| p.jitter.map(|j| (p, j)))
+            .map(|(p, j)| {
+                format!(
+                    " asrc={}:rate_ppm={:+.1}:asrc_phase_frames={:+.1}:underruns={}:resyncs={}",
+                    p.name, j.rate_ppm, j.asrc_phase_frames, p.underruns, j.resyncs
+                )
+            })
+            .collect();
         let program_stalls = |p: &ParticipantState| {
             if p.role == crate::matrix::CAMBOX_ROLE {
                 0
@@ -477,18 +480,19 @@ impl HubState {
             })
             .collect();
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
             stalls,
             lost,
             tx_dropped,
-            servo,
+            resyncs,
             rejects,
             undecodable,
             hdmi,
             alsa,
+            asrc,
             levels.join(" ")
         )
     }

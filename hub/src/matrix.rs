@@ -249,6 +249,12 @@ pub struct Participant {
     /// (MiniFuse: `1,2`). Default = the first `in_channels`.
     #[serde(default)]
     pub alsa_in_channel_map: Option<String>,
+    /// The fixed target depth of this participant's ingress resampler leg in ms (issue 1461): a
+    /// VBAN leg or the card / PipeWire capture. Rounded up to whole hub blocks, read at start
+    /// only, never adapted. Absent = the kind's default (a cambox 16 ms, a program feed 37.3 ms,
+    /// the card capture 42.7 ms; [`crate::vban_jitter`]).
+    #[serde(default)]
+    pub target_ms: Option<f64>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -424,6 +430,33 @@ impl Matrix {
                     p.name,
                     p.adapter
                 );
+            }
+            // The ingress resampler leg's fixed target (issue 1461): only where there is one.
+            if let Some(ms) = p.target_ms {
+                if p.adapter != ADAPTER_VBAN
+                    && p.adapter != ADAPTER_ALSA
+                    && p.adapter != ADAPTER_PIPEWIRE
+                {
+                    bail!(
+                        "participant '{}': target_ms is only for a vban / alsa / pipewire ingress (got '{}')",
+                        p.name,
+                        p.adapter
+                    );
+                }
+                if crate::vban_jitter::target_frames_from_ms(
+                    ms,
+                    raw.hub.sample_rate,
+                    raw.hub.block_frames,
+                )
+                .is_none()
+                {
+                    bail!(
+                        "participant '{}': target_ms must be > 0 and <= {}, got {}",
+                        p.name,
+                        crate::vban_jitter::TARGET_MS_MAX,
+                        ms
+                    );
+                }
             }
             if p.adapter == ADAPTER_VBAN && p.out_stream.is_some() && p.host.is_none() {
                 bail!(

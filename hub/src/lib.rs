@@ -15,10 +15,10 @@
 //! Interkom video, and the cut-over are M2/M3/M4 — those participants are declared in the matrix
 //! with `adapter = "none"` and are computed by the engine but not yet delivered.
 
-pub mod adaptive_target;
 pub mod alsa_card;
 pub mod alsa_leg;
 pub mod alsa_spec;
+pub mod asrc;
 pub mod block_clock;
 // The part-1 connector -> HDMI PCM matcher (issue 1424), shared with the appliance crate by path so
 // the hub's HDMI leg and the OBS output module pick the PCM by ONE rule. std-only.
@@ -41,6 +41,7 @@ pub mod matrix;
 pub mod mix_thread;
 pub mod mulaw;
 pub mod ndi_video;
+pub mod pipe_drift_servo;
 pub mod pipe_fill;
 pub mod state;
 pub mod turn;

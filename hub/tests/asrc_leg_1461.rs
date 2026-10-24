@@ -32,14 +32,28 @@ fn tone(n: u64) -> i16 {
 /// Run one mono cambox leg at `ppm` for `settle_s + measure_s` seconds; return the output samples
 /// of the measured part.
 fn run_leg(ppm: f64, settle_s: f64, measure_s: f64) -> Vec<i16> {
+    run_leg_with(ppm, None, settle_s, measure_s)
+}
+
+/// [`run_leg`] with an optional clock step: from `step.0` seconds on, the sender runs `step.1` ppm
+/// off the hub.
+fn run_leg_with(ppm: f64, step: Option<(f64, f64)>, settle_s: f64, measure_s: f64) -> Vec<i16> {
     let t0 = Instant::now();
     let at = |secs: f64| t0 + Duration::from_secs_f64(secs);
     let mut jb = JitterBuffer::vban_leg(9 * BLOCK, 3 * BLOCK);
-    let sender_rate = RATE * (1.0 + ppm * 1e-6);
+    let rate_at = |t: f64| {
+        let p = match step {
+            Some((from, p)) if t >= from => p,
+            _ => ppm,
+        };
+        RATE * (1.0 + p * 1e-6)
+    };
     // The sender's phase against the hub grid: never on a pop.
     let offset = 0.000_37;
     let total = settle_s + measure_s;
     let mut next_packet = 0u64;
+    // The time the next packet is complete, on the sender's (possibly stepped) clock.
+    let mut t_ready = PACKET as f64 / rate_at(0.0);
     let mut out = Vec::new();
     let pops = (total * RATE / BLOCK as f64) as u64;
     for pop in 0..pops {
@@ -47,10 +61,11 @@ fn run_leg(ppm: f64, settle_s: f64, measure_s: f64) -> Vec<i16> {
         // Every packet the sender finished before this pop.
         loop {
             let first = next_packet * PACKET as u64;
-            let t_sent = offset + (first + PACKET as u64) as f64 / sender_rate;
+            let t_sent = offset + t_ready;
             if t_sent > t_pop {
                 break;
             }
+            t_ready += PACKET as f64 / rate_at(t_ready);
             let samples: Vec<i16> = (first..first + PACKET as u64).map(tone).collect();
             jb.push_at(
                 &DecodedAudio::from_planar("cam1".into(), vec![samples]),
@@ -186,6 +201,25 @@ fn a_fast_cambox_is_resampled_never_a_frame_dropped() {
 #[test]
 fn a_slow_cambox_is_resampled_never_a_frame_repeated() {
     assert_clean(-50.0);
+}
+
+#[test]
+fn a_cambox_at_the_clamp_is_resampled_never_a_frame_inserted_or_dropped() {
+    assert_clean(500.0);
+    assert_clean(-500.0);
+}
+
+#[test]
+fn a_100ppm_clock_step_is_followed_without_a_click() {
+    // The sender's clock steps from 0 to +100 ppm 40 s in; the 60 s after it (the 64 s fit
+    // catching up, the ratio following at 5 ppm/s) are graded window by window.
+    let out = run_leg_with(0.0, Some((40.0, 100.0)), 40.0, 60.0);
+    let (worst, over, windows) = grade(&out, 100.0);
+    assert!(windows >= 1190, "{windows} windows measured");
+    assert_eq!(
+        over, 0,
+        "{over} of {windows} windows over {THD_N_MAX_DB} dB after the step (worst {worst:.1} dB)"
+    );
 }
 
 #[test]

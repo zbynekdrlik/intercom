@@ -9,13 +9,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use intercom_vban::{VbanCodec, VbanHeader, VBAN_HEADER_SIZE};
 
-use crate::adaptive_target::AdaptiveTarget;
-use crate::vban_jitter::{stretch_block, NetworkFill, NetworkFillStats, PopPlan};
+use crate::asrc;
+use crate::vban_jitter::{NetworkFill, NetworkFillStats, PopPlan};
 use crate::vban_rate::VbanRateConverter;
 
 // The demux of a received datagram (issue 1467) lives in `vban_classify`; re-exported here, where the
@@ -204,13 +204,15 @@ pub const STALE_STREAM_MS: u64 = 500;
 /// Three fill policies share the one type:
 ///
 /// * [`JitterBuffer::vban_leg`] — the VBAN network legs (the FOH program feed, the camboxes'
-///   talkback, issue 1401): a target fill with prefill, one whole silent block per underrun and a
-///   bounded drift servo. The policy itself is [`crate::vban_jitter::NetworkFill`]. Its underrun
-///   counts only when the stream continues; a stream back after going stale counts one STALL and
-///   starts over without its old tail (a muted cambox stops sending; that is not a dropout). A
-///   program feed's target follows its sender's gaps ([`JitterBuffer::with_adaptive_target`]).
-/// * [`JitterBuffer::local_capture`] — the local PipeWire capture (the MiniFuse talkback, issue 1345)
-///   and the Janus ingress. `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum
+///   talkback, issue 1401) and, through [`JitterBuffer::card_capture`], the cutters' card capture:
+///   every input that crosses a foreign clock. A FIXED target fill with prefill, one whole silent
+///   block per underrun, and the crossing done by the resampler (issue 1461, [`crate::asrc`]):
+///   each pop renders one block from a fractional read point, never a frame inserted or dropped.
+///   The policy itself is [`crate::vban_jitter::NetworkFill`]. Its underrun counts only when the
+///   stream continues; a stream back after going stale counts one STALL and starts over without
+///   its old tail (a muted cambox stops sending; that is not a dropout).
+/// * [`JitterBuffer::local_capture`] — the Janus (phones) ingress (issue 1345; its crossing is
+///   issue 1461's second lane). `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum
 ///   1024) that the block loop pops as 256-frame blocks, so the buffer holds a TARGET fill (about 2x
 ///   the burst): it prefills to the target before the first pop, after an underrun it outputs WHOLE
 ///   silent blocks until it has refilled to the target (never a zero-spliced partial block
@@ -234,48 +236,8 @@ pub struct JitterBuffer {
     pending_underrun: bool,
     last_rx: Option<Instant>,
     last_peak: i16,
-    /// A program feed's adaptive target (issue 1401), `None` for a leg with a fixed target.
-    adaptive: Option<AdaptiveLeg>,
-    /// The last target change, waiting for the caller to take and log it off the lock.
-    target_change: Option<TargetChange>,
-}
-
-/// A program feed's target change (issue 1401), handed to the caller to log once it has released
-/// the buffer's lock: the receive task holds the jitter lock while it pushes, and the real-time
-/// hub-mix thread takes that same lock every block, so no journal write may happen under it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TargetChange {
-    /// The leg's participant name.
-    pub leg: String,
-    pub from_frames: usize,
-    pub to_frames: usize,
-    /// The largest gap of the last 10 min the new target follows.
-    pub max_gap_10min: Duration,
-}
-
-impl TargetChange {
-    /// Log the change as one info line. Call it with no lock held.
-    pub fn log(&self) {
-        tracing::info!(
-            leg = %self.leg,
-            from_frames = self.from_frames,
-            to_frames = self.to_frames,
-            max_gap_ms_10min = self.max_gap_10min.as_secs_f64() * 1000.0,
-            "intercom-hub: program feed target {} (the largest gap of the last 10 min)",
-            if self.to_frames > self.from_frames {
-                "raised"
-            } else {
-                "lowered"
-            }
-        );
-    }
-}
-
-/// A VBAN leg whose target follows its sender's gaps, and the leg's name for its log line.
-#[derive(Debug)]
-struct AdaptiveLeg {
-    target: AdaptiveTarget,
-    name: String,
+    /// The resampler leg's time origin: its arrival times are seconds after this (issue 1461).
+    origin: Option<Instant>,
 }
 
 /// Which fill policy a [`JitterBuffer`] runs (see the type doc), as [`JitterBuffer::kind`] reports it.
@@ -287,6 +249,8 @@ pub enum BufferKind {
     LocalCapture,
     /// [`JitterBuffer::vban_leg`].
     VbanLeg,
+    /// [`JitterBuffer::card_capture`]: the same resampler leg, fed by the cutters' card.
+    CardCapture,
 }
 
 /// The fill policy a [`JitterBuffer`] runs, with its state (see the type doc).
@@ -296,8 +260,9 @@ enum FillPolicy {
     Plain,
     /// [`JitterBuffer::local_capture`]: `priming` = waiting to (re)fill to `target` before audio flows.
     LocalCapture { target: usize, priming: bool },
-    /// [`JitterBuffer::vban_leg`]: the VBAN network leg's target fill + drift servo (issue 1401).
-    Network(NetworkFill),
+    /// [`JitterBuffer::vban_leg`] / [`JitterBuffer::card_capture`]: the fixed target fill and the
+    /// resampler (issues 1401 + 1461), and which of the two it is.
+    Network(Box<NetworkFill>, BufferKind),
 }
 
 impl JitterBuffer {
@@ -315,8 +280,7 @@ impl JitterBuffer {
             pending_underrun: false,
             last_rx: None,
             last_peak: 0,
-            adaptive: None,
-            target_change: None,
+            origin: None,
         }
     }
 
@@ -334,57 +298,42 @@ impl JitterBuffer {
         }
     }
 
-    /// A VBAN NETWORK-LEG buffer (issue 1401, see [`crate::vban_jitter`]): prefills to
-    /// `target_frames` before the first pop, outputs ONE whole silent block per underrun and
-    /// re-primes, keeps the fill near the target with a single-frame drift servo (<= 1 ms/s), and
-    /// drops the oldest audio back down to the target above `cap_frames`. The target is clamped
-    /// into `1..=cap_frames`.
+    /// A VBAN NETWORK-LEG buffer at the 48 kHz hub rate (issues 1401 + 1461, see
+    /// [`crate::vban_jitter`]): prefills to `target_frames` before the first pop, outputs ONE whole
+    /// silent block per underrun and re-primes to the same target, crosses the sender's clock with
+    /// the resampler, and resyncs to the target above `cap_frames`. The target is clamped into
+    /// `1..=cap_frames` and never moves.
     pub fn vban_leg(cap_frames: usize, target_frames: usize) -> Self {
+        Self::vban_leg_at(cap_frames, target_frames, crate::vban_jitter::HUB_RATE_HZ)
+    }
+
+    /// [`JitterBuffer::vban_leg`] for a hub running at `rate` Hz.
+    pub fn vban_leg_at(cap_frames: usize, target_frames: usize, rate: u32) -> Self {
+        Self::resampler_leg(cap_frames, target_frames, rate, BufferKind::VbanLeg)
+    }
+
+    /// The cutters' CARD CAPTURE (issue 1461): the same resampler leg as a VBAN leg, fed by the
+    /// card's `arecord` (or a `pw-cat --record`) bursts on the card's own crystal.
+    pub fn card_capture(cap_frames: usize, target_frames: usize, rate: u32) -> Self {
+        Self::resampler_leg(cap_frames, target_frames, rate, BufferKind::CardCapture)
+    }
+
+    fn resampler_leg(cap_frames: usize, target_frames: usize, rate: u32, kind: BufferKind) -> Self {
         let cap = cap_frames.max(1);
         JitterBuffer {
-            policy: FillPolicy::Network(NetworkFill::new(target_frames, cap)),
+            policy: FillPolicy::Network(
+                Box::new(NetworkFill::with_rate(target_frames, cap, rate)),
+                kind,
+            ),
             ..JitterBuffer::new(cap)
         }
     }
 
-    /// Let a VBAN leg's target follow its sender (issue 1401, design 5980775411: the program feeds).
-    /// It starts at the floor [`crate::vban_jitter::VBAN_PROGRAM_TARGET_BLOCKS`]; every packet
-    /// inside a running stream reports its gap to [`AdaptiveTarget::observe`], and a change moves
-    /// the leg's target ([`NetworkFill::set_target`]); the servo's setpoint then walks there at most
-    /// 7 frames a second. `name` labels the leg's log line. The other policies ignore it.
-    pub fn with_adaptive_target(
-        mut self,
-        name: &str,
-        block_frames: usize,
-        sample_rate: u32,
-    ) -> Self {
-        if let FillPolicy::Network(fill) = &mut self.policy {
-            let target = AdaptiveTarget::new(block_frames, sample_rate);
-            fill.set_target(target.target_frames());
-            self.adaptive = Some(AdaptiveLeg {
-                target,
-                name: name.to_string(),
-            });
-        }
-        self
-    }
-
-    /// Take a program feed's last target change, if any, to log it once the caller has released
-    /// the buffer's lock ([`TargetChange::log`]). The receive task takes it after every push.
-    pub fn take_target_change(&mut self) -> Option<TargetChange> {
-        self.target_change.take()
-    }
-
-    /// The VBAN leg's live fill numbers (target, depth, servo corrections, stalls, and a program
-    /// feed's largest gap of the last 10 min) for `/api/state`; `None` for the other policies.
+    /// A resampler leg's live fill numbers (target, depth, rate, phase, resyncs, stalls) for
+    /// `/api/state`; `None` for the other policies.
     pub fn network_stats(&self) -> Option<NetworkFillStats> {
         match &self.policy {
-            FillPolicy::Network(fill) => Some(NetworkFillStats {
-                max_gap_us_10min: self.adaptive.as_ref().map(|a| {
-                    u64::try_from(a.target.max_gap_10min().as_micros()).unwrap_or(u64::MAX)
-                }),
-                ..fill.stats()
-            }),
+            FillPolicy::Network(fill, _) => Some(fill.stats()),
             _ => None,
         }
     }
@@ -394,7 +343,7 @@ impl JitterBuffer {
         match self.policy {
             FillPolicy::Plain => BufferKind::Plain,
             FillPolicy::LocalCapture { .. } => BufferKind::LocalCapture,
-            FillPolicy::Network(_) => BufferKind::VbanLeg,
+            FillPolicy::Network(_, kind) => kind,
         }
     }
 
@@ -404,7 +353,7 @@ impl JitterBuffer {
     /// [`NetworkFill::discard_for_missed_ticks`]); the other policies are unchanged.
     pub fn skip_missed(&mut self, missed: u64, frames: usize) {
         let buffered = self.buffered_frames();
-        if let FillPolicy::Network(fill) = &self.policy {
+        if let FillPolicy::Network(fill, _) = &mut self.policy {
             let drop = fill.discard_for_missed_ticks(buffered, frames, missed);
             if drop > 0 {
                 for q in &mut self.channels {
@@ -449,15 +398,13 @@ impl JitterBuffer {
     /// before is dropped, never played ahead of the fresh audio, and a ran-dry pop before the
     /// silence is no underrun. A packet that continues the stream counts that pending underrun. A
     /// packet with a different channel count (a sender reconfigured) also starts the leg over, so a
-    /// channel that stopped arriving can never hold every other one at an empty minimum. A program
-    /// feed's adaptive target sees the gap since the previous packet, never across a stall.
+    /// channel that stopped arriving can never hold every other one at an empty minimum.
     pub fn push_at(&mut self, audio: &DecodedAudio, now: Instant) {
         let stale = self.is_stale_at(now);
-        let gap = self.last_rx.map(|t| now.saturating_duration_since(t));
         let fan_mono = audio.channels.len() == 1 && self.min_channels >= 2;
         let n_ch = if fan_mono { 2 } else { audio.channels.len() };
         let reshaped = !self.channels.is_empty() && self.channels.len() != n_ch;
-        if let FillPolicy::Network(fill) = &mut self.policy {
+        if let FillPolicy::Network(fill, _) = &mut self.policy {
             if stale {
                 self.channels.clear();
                 fill.restart_after_stall();
@@ -468,19 +415,13 @@ impl JitterBuffer {
                 self.underruns += 1;
             }
             self.pending_underrun = false;
-            if let (Some(leg), Some(gap), false) = (&mut self.adaptive, gap, stale) {
-                if let Some(target) = leg.target.observe(gap, now) {
-                    let from = fill.target();
-                    fill.set_target(target);
-                    // Recorded, never logged here: the caller logs it off the lock.
-                    self.target_change = Some(TargetChange {
-                        leg: leg.name.clone(),
-                        from_frames: from,
-                        to_frames: target,
-                        max_gap_10min: leg.target.max_gap_10min(),
-                    });
-                }
-            }
+            // One point of the rate fit: this packet's frames at its arrival time on the hub's
+            // clock (`Instant` is CLOCK_MONOTONIC, the clock the block grid runs on).
+            let origin = *self.origin.get_or_insert(now);
+            fill.note_arrival(
+                audio.frames,
+                now.saturating_duration_since(origin).as_secs_f64(),
+            );
         }
         self.ensure_channels(n_ch);
         for (c, q) in self.channels.iter_mut().enumerate().take(n_ch) {
@@ -488,9 +429,9 @@ impl JitterBuffer {
             q.extend(audio.channels[src].iter().copied());
         }
         let mut overran = false;
-        if let FillPolicy::Network(fill) = &mut self.policy {
-            // The controller decides (and restarts its servo window); every channel is trimmed to
-            // the same depth so the planar queues stay aligned.
+        if let FillPolicy::Network(fill, _) = &mut self.policy {
+            // The controller decides (one counted resync); every channel is trimmed to the same
+            // depth so the planar queues stay aligned.
             let longest = self.channels.iter().map(VecDeque::len).max().unwrap_or(0);
             if let Some(keep) = fill.overrun_keep(longest) {
                 for q in &mut self.channels {
@@ -539,9 +480,9 @@ impl JitterBuffer {
     ///
     /// Plain policy: pad any short channel with silence. Local-capture policy: while priming, or
     /// when fewer than `frames` are queued, output a WHOLE silent block and consume nothing (the
-    /// queued voice is kept for when the buffer has refilled to the target). VBAN-leg policy: the
-    /// same whole-silent-block rule (one block per underrun, then re-prime), plus the servo's
-    /// single-frame drop/repeat spread across the block ([`stretch_block`]).
+    /// queued voice is kept for when the buffer has refilled to the target). Resampler-leg policy:
+    /// the same whole-silent-block rule (one block per underrun, then re-prime), and every audio
+    /// block rendered by the resampler from the leg's read point ([`crate::asrc::render`]).
     ///
     /// ONE underrun is counted when a stream runs short — only a PREVIOUSLY-LIVE (at least one packet)
     /// and NOT STALE ([`STALE_STREAM_MS`]) stream; a local-capture or VBAN-leg buffer counts it once
@@ -552,7 +493,7 @@ impl JitterBuffer {
         let countable = self.last_rx.is_some() && !self.is_stale_at(now);
         let buffered = self.buffered_frames();
 
-        if let FillPolicy::Network(fill) = &mut self.policy {
+        if let FillPolicy::Network(fill, _) = &mut self.policy {
             return match fill.plan_pop(buffered, frames) {
                 PopPlan::Silent { ran_dry } => {
                     if ran_dry && countable {
@@ -560,17 +501,19 @@ impl JitterBuffer {
                     }
                     vec![vec![0i16; frames]; n_ch]
                 }
-                PopPlan::Audio { skip, take } => self
+                PopPlan::Audio {
+                    skip,
+                    read,
+                    consume,
+                } => self
                     .channels
                     .iter_mut()
                     .map(|q| {
                         q.drain(0..skip);
-                        let block: Vec<i16> = q.drain(0..take).collect();
-                        if take == frames {
-                            block
-                        } else {
-                            stretch_block(&block, frames)
-                        }
+                        let mut block = vec![0i16; frames];
+                        asrc::render(read, q.make_contiguous(), &mut block);
+                        q.drain(0..consume);
+                        block
                     })
                     .collect(),
             };
