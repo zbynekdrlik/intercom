@@ -883,6 +883,11 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
 
 ## Tier-0 (issue 557) — what verifies locally vs at CI
 
+- **A routing-TOML change runs through the REAL `Matrix::from_toml` locally, no cargo** (issue 1439,
+  24.10.2026): `gh run download <latest green dev ci.yml run> -n intercom-hub-linux-amd64 -D <scratch>`,
+  then `<scratch>/intercom-hub --check-config --config intercom/intercom.<box>.toml` prints `loads (N
+  participants, M points)` or the refusal. Pin the counts the hub prints in the deployed-matrix tests;
+  delete the scratch binary after.
 - **Locally:** `cargo fmt --all --check` (parses all the new Rust), the converter pytest, `python3 -c
   "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`, `bash -n`/`shellcheck -S warning`
   on the scripts, the doc-lazy grep on touched `.rs`. A worktree lane can ALSO cross-check the
