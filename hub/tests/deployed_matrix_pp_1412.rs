@@ -1,6 +1,8 @@
 //! issue 1412: the Poprad matrices must LOAD through the same `Matrix::from_toml` the daemon runs.
 //! stream-pp is program-only (lv1's VBAN `stream` -> the `strih-program` sink); strih-pp carries the
-//! camera intercom (ROZHODNUTE 13.10.2026) plus the unchanged program path.
+//! camera intercom (ROZHODNUTE 13.10.2026). Since issue 1439 reached strih-pp (24.10.2026, design
+//! 6385519443) its hub forwards nothing into OBS: lv1 sends `strih-obs` straight into the OBS obs-vban
+//! source, so the strih-pp matrix has no `program_out` and no pipewire participant.
 
 use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
@@ -8,23 +10,24 @@ const PP_TOML: &str = include_str!("../../intercom.strih-pp.toml");
 const STREAM_PP_TOML: &str = include_str!("../../intercom.stream-pp.toml");
 
 /// ROZHODNUTE 13.10.2026 (owner: "prehod to"): the Poprad camera intercom runs on the strih-pp hub,
-/// the SNV shape for cam1/4/6/7 + the phones + the cutters, with the program path unchanged.
+/// the SNV shape for cam1/4/6/7 + the phones + the cutters. Issue 1439 (24.10.2026): no program path
+/// into OBS any more, and nothing on the hub needs PipeWire (issue 1440).
 #[test]
-fn strih_pp_matrix_loads_as_the_camera_intercom_with_the_program_path() {
+fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
     let m = Matrix::from_toml(PP_TOML).expect("the PP matrix must load through Matrix::from_toml");
-    let src_id = m.id_of("lv1").expect("lv1");
-    let out_id = m.id_of("program_out").expect("program_out");
-    let mut to_program: Vec<(usize, usize, usize, f32)> = m
-        .points
-        .iter()
-        .filter(|p| p.dst == out_id)
-        .map(|p| (p.src, p.in_ch, p.out_ch, p.gain_db))
-        .collect();
-    to_program.sort_by_key(|r| r.1);
-    assert_eq!(to_program, [(src_id, 1, 1, 0.0), (src_id, 2, 2, 0.0)]);
-    let (_, target, streams) = m.program_out().expect("a program_out sink");
-    assert_eq!(target, "strih-program");
-    assert_eq!(streams, ["strih".to_string()]);
+    assert!(
+        m.id_of("program_out").is_none(),
+        "no program_out participant"
+    );
+    assert!(
+        m.program_out().is_none(),
+        "the hub forwards nothing into OBS"
+    );
+    assert!(
+        m.participants.iter().all(|p| p.adapter != ADAPTER_PIPEWIRE),
+        "no pipewire participant on strih-pp"
+    );
+    assert_eq!((m.participants.len(), m.points.len()), (8, 74));
     assert!(m.janus.is_some(), "the phones leg");
     assert_eq!(
         m.video.as_ref().map(|v| v.ndi_source_name.as_str()),
@@ -138,6 +141,6 @@ fn strih_pp_cutters_open_the_mg_xu_by_card_id_1438() {
     assert_eq!((c.out_channels, c.hw_out_channels), (2, 2));
     assert_eq!(c.in_map, [0, 1]);
     assert_eq!(c.out_map, [0, 1]);
-    // The program sink stays on PipeWire (the OBS capture), untouched by this step.
-    assert_eq!(m.program_out().expect("program_out").1, "strih-program");
+    // Issue 1439 (24.10.2026): no program sink either; OBS takes lv1's `strih-obs` itself.
+    assert!(m.program_out().is_none());
 }
