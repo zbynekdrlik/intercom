@@ -402,6 +402,62 @@ fn a_mono_cambox_vban_leg_fans_into_ch2() {
 }
 
 #[test]
+fn a_fanned_mono_cambox_renders_both_channels_like_a_mono_leg_off_ratio_one() {
+    // Every deployed cambox: mono VBAN into a 2-channel participant. A pop renders ch1 once and
+    // copies it (review round 2 pinned it): after 12 s of a +200 ppm sender the ratio is off 1, and
+    // the fanned leg's two channels equal each other and a plain mono leg fed the same packets.
+    let t0 = Instant::now();
+    let mut fanned = leg().with_min_channels(2);
+    let mut single = leg();
+    let rate = 48_000.0 * (1.0 + 200e-6);
+    let mut sent = 0usize;
+    let mut last = (Vec::new(), Vec::new());
+    for pop in 0..(12 * 48_000 / BLOCK) {
+        let t = pop as f64 * BLOCK as f64 / 48_000.0;
+        while (sent + 128) as f64 / rate <= t {
+            let at = t0 + Duration::from_secs_f64((sent + 128) as f64 / rate);
+            let pkt = mono(ramp((sent % 30_000) as i16, 128));
+            fanned.push_at(&pkt, at);
+            single.push_at(&pkt, at);
+            sent += 128;
+        }
+        let at = t0 + Duration::from_secs_f64(t);
+        last = (
+            fanned.pop_block_at(BLOCK, at).concat(),
+            single.pop_block_at(BLOCK, at).concat(),
+        );
+    }
+    let rate_ppm = fanned.network_stats().unwrap().rate_ppm;
+    assert!(
+        (rate_ppm - 200.0).abs() < 20.0,
+        "the ratio is off 1: {rate_ppm}"
+    );
+    let (both, one) = last;
+    assert_eq!(both.len(), 2 * BLOCK);
+    assert_eq!(&both[..BLOCK], &both[BLOCK..], "ch2 is the fanned ch1");
+    assert_eq!(&both[..BLOCK], &one[..], "and the same as a plain mono leg");
+}
+
+#[test]
+fn a_stereo_queue_followed_by_a_mono_packet_keeps_its_own_ch2() {
+    // A fanned mono packet may only take the single-render path while EVERY packet since the queues
+    // were emptied was a fanned one: stereo audio still queued keeps its distinct ch2.
+    let t0 = Instant::now();
+    let mut jb = leg().with_min_channels(2);
+    let stereo = DecodedAudio {
+        stream_name: "cam1".into(),
+        channels: vec![ramp(0, PRIME - BLOCK), ramp(10_000, PRIME - BLOCK)],
+        frames: PRIME - BLOCK,
+    };
+    jb.push_at(&stereo, t0);
+    // Exactly the prime with the mono block: the first pop reads the stereo part.
+    jb.push_at(&mono(ramp(PRIME as i16, BLOCK)), t0);
+    let b = jb.pop_block_at(BLOCK, t0);
+    let h = ASRC_HISTORY as i16;
+    assert_eq!(b, vec![ramp(h, BLOCK), ramp(10_000 + h, BLOCK)]);
+}
+
+#[test]
 fn the_card_capture_is_the_same_resampler_leg_and_the_others_report_no_fill() {
     assert_eq!(leg().kind(), BufferKind::VbanLeg);
     let card = JitterBuffer::card_capture(32 * BLOCK, 2048, 48_000);

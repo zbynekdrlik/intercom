@@ -15,8 +15,8 @@
 use std::collections::VecDeque;
 
 use intercom_hub::asrc::{
-    least_squares_slope, render, render_interleaved, ReadPoint, ASRC_HISTORY, ASRC_LOOKAHEAD,
-    ASRC_MAX_PPM, ASRC_PHASES,
+    least_squares_slope, render, render_interleaved, render_planar, ReadPoint, ASRC_HISTORY,
+    ASRC_LOOKAHEAD, ASRC_MAX_PPM, ASRC_PHASES,
 };
 use intercom_hub::vban_jitter::{
     target_frames_from_ms, vban_cap_blocks, NetworkFill, PopPlan, CARD_CAPTURE_TARGET_FRAMES,
@@ -162,6 +162,26 @@ fn interleaved_rendering_equals_per_channel_rendering() {
     render_interleaved(read, &inter, 2, &mut oi);
     for k in 0..n {
         assert_eq!((oi[2 * k], oi[2 * k + 1]), (oa[k], ob[k]), "frame {k}");
+    }
+}
+
+#[test]
+fn planar_rendering_equals_per_channel_rendering() {
+    // The hub's pop path computes the coefficients once per frame for every channel.
+    let chans: Vec<Vec<i16>> = (0..3i16)
+        .map(|c| noise(6_000).iter().map(|&v| v / (c + 1)).collect())
+        .collect();
+    let read = ReadPoint {
+        pos: ASRC_HISTORY as f64 + 0.29,
+        ratio: 1.0 + 777e-6,
+    };
+    let inputs: Vec<&[i16]> = chans.iter().map(Vec::as_slice).collect();
+    let mut planar = vec![vec![0i16; 2_048]; 3];
+    render_planar(read, &inputs, &mut planar);
+    for (input, got) in chans.iter().zip(&planar) {
+        let mut one = vec![0i16; 2_048];
+        render(read, input, &mut one);
+        assert_eq!(got, &one);
     }
 }
 
