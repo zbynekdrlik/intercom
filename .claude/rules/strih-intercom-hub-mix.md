@@ -278,6 +278,16 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   three other tests run in a one-off root the same way (minus the matrix imports). A first cut of the lost-ticks
   status-line test expected `participants=2` on a three-participant matrix and no replica compiled
   it (review 1): mirror such an assertion in R2 before pushing.
+- **A merged replica root hides CI's dead code (issue 1461 lane 2).** One root that mounts every
+  test file as a module under `#![allow(dead_code)]` (or with a sibling file using the helper)
+  passes clippy while CI, where each `tests/*.rs` is its own crate, fails `-D warnings` on an
+  unused const. Also lint every touched std-only test file as ITS OWN crate: build the hub modules
+  into an rlib (`rustc --crate-type rlib --crate-name intercom_hub -A dead_code lib.rs`), then
+  `clippy-driver --edition 2021 --test -D warnings tests/<f>.rs --extern intercom_hub=<rlib>`.
+- **A tone grader needs a frequency that is not a whole number of cycles per splice.** A 1 kHz
+  tone repeats every 48 samples, exactly the Janus ring's old 1 ms splice, so a crossfaded 1 ms
+  drop/repeat was invisible to THD+N; `egress_asrc_1461.rs` uses 997 Hz. Check the grader's own
+  control (one cut frame fails its window) and that the RED really fails before trusting a pass.
 - **The granted path never runs here.** `ulimit -r` is 0 on dev1 and the GitHub runner is not root,
   so the mix-thread tests always take the refused (SCHED_OTHER) path. "Only the calling thread" is
   backed by the `sched_setscheduler(2)` man page and the live `ps -L` check above.
