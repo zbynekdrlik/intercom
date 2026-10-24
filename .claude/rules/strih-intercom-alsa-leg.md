@@ -72,9 +72,9 @@ the cutters' playback INTO the `strih-program` sink and their capture onto its m
   `/var/lib/alsa/asound.state` (2 ch each way); its sample formats are unknown, which is why the format
   is read from the card at spawn.
 - No WirePlumber deny rule on purpose: phase 4 (issue 1440) purges PipeWire + WirePlumber on a strih box
-  whose facts need none (strih-snv; `.claude/rules/strih-pipewire-purge.md`), and verify item 9b then
-  reads the card PCMs held by aplay / arecord. Until then (and on strih-pp) PipeWire still manages the
-  card: while anything plays to it (it is the default sink on strih-snv) aplay/arecord get EBUSY on every
+  whose facts need none (strih-snv, and strih-pp since 24.10.2026; `.claude/rules/strih-pipewire-purge.md`),
+  and verify item 9b then reads the card PCMs held by aplay / arecord. Until the purge runs on a box,
+  PipeWire still manages the card: while anything plays to it (it is the default sink on strih-snv) aplay/arecord get EBUSY on every
   retry, and verify FAILs "not moving audio". PipeWire releases an idle node (suspend timeout).
 
 ## Rollout + rollback (supervisor)

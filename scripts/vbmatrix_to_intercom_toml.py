@@ -21,7 +21,8 @@ Slot → hub participant mapping (derived from the XML's own attributes, not a h
   phase 2 (owner ROZHODNUTE 22.10.2026, "interkom-hub ma byt separatna vec, nema nic preposielat do
   strih obs") -- the strih OBS receives the console's VBAN program itself (the obs-vban source on UDP
   6981), so the hub carries no `program_out` and every point into VASIO8 is dropped (issue 1344's
-  `program_out` pipewire sink is gone from this matrix; the hub still supports one for strih-pp).
+  `program_out` pipewire sink is gone from this matrix, and from strih-pp's since 24.10.2026; the hub
+  still supports one).
 
 Adapters: VBAN legs are live; the `phones` participant is `janus` (M3a); the `cutters` (MiniFuse)
 open the card directly through ALSA (`alsa`, issue 1438: arecord for the operator talkback mic,

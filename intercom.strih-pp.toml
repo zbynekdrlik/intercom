@@ -19,6 +19,13 @@
 # 24.10.2026 (issue 1461): every ingress leg crosses its sender's clock with the hub's resampler and holds a
 # FIXED target depth, `target_ms` rounded up to whole 256-frame blocks and read at start only: the cameras
 # 16 ms (3 blocks), lv1 37.33 ms (7 blocks), the MG-XU capture 42.67 ms (8 blocks).
+# 24.10.2026 (issue 1439 phase 2 on strih-pp, design 6385519443): the hub forwards nothing into OBS any
+# more. lv1 sends the program as its own VBAN stream `strih-obs` to UDP 6981 straight into the OBS
+# obs-vban source `ASIO zvuk` (scripts/strih-boxes/strih-pp.env), so the `program_out` participant
+# (adapter pipewire, the `strih-program` sink OBS captured) and its two lv1 points are gone, and with
+# them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on 6980 still feeds
+# the cans and the vestibule. Rollback: put the participant + the two points back from the previous
+# version of this file and set the four STRIH_PROGRAM_* facts back to none.
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
@@ -117,35 +124,12 @@ in_channels = 2
 out_channels = 2
 
 [[participant]]
-name = "program_out"
-role = "program_out"
-adapter = "pipewire"
-pipewire_target = "strih-program"
-source_streams = ["strih"]
-in_channels = 0
-out_channels = 2
-
-[[participant]]
 name = "vestibule"
 role = "program_monitor"
 adapter = "alsa_hdmi"
 hdmi_connector = "HDMI-1"
 in_channels = 0
 out_channels = 2
-
-# --- the program path (unchanged since 11.10.2026)
-
-[[point]]
-src = "lv1"
-in_ch = 1
-dst = "program_out"
-out_ch = 1
-
-[[point]]
-src = "lv1"
-in_ch = 2
-dst = "program_out"
-out_ch = 2
 
 # --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3)
 

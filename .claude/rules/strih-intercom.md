@@ -168,13 +168,14 @@ strih, and a second hub sending VBAN back to them is double talkback.
 
 > **Issue 1438:** the cutters left PipeWire: both TOMLs put them on the `alsa` card leg
 > (`.claude/rules/strih-intercom-alsa-leg.md`). The pw-cat paths below stay as the hub's `pipewire`
-> adapter (the strih-pp `program_out` sink, and the cutters' rollback).
+> adapter (a `program_out` sink, none deployed since 24.10.2026, and the cutters' rollback).
 >
 > **Issue 1440 (history from here on, for strih-snv):** a strih box whose facts declare the program
 > VBAN and whose TOML has no `pipewire` participant has NO PipeWire: setup step 12 pins it out and
 > purges it, step 13's hub drop-in drops the `pipewire` group + runtime env (the DynamicUser decision
 > below then reads: the operator user for the HDMI leg's `~/.Xauthority` and the card's `audio` group
-> only). strih-pp keeps this section's graph until its own program VBAN lands
+> only). strih-pp left this section's graph on 24.10.2026: lv1 sends it `strih-obs` straight into OBS
+> (issue 1439), its TOML has no `program_out`, and the same condition purges it
 > (`.claude/rules/strih-pipewire-purge.md`).
 
 The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
@@ -436,8 +437,8 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     out). The total still leads, so a
     `underruns=(\d+)` parser keeps working. Built off the real-time thread like the rest.
 - **The program audio delay is fixed** (computed, see `.claude/rules/audio-clock-map.md`): the
-  program-feed target 37.3 ms, plus on strih-pp the pw-cat pipe held at 1792 frames (37.3 ms) by
-  the egress resampler (+ its 16-frame look-ahead). Re-check any sync offset on that OBS input once after a hub deploy.
+  program-feed target 37.3 ms, plus on a hub-fed strih the pw-cat pipe held at 1792 frames (37.3 ms)
+  by the egress resampler (+ its 16-frame look-ahead; none deployed since strih-pp went obs-vban). Re-check any sync offset on that OBS input once after a hub deploy.
 - **Supervisor live check after a hub deploy (lane 1):**
   - `curl -s http://strih-snv:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
     `target_frames` 1792 (a cambox 768, the cutters 2048), `rate_ppm` settled within a minute at
@@ -492,7 +493,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
       exactly the prime: the target + the prime's own block, 2304 (the top-up's silence also
       covers the 16 frames the first rendered block falls short of a block).
     - **The crossing is the resampler (issue 1461).** The cans' sink is clocked by the card's
-      crystal, the HDMI leg by the GPU's audio clock, the strih-pp program sink by its PipeWire
+      crystal, the HDMI leg by the GPU's audio clock, a hub `program_out` sink by its PipeWire
       driver. Issue 1401 held the pipe with single-frame drops / repeats (`pipe_drift_servo`,
       `stretch_interleaved`, deleted). Now the hub blocks queue in hub frames and each write renders
       as many reader-clock frames as the queue holds from a fractional read point
