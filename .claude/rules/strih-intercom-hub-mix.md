@@ -2,7 +2,7 @@
 paths:
   - "intercom/hub/src/block_clock.rs"
   - "intercom/hub/src/mix_thread.rs"
-  - "intercom/hub/src/adaptive_target.rs"
+  - "intercom/hub/src/asrc.rs"
   - "intercom/hub/src/main.rs"
   - "intercom/hub/src/vban_io.rs"
   - "intercom/hub/src/inputs.rs"
@@ -12,21 +12,20 @@ paths:
   - "intercom/hub/tests/vban_jitter_state_1401.rs"
   - "intercom/hub/tests/hub_catchup_1401.rs"
   - "intercom/hub/tests/mix_thread_1401.rs"
-  - "intercom/hub/tests/adaptive_target_1401.rs"
-  - "intercom/hub/tests/setpoint_walk_1401.rs"
+  - "intercom/hub/tests/asrc_1461.rs"
   - "intercom/hub/tests/memory_lock_1401.rs"
   - "tests/python/test_strih_hub_memlock_1401.py"
   - "systemd/intercom-hub.service"
 ---
 
-# The intercom hub's real-time block loop and the adaptive program target (issue 1401)
+# The intercom hub's real-time block loop and its legs' fixed targets (issues 1401 + 1461)
 
 Design 5980775411 (findings 5980766825): after the egress fixes the hub still lost blocks on every
 output when its block loop woke more than a period late, and the FOH sender's gaps grew past the
 fixed program-feed target. Step 4 (design 5981457044, ROZHODNUTÉ 5981448853) closed the three
 residuals step 3 measured (comment 5981169929): the steep setpoint walk, the pipe refill on a
 momentary low, and the cambox cap. Read this before touching the block loop in `main.rs`,
-`block_clock`, `mix_thread`, `adaptive_target`, the setpoint walk or the caps in `vban_jitter`, the
+`block_clock`, `mix_thread`, the fixed targets or the caps in `vban_jitter`, the
 refill rule in `pipe_fill`, or the program legs in `inputs` / `vban_io`. The VBAN-leg buffer itself
 (prefill, the servo, `skip_missed`) is `.claude/rules/strih-intercom.md`, "VBAN legs".
 
@@ -153,52 +152,20 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   runs again; a late wake from that shows as `caught_up_ticks`. The cycle's own cost was not
   measured on the box.
 
-## The adaptive program target
+## The program target is FIXED (issue 1461, design 6376769274)
 
-The FOH sender's stalls grew in one day: the largest gap was 19.4 ms in the morning, 27.6 ms with
-31 gaps over 20 ms in 30 s at 13:56. The fixed 32 ms target underran again about 1.7 times a
-minute.
+The issue-1401 adaptive program target (`adaptive_target.rs`: the largest gap of the last 10 min,
+6..12 blocks, raised at once, lowered a block per 10 min) and its gentle setpoint walk are GONE. They
+moved the cutters' and the vestibule's program latency while running, against the owner's
+no-runtime-latency rule.
 
-- `adaptive_target::AdaptiveTarget` (pure, std-only) tracks the largest inter-arrival gap of the
-  last 10 min, kept as 60 buckets of 10 s (the window is 590-600 s). Only gaps inside a running
-  stream count, never the silence before a stalled (> 500 ms) stream came back (pinned: a mutant
-  without that guard passed everything else).
-- Target = `program_target_blocks(gap)` = (gap + one block + `PROGRAM_HALF_BURST_FRAMES` 144)
-  rounded UP to whole blocks, clamped to 6..12 blocks (32-64 ms). Half a burst is half the FOH
-  sender's ~6 ms burst period: just before a burst the fill sits about that far under its mean.
-  19.4 ms -> 6 blocks, 27.6 ms -> 7 (37.3 ms), 35 ms -> 9 (48 ms).
-- A larger gap raises it at once, in the push that measured the gap: when that gap ran the leg dry,
-  the re-prime already goes to the new target. After 10 min without a gap that needs the current
-  target it comes down ONE block, then one more every 10 min: back at the floor 30 min after a
-  35 ms gap.
-- A change goes through `NetworkFill::set_target`. The cap moves with the target (it stays
-  `vban_cap_blocks(target)`, 6 blocks of headroom), nothing is dropped or padded, and the servo
-  walks its setpoint to the new target GENTLY (step 4, below). The servo's current window and its
-  drift budget stay: they were measured against the setpoint, which did not move.
-- **Walk speed (step 4).** At most `SERVO_WALK_MAX_PER_WINDOW` = 7 corrections a second, the
-  gentle zone's own ceiling: a one-block change takes ~37 s. Step 3 handed the servo the whole
-  256-frame error, its STEEP zone: up to 48 a second for ~5 s per block (47 measured in the
-  replay), the flutter review 1 of the VBAN-leg servo rejected. How it works: see "Step 4" below.
-- One info line per change (`program feed target raised` / `lowered`, the leg, from and to frames,
-  the 10 min max gap), written by the receive task after it released the jitter lock.
-- `/api/state` jitter: the live `target_frames`, and for a program feed `max_gap_ms_10min` (0.1 ms
-  resolution); a cambox keeps its fixed 768 and omits the gap.
-- The replay (`tests/adaptive_target_1401.rs`) plays the measured fohabl pattern (6 ms bursts, a
-  long gap every 402 ms) through the real buffer:
-  - the long gap growing 19 -> 35 ms over 16 min: 0 underruns, raises at 25 / 31 / 35 ms (7 / 8 / 9
-    blocks), back at 6 blocks 30 min after the last 35 ms gap, corrections never closer than 1000
-    frames, at most 7 walk steps in any second (pinned) and at most 8 corrections (pinned `<=
-    SERVO_WALK_MAX_PER_WINDOW + 1`; 2 such seconds in the 51 min, at the 31 and the 35 ms gap).
-    The eighth is the drift servo's own. The burst sender's 1 s mean wobbles (a window holds two
-    or three long gaps), and at some gap / target phases it leaves the servo's band now and then:
-    a no-move control needed a drift correction at 19.4 ms with 8 blocks, at 25 ms with 8 and 9,
-    at 27.6 ms with 7 and at 35 ms with 9-11, none at 27.6 ms with 8 or 9 or at 31 ms with 8-10
-    (round-2 review). It depends on the phase, not on the gap's size. An eighth appears when such a
-    correction lands inside a walk's 1 s span: on the fixed-gap burst pattern only the 35 ms rows
-    (`setpoint_walk_1401.rs` pins <= 7 below 35 ms, and a 35 ms no-move control that still needs
-    a correction);
-  - a sudden 19 -> 35 ms jump: exactly one underrun, at the first 35 ms gap (pinned `== 1`), and the
-    re-prime goes straight to 9 blocks.
+- Every ingress leg now holds a FIXED target from its TOML `target_ms`, read at start. A program
+  feed's default is `VBAN_PROGRAM_TARGET_BLOCKS` = 7 (37.3 ms): the afternoon's 27.6 ms gap + one
+  block + half a burst.
+- An underrun re-primes to the same target. Above the cap there is one counted resync.
+- The crossing itself is the resampler, `.claude/rules/strih-intercom.md` "VBAN legs". The map of
+  every path is `.claude/rules/audio-clock-map.md`.
+- The caps keep the step-4 derivation (`vban_cap_blocks`, below): a program feed's cap is 13 blocks.
 
 ## Reading it on strih-snv after a hub deploy (the supervisor)
 
@@ -220,13 +187,9 @@ minute.
 - The 13:58 stopgap (`chrt -f -p 10` on 22 hub threads, comment 5980789088) ends with that restart:
   the tokio workers are SCHED_OTHER again by design.
 - Over >= 1 h: `lost_ticks` 0, `caught_up_ticks` growing only with the box's hiccups, `fohabl`
-  underruns flat, its `target_frames` matching `max_gap_ms_10min` by the rule above, both pipes'
-  `pipe_refills` flat.
-- After a program target change (the `program feed target raised` / `lowered` journal line): that
-  leg's `setpoint_frames` walks to the new `target_frames` over ~37 s a block with `depth_frames`
-  following it, and `servo_walk_steps` grows by about 256 a block at no more than 7 a second (the
-  drift servo's own corrections come on top, `servo_drops` / `servo_repeats` minus the walk
-  steps). A jump of tens within a second is the old steep walk: a finding.
+  underruns and `resyncs` flat, its `target_frames` 1792 and never moving, its `rate_ppm` settled
+  (the FOH desk measured +0.5 ppm) and `asrc_phase_frames` inside +-448 (a quarter of the target),
+  both pipes' `pipe_refills` flat.
 - A `pipe ran low — topped up with silence` warn line now means the pipe read under one block for
   a whole hub period (a pw-cat starving), never a momentary low in a catch-up gap.
 
@@ -235,51 +198,10 @@ minute.
 Each fix sits at the policy point that owns the behaviour; there is still one servo, one pipe
 guard and one cap rule.
 
-- **The setpoint walk (`vban_jitter::NetworkFill`).**
-  - The servo holds a `setpoint` (`NetworkFill::setpoint()`). `set_target` moves the target and
-    the cap but leaves the setpoint where it is (a leg that is still priming takes the new target
-    at once).
-  - Every 1 s window: drift = `servo_corrections(|fill - setpoint|)` with its full budget, plus a
-    walk of at most `SERVO_WALK_MAX_PER_WINDOW` (7, derived from the knee) toward the target, only
-    what the 1 ms/s spacing leaves after the drift. Both always point the same way.
-  - The drift's share of the second is spent first. Each walk correction done moves the setpoint
-    one frame. So the walk can never take the drift's budget (spending the walk first let the
-    -200 ppm drift error grow 133 -> 136), and under a heavy drift the walk slows instead.
-  - Each walk step also keeps its own spacing, `SERVO_WALK_SPACING_FRAMES` = a second over 7,
-    rounded up (6858 frames), so no span of one second ever holds more than 7 walk steps. Without
-    it a second that also carried a drift correction spaced its 7 walk steps at 6144 frames, and
-    the next second's walk followed at once: 8 walk steps inside one bench second in the
-    growing-gap replay (review round 1). At -200 ppm the drift's ~10 corrections a second leave
-    room for ~3 walk steps: one block takes ~88 s there (-20 ppm: ~44 s; a clean sender: 37 s).
-    Real program feeds drift about 0.5 ppm. Running the walk on its own clock (gated only by its
-    spacing and the shared 1000-frame floor) would keep ~7 a second under drift too; not done,
-    an option for the main.
-  - Visible on `/api/state` (review round 1): the jitter facet's `setpoint_frames` (where a walk
-    stands; `depth_frames` follows it, not `target_frames`) and `servo_walk_steps` (the share of
-    `servo_drops` + `servo_repeats` that walked a target change in).
-  - The fill is judged against the window's MEAN setpoint, carried to its end point: a walk moves
-    both during the window, and against the end point the walk's own progress reads as a ~3.5-frame
-    error.
-  - A fill more than the band (16 frames) past the setpoint toward the target has already done
-    that part of the walk: the setpoint moves to the band behind it, with no correction. That is a
-    sender drifting that way (+200 ppm: a raise done in 11 s, the sender carries the fill) or a
-    lost tick's give-up during a lowering. Without it the drift would pull the fill back against
-    the walk at up to 40 a second.
-  - A lost tick during a RAISE: `discard_for_missed_ticks` gives the lost block up only down to the
-    TARGET's floor (target - half a block), which lies above the walked setpoint, so part of it
-    stays (5 s into a one-block raise: 162 of 256 given up, 94 kept). That is a free step of the
-    walk: the setpoint follows to the band's edge behind the fill (78 of the 94) with no
-    correction, the walk is shorter by that, and the fill rests at the band's edge above the
-    target (16 frames over; pinned).
-  - Inside the band the setpoint stays. On a bursty sender the 1 s mean wobbles by ±10 frames (a
-    window holds two or three long gaps); a setpoint that followed that wobble forward left the
-    low windows behind the band and added a drift correction to every other walk second (8).
-  - A prime, an underrun's re-prime and an overrun trim put the fill exactly at the target and
-    end the walk there.
-  - `set_target` keeps the window and its drift budget and drops only an unspent walk share.
-    Restarting the window paused a slow sender's repeats for a whole second. Without the drop, a
-    raise reversed in the middle of a second left 1-7 stray repeats after the reversal and ended
-    2-14 frames off the target (review round 1; now pinned).
+- **The setpoint walk** (`vban_jitter::NetworkFill`, `set_target`, `SERVO_WALK_*`): REMOVED by
+  issue 1461 with the adaptive target it walked in. The 1 s mean wobble of a bursty sender, the
+  drift-first order and the walk spacing it handled no longer exist: the target is fixed and the
+  ingress has no single-frame servo.
 - **The starvation-only refill (`pipe_fill`).**
   - `pipe_fill_plan(fill, block, starved)`. `PipeFillControl` decides `starved`: the first write
     (the prime), or a fill under one block on EVERY reading for at least one hub period
@@ -297,39 +219,22 @@ guard and one cap rule.
 - **The derived caps (`vban_jitter::vban_cap_blocks`).**
   - `cap = target + CATCHUP_MAX_BLOCKS (4) + 1 (the current tick) + VBAN_CAP_HEADROOM_BLOCKS (1,
     the wake's phase and the arrival jitter)`.
-  - That gives `VBAN_CAP_BLOCKS` 9 (48 ms) and `VBAN_PROGRAM_CAP_BLOCKS` 12 at the floor, never a
-    typed number. `set_target` keeps that 6-block headroom at every adaptive target.
+  - That gives `VBAN_CAP_BLOCKS` 9 (48 ms) and `VBAN_PROGRAM_CAP_BLOCKS` 13 (the fixed 7-block
+    program target, issue 1461), never a typed number. A TOML `target_ms` gets the same 6 blocks
+    of headroom.
   - The pop before a stall leaves a leg about one block under its target, and while the loop is
     up to four ticks late up to five more blocks plus the phase and the jitter arrive. Under the
     old 5-block headroom they reached the cap, the leg trimmed to its target and the caught-up pops
     then ran it dry.
 - **Tests** (all Tier-0 replicable):
-  - `tests/setpoint_walk_1401.rs` (new). It counts every correction by its output frame, tells a
-    walk step from a drift correction by `servo_walk_steps`, and bounds them in EVERY 1 s span,
-    not in a bench second that may straddle two servo windows. It covers:
-    - a raise and a lowering on a clean sender (<= 7, exactly one block, every one a walk step,
-      36-40 s);
-    - the FOH burst pattern at a fixed 19.4 / 25 / 27.6 / 31 / 35 ms gap, at the adaptive rule's
-      target and one or two blocks above (<= 7 walk steps; <= 7 corrections below 35 ms, <= 8
-      at 35 ms; one block walked within 2 frames; a 35 ms control with no move that still needs a
-      drift correction);
-    - a tick lost 5 s into a raise (part of the block kept, no drop after it, the walk shorter by
-      the kept part minus the band, the fill within the band of the target);
-    - the give-up carried by the setpoint (no correction against the walk);
-    - a raise reversed in the middle of a second (no repeat after it, the walked frames come back
-      out, the leg ends at the target);
-    - +-200 ppm (depth within 147 of the setpoint, the drift error within 2 frames of its
-      pre-raise equilibrium while the walk runs, <= 7 walk steps a second, a second's
-      corrections never closer than 2000 frames, no pause in a slow sender's repeats at the
-      raise, the walk done within 100 s);
-    - `set_target` / prime / trim / re-prime.
+  - `tests/setpoint_walk_1401.rs` and `tests/adaptive_target_1401.rs` were removed with the walk
+    and the adaptive target (issue 1461).
   - `hub_catchup_1401.rs`: the derived caps, the 21-24 ms and 26 ms rows.
   - `egress_servo_1401.rs`: the refill rule (one reading, a period short by 1 ns, a period, a good
     reading in between, a blocked pw-cat, the prime / trim / top-up).
   - `egress_fill_1401.rs`: the guard table with `starved`.
-  - `adaptive_target_1401.rs`: the replays' walk bound (<= 7 walk steps a second, <= 8
-    corrections).
-  - `vban_jitter_state_1401.rs` (CI only): `setpoint_frames` and `servo_walk_steps` in the facet.
+  - `vban_jitter_state_1401.rs` (CI only): since issue 1461 `rate_ppm`, `asrc_phase_frames` and
+    `resyncs` in the facet, never a servo field.
   - A mutation pass over the walk, the refill and the caps (17 mutants) leaves no survivor. Several
     pins exist because an earlier test set let a mutant through: the band, the drift-first order
     and keeping the window at `set_target` (the lane's own pass), the cancel of the unspent walk
@@ -342,14 +247,15 @@ Three plain-rustc replicas over the real sources and the "VBAN rate" rlibs (anyh
 intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
 `extern crate self as intercom_hub;`, so the real test files compile unchanged:
 
-- **R1:** fir / mulaw / vban_rate / vban_jitter / adaptive_target / block_clock / mix_thread /
-  pipe_fill / janus_pacing / vban_io, local_audio with its serde derive stripped, and the test
-  files `hub_catchup_1401`, `mix_thread_1401`, `adaptive_target_1401` (minus its deployed-TOML
-  test and the matrix / inputs imports; keep its `VBAN_TARGET_BLOCKS` import, the cambox leg uses
-  it), `vban_jitter_1401`, `vban_jitter_bench_1401`, `egress_servo_1401` (minus its serde_json key
-  check), `egress_fill_1401` (cut to its five pipe tests: the target, the guard table, FIONREAD,
-  the two real-pipe sink writers; the rest needs state / matrix) and `setpoint_walk_1401`, under
-  `rustc --test` and `clippy-driver --test -D warnings`. Set
+- **R1:** fir / mulaw / vban_rate / vban_jitter / asrc / block_clock / mix_thread / pipe_fill /
+  pipe_drift_servo / janus_pacing / vban_io, local_audio with its serde derive stripped, and the
+  test files `hub_catchup_1401`, `mix_thread_1401`, `vban_jitter_1401`, `vban_jitter_bench_1401`,
+  `asrc_1461`, `asrc_leg_1461`, `egress_servo_1401` (minus its serde_json key check),
+  `egress_fill_1401` (cut to its five pipe tests: the target, the guard table, FIONREAD, the two
+  real-pipe sink writers; the rest needs state / matrix), under `rustc --test` and
+  `clippy-driver --test -D warnings`. A lighter std-only root (issue 1461 lane 1) mounts only
+  fir / block_clock / vban_jitter / asrc / pipe_drift_servo / pipe_fill / janus_pacing and the
+  JitterBuffer section of vban_io (its `tracing::` calls pointed at a stub macro module). Set
   `CARGO_MANIFEST_DIR=<worktree>/intercom/hub` at COMPILE time for the tests that read the unit and
   main.rs. 112 tests, ~5 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
   takes ~6 s and the growing-gap replay ~10 s.
@@ -366,14 +272,15 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   stand in for match arms), so the real arm runs against the real vban_io / vban_classify /
   vban_rate. Every root that mounts `vban_io.rs` also mounts `vban_classify.rs`.
 - **CI only:** `vban_jitter_state_1401.rs` (serde_json + `Matrix::from_toml`) and the deployed-TOML
-  tests (`adaptive_target_1401`'s and `vban_program_target_1401`'s). `vban_program_target_1401`'s
+  tests (`vban_program_target_1401`'s two). `vban_program_target_1401`'s
   three other tests run in a one-off root the same way (minus the matrix imports). A first cut of the lost-ticks
   status-line test expected `participants=2` on a three-participant matrix and no replica compiled
   it (review 1): mirror such an assertion in R2 before pushing.
 - **The granted path never runs here.** `ulimit -r` is 0 on dev1 and the GitHub runner is not root,
   so the mix-thread tests always take the refused (SCHED_OTHER) path. "Only the calling thread" is
   backed by the `sched_setscheduler(2)` man page and the live `ps -L` check above.
-- The 51 min replay runs about 8.6 s in a debug build on a loaded dev1.
+- The resampler tests (`asrc_1461`, `asrc_leg_1461`, the re-pinned benches) run about 19 s at
+  opt-level 0 on dev1; `vban_program_target_1401`'s 10 min sample-level replay alone takes ~30 s.
 - **Mutation probe (no cargo, step 4).** Copy `intercom/hub/src`, `intercom/hub/tests` and
   `systemd/intercom-hub.service` into a scratch root, apply ONE exact-string replacement to a
   source file (assert it matches once), and run the R1 script with `WT=<scratch root>`,
@@ -385,5 +292,5 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
 - **A per-second bound needs a SLIDING 1 s window.** A "bench second" can straddle two servo
   windows, and a budget of 7 per window does not bound a sliding second once the plan changes
   between windows: 8 walk steps fitted inside one bench second until each step got its own
-  spacing. Count events by output frame and bound every span of 48 000 frames
-  (`setpoint_walk_1401.rs` `max_of_in_any_second`).
+  spacing. Count events by output frame and bound every span of 48 000 frames (the removed
+  `setpoint_walk_1401.rs` did it with `max_of_in_any_second`; the pipe servo still needs it).
