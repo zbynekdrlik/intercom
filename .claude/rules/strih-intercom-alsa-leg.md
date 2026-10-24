@@ -38,10 +38,11 @@ the cutters' playback INTO the `strih-program` sink and their capture onto its m
   an S16_LE pipe is byte-identical). A card with no `stream0` gets S16_LE and the tool's open error.
 - **The leg** (`alsa_leg.rs`): playback = the HDMI leg's `AplaySink::spawn_argv` (any argv, any
   `XrunCounter`) with `aplay_pipe_control_for(rate, period, 4 x period)`: the start hold, the prime and
-  the pipe-fill drift servo carry the clock crossing (the card's crystal vs the hub; a resampler for
-  every crossing is issue 1461). Capture = `ArecordSource`, blocks framed, the mapped hw channels picked
-  and pushed into the participant's local-capture ring (the pw-cat capture path's ring, still 2048
-  frames target and no drift servo). `aplay -N` / `arecord -N` on `hw:CARD=<id>,DEV=<n>`: nothing
+  the egress resampler carry the clock crossing (the card's crystal vs the hub; issue 1461 lane 2,
+  `.claude/rules/strih-intercom.md` "The egress"). Capture = `ArecordSource`, blocks framed, the
+  mapped hw channels picked and pushed into the participant's card-capture resampler leg (issue 1461
+  lane 1, target `target_ms` or 2048). A gone aplay is named `aplay` in the respawn line
+  (`PipeFillWriter::with_reader`). `aplay -N` / `arecord -N` on `hw:CARD=<id>,DEV=<n>`: nothing
   converts or mixes, a busy PCM fails at once.
 - **Down, never a fallback:** before every spawn each side looks at `/proc/asound/<id>`. Card missing /
   no format = the side DOWN, one log line per change of state, `restart_backoff` 1..30 s, the playback

@@ -195,7 +195,7 @@ no-runtime-latency rule.
 
 ## Step 4: the step-3 residuals (design 5981457044, 4.10.2026)
 
-Each fix sits at the policy point that owns the behaviour; there is still one servo, one pipe
+Each fix sits at the policy point that owns the behaviour; there is still one rate rule, one pipe
 guard and one cap rule.
 
 - **The setpoint walk** (`vban_jitter::NetworkFill`, `set_target`, `SERVO_WALK_*`): REMOVED by
@@ -231,7 +231,9 @@ guard and one cap rule.
     and the adaptive target (issue 1461).
   - `hub_catchup_1401.rs`: the derived caps, the 21-24 ms and 26 ms rows.
   - `egress_servo_1401.rs`: the refill rule (one reading, a period short by 1 ns, a period, a good
-    reading in between, a blocked pw-cat, the prime / trim / top-up).
+    reading in between, a blocked pw-cat, the prime / trim / top-up); since issue 1461 lane 2 a
+    refill re-primes (the start hold until the next read), which keeps the 40 ms row's pipes free of
+    trims now that the resampler's phase term, not a steep servo, would take the excess out.
   - `egress_fill_1401.rs`: the guard table with `starved`.
   - `vban_jitter_state_1401.rs` (CI only): since issue 1461 `rate_ppm`, `asrc_phase_frames` and
     `resyncs` in the facet, never a servo field.
@@ -248,13 +250,13 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
 `extern crate self as intercom_hub;`, so the real test files compile unchanged:
 
 - **R1:** fir / mulaw / vban_rate / vban_jitter / asrc / block_clock / mix_thread / pipe_fill /
-  pipe_drift_servo / janus_pacing / vban_io, local_audio with its serde derive stripped, and the
+  janus_pacing / vban_io, local_audio with its serde derive stripped, and the
   test files `hub_catchup_1401`, `mix_thread_1401`, `vban_jitter_1401`, `vban_jitter_bench_1401`,
-  `asrc_1461`, `asrc_leg_1461`, `egress_servo_1401` (minus its serde_json key check),
+  `asrc_1461`, `asrc_leg_1461`, `egress_asrc_1461`, `egress_servo_1401` (minus its serde_json key check),
   `egress_fill_1401` (cut to its five pipe tests: the target, the guard table, FIONREAD, the two
   real-pipe sink writers; the rest needs state / matrix), under `rustc --test` and
   `clippy-driver --test -D warnings`. A lighter std-only root (issue 1461 lane 1) mounts only
-  fir / block_clock / vban_jitter / asrc / pipe_drift_servo / pipe_fill / janus_pacing and the
+  fir / block_clock / vban_jitter / asrc / pipe_fill / janus_pacing and the
   JitterBuffer section of vban_io (its `tracing::` calls pointed at a stub macro module). Set
   `CARGO_MANIFEST_DIR=<worktree>/intercom/hub` at COMPILE time for the tests that read the unit and
   main.rs. 112 tests, ~5 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
@@ -293,4 +295,5 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   windows, and a budget of 7 per window does not bound a sliding second once the plan changes
   between windows: 8 walk steps fitted inside one bench second until each step got its own
   spacing. Count events by output frame and bound every span of 48 000 frames (the removed
-  `setpoint_walk_1401.rs` did it with `max_of_in_any_second`; the pipe servo still needs it).
+  `setpoint_walk_1401.rs` did it with `max_of_in_any_second`; no counted per-second correction
+  is left since issue 1461 lane 2).

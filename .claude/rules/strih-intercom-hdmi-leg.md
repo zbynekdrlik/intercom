@@ -45,18 +45,23 @@ Design: issue 1424 comment 6151522810 (Approach 1).
   tests pin that function's body text.
 - **The pipe (`pipe_fill.rs`):** `PipeFillControl::with_quantum(rate, 256)
   .with_reader_buffer(1024 + 256)` (`aplay_pipe_control`). aplay reads one 256-frame period, so the
-  target is 512, the setpoint 640 (13.3 ms). The reader buffer is added to the PRIME (2048: aplay
-  pulls its whole ALSA buffer + the period it holds at once) and to the TRIM mark (2304: a catch-up
+  target is 512, the setpoint 640 (13.3 ms). The reader buffer less one read is added to the PRIME
+  (1792 frames in the pipe with the first rendered block; aplay pulls its whole ALSA buffer + the period it
+  holds at once, then takes one read per hub block, so the pipe rides 512..768 around 640 from the
+  start, issue 1461) and the whole buffer to the TRIM mark (2304: a catch-up
   burst lands before aplay moves it on). After the prime a reader-buffered pipe is **never topped
   up with silence**: after a block-loop stall aplay takes each block the moment it lands (the pipe
   under one block on every reading while ALSA is full), and the old refill wrote a gap there; the
-  servo walks the level back, a really dry reserve is aplay's own xrun. A counted aplay xrun re-arms
-  ONE prime (`rearm_prime`): aplay refills its whole buffer from the pipe, and one top-up inside the
-  gap that already happened beats a ~13 s steep servo walk. A block before the reader's first read
-  is the start hold, never a trim. pw-cat (reader buffer 0) is byte-for-byte unchanged.
+  phase term brings the level back, a really dry reserve is aplay's own xrun. A counted aplay xrun
+  re-arms ONE prime (`rearm_prime`, which also restarts the rate fit): aplay refills its whole buffer
+  from the pipe, and one top-up inside the gap that already happened beats a slow phase walk. A
+  block before the reader's first read is the start hold, never a trim. pw-cat (reader buffer 0)
+  keeps the starvation top-up. The HDMI clock is crossed by the egress resampler since issue 1461
+  lane 2 (`.claude/rules/strih-intercom.md` "The egress"): dead band 480 (a quarter of the pipe +
+  aplay's buffer), the ratio measured within 4.6 ppm of the HDMI clock, the depth within 183 of 640.
 - **Lip-sync delay `hdmi_delay_ms` -- NEVER on the vestibule (owner ruling 14.10.2026):** an
   optional fixed delay (0..=1000 ms, only on `alsa_hdmi`) applied by `hdmi_leg::SampleDelay` BEFORE
-  the aplay pipe (the pipe servo's depth untouched, the line refilled with silence at every aplay
+  the aplay pipe (the pipe's depth untouched, the line refilled with silence at every aplay
   spawn). The vestibule also hears the hall acoustically, so delaying its program audio makes an
   echo: `intercom.strih-pp.toml` carries NO `hdmi_delay_ms`, and an A/V gap there is fixed on the
   PICTURE side (the HDMI-1 output measured 171 ms render -> cam1 capture with a QR burn, issue 1424).

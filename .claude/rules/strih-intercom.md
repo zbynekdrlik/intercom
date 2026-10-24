@@ -215,7 +215,7 @@ original migrated collection had it in all 7 program scenes).
   block loop feeds `output.interleaved(program_out)` to a supervised `pw-cat --playback --target
   strih-program` child (`PwCatSink`), through the pipe fill controller of issue 1401 (the stdin
   pipe is measured before every write and every ~1 ms between them, primed to 2 graph quanta,
-  held at the start until pw-cat reads, then servo-held at 1792 frames; see "VBAN legs", the
+  held at the start until pw-cat reads, then held at 1792 frames by the resampler (issue 1461); see "VBAN legs", the
   egress bullets).
 - **INGRESS — the talkback (`cutters` becomes a `pipewire` participant with `pipewire_source`):** a
   supervised `pw-cat --record --target <MiniFuse pro-input node>` child (`PwCatSource`) frames its
@@ -355,7 +355,9 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     cap the 32 blocks the capture ring had. The 2048 are two `pw-cat` bursts; the deployed
     `arecord` delivers 256-frame periods, so a smaller `target_ms` (3-4 blocks) is likely enough
     once its live jitter is read.
-  - Janus (phones) -> `local_capture` (unchanged; its crossing is issue 1461's second lane).
+  - Janus (phones) -> `JitterBuffer::janus_capture` (`BufferKind::JanusCapture`, issue 1461
+    lane 2): the same resampler leg, target `target_ms` or 2048 (42.7 ms), cap 32 blocks; the
+    room mix is stamped before the jitter lock (`push_room_mix`).
   - Everything else (no ingress) -> the plain `new`.
   - Every cap is DERIVED, never typed (design 5981457044): `vban_cap_blocks(target)` = target +
     `CATCHUP_MAX_BLOCKS` (4) + 1 (the current tick) + `VBAN_CAP_HEADROOM_BLOCKS` (1): a cambox 9,
@@ -409,7 +411,8 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - A packet after a stale gap counts one STALL, drops the old tail (never replayed ahead of the
     fresh audio) and re-primes.
   - A packet with a different channel count also restarts the leg.
-  - `local_capture` (Janus) still counts its underruns at once.
+  - `local_capture` (no production participant since issue 1461 lane 2; its tests remain) counts
+    its underruns at once.
 - **Observability.**
   - `/api/state`, every resampler leg (VBAN and the card capture): `jitter: {target_frames (fixed),
     depth_frames (1 s mean pre-pop depth ahead of the read point), depth_min_frames, rate_ppm (the
@@ -429,7 +432,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     `underruns=(\d+)` parser keeps working. Built off the real-time thread like the rest.
 - **The program audio delay is fixed** (computed, see `.claude/rules/audio-clock-map.md`): the
   program-feed target 37.3 ms, plus on strih-pp the pw-cat pipe held at 1792 frames (37.3 ms) by
-  the egress servo. Re-check any sync offset on that OBS input once after a hub deploy.
+  the egress resampler (+ its 16-frame look-ahead). Re-check any sync offset on that OBS input once after a hub deploy.
 - **Supervisor live check after a hub deploy (lane 1):**
   - `curl -s http://strih-snv:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
     `target_frames` 1792 (a cambox 768, the cutters 2048), `rate_ppm` settled within a minute at
@@ -456,7 +459,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     `PIPE_TARGET_FRAMES` (2 quanta = 2048 frames, 42.7 ms), then write the block. Above
     `PIPE_HIGH_FRAMES` (target + 2 quanta = 4096) -> drop the block (a trim). A drained pipe costs
     ONE short silent gap, not continuous chopping. Since step 2 neither fires in a healthy run (see
-    the servo below).
+    the resampler below).
   - **Starved = under one block for a whole hub period (hub step 4, design 5981457044).** The
     `starved` flag of `pipe_fill_plan` is set by `PipeFillControl`: for the prime, or when the fill
     read under one block on EVERY reading (the 1 ms samples and the pre-write readings) for at
@@ -470,65 +473,81 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - The first write after a spawn reads 0 and gets the same top-up, but it is the PRIME: logged at
     info, not counted as a refill. A refill (a pipe that drained under a running pw-cat) logs one
     warn line `pipe ran low — topped up with silence`; a trim is debug only. Both restart the
-    servo's window, like an underrun / overrun on a VBAN leg.
-  - **Egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274, design question 5979620130): a fixed
-    start depth and a drift servo.** `pipe_fill::PipeFillControl` (pure, clocked in ns by the
-    caller) plans every write: the guards, then the start hold, then the servo.
+    rate fit's series, like an underrun / resync on a VBAN leg, and a refill re-primes (issue
+    1461): the start hold again until the reader's next read, so the catch-up blocks behind a stall
+    never leave the pipe a prime deeper.
+  - **Egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274, design question 5979620130) + issue 1461
+    lane 2 (design 6376769274): a fixed start depth and the resampler.**
+    `pipe_fill::PipeFillControl` (pure, clocked in ns by the caller) plans every write: the guards,
+    the start hold, and what the resampler renders; `pipe_fill::EgressQueue` holds the samples.
     - **Start hold.** pw-cat reads nothing until its stream runs, and the hub kept writing on top
       of the prime (62-85 ms, different after every restart). Until the fill first DROPS after the
       spawn, a block that would take the fill above `PIPE_TARGET_FRAMES` is dropped (`StartHold`,
       counted in `pipe_start_holds`, a debug line). pw-cat's first read therefore always finds
-      exactly the prime: the target + the prime's own block, 2304.
-    - **Servo.** The cans' sink is clocked by the MiniFuse crystal, not the hub's timer. Before
-      step 2 a 50 ppm offset ended in a 5.3 ms trim every ~107 s or a refill gap of up to 43 ms
-      every ~14 min. Now the issue-1401 servo holds the pipe (since issue 1461 in its own module,
-      `pipe_drift_servo::DriftServo`, lane 2 replaces it with the resampler): `servo_step` (the
-      issue-1401 pop servo's logic minus its setpoint walk), with the 1 s mean, the gentle-then-steep
-      budget and >= 1000 frames between corrections. A drop / repeat writes the block one frame
-      short / long, spread per channel by `stretch_interleaved` (`stretch_block`).
-    - **The servo reads the TIME-WEIGHTED fill, never the pre-write readings.** pw-cat takes four
+      exactly the prime: the target + the prime's own block, 2304 (the top-up's silence also
+      covers the 16 frames the first rendered block falls short of a block).
+    - **The crossing is the resampler (issue 1461).** The cans' sink is clocked by the card's
+      crystal, the HDMI leg by the GPU's audio clock, the strih-pp program sink by its PipeWire
+      driver. Issue 1401 held the pipe with single-frame drops / repeats (`pipe_drift_servo`,
+      `stretch_interleaved`, deleted). Now the hub blocks queue in hub frames and each write renders
+      as many reader-clock frames as the queue holds from a fractional read point
+      (`asrc::render_interleaved`, lane 1's 32-tap x 128-phase Kaiser sinc), so a write is 255,
+      256 or 257 frames because the ratio says so, never a frame cut or repeated. The ratio is an
+      egress `asrc::RateControl::egress`: every detected read (a fill drop between two readings,
+      timed at their middle) is a point of the reader's consumed frames (written minus the fill)
+      on the hub's clock; the 64 s least-squares slope is the reader's rate, the ratio its inverse,
+      followed at 5 ppm/s (250 ppm/s until first reached), +-1000 ppm. The reads that only fill
+      aplay's own buffer (the spawn's burst, an xrun's refill) are not points. A phase term acts
+      only while the 1 s time-weighted fill sits outside a quarter of the leg's fixed latency (the
+      setpoint plus aplay's own buffer: 448 for pw-cat, 480 for aplay, whose period reads ride
+      +-128 plus a spawn's +-128 phase) and then brings it back to an eighth.
+    - **The depth is the TIME-WEIGHTED fill, never the pre-write readings.** pw-cat takes four
       hub blocks at once. Between two read/write phase crossings the pre-write readings repeat the
       same four values, so a drift reached them only as a whole-block (256-frame) step at each
-      crossing (every ~107 s at 50 ppm). The servo answered those with bursts of up to 47
-      corrections a second (the model on design question 5979620130). So the sink thread waits
-      with `recv_timeout(PIPE_SAMPLE_INTERVAL)` (1 ms) and reads the pipe (`sample_fill`) when no
-      block came, about 1000 `FIONREAD`s a second per sink (accepted). Each block's servo input is
-      the trapezoid mean of the readings since the last block.
-    - **Setpoint = the depth the hold leaves.** `pipe_servo_setpoint(block)` = target + block -
-      quantum / 2 = 1792 frames (37.3 ms), derived in code. That is the prime minus half a quantum,
-      the time-average over a read cycle, in the middle over where pw-cat's first read falls inside
-      a hub block. One spawn starts at 1664..1920 (+-2.7 ms) depending on that phase; the gentle
-      servo walks it in (up to ~120 single-frame corrections, at most ~9 a second, settled within
-      ~60 s), and every restart then sits at the same depth.
+      crossing (design question 5979620130). So the sink thread waits with
+      `recv_timeout(PIPE_SAMPLE_INTERVAL)` (1 ms) and reads the pipe (`sample_fill`) when no block
+      came, about 1000 `FIONREAD`s a second per sink (accepted). Each block's depth is the
+      trapezoid mean of the readings since the last block; the same readings time the reads.
+    - **Setpoint = the depth the hold leaves.** `pipe_setpoint(block)` = target + block - quantum
+      / 2 = 1792 frames (37.3 ms), derived in code: the prime minus half a quantum, the
+      time-average over a read cycle. One spawn starts at 1664..1920 (+-2.7 ms) depending on where
+      pw-cat's first read falls inside a hub block, inside the dead band, and KEEPS that depth for
+      its run (the issue-1401 servo walked it in; the design's phase term acts only outside the
+      band). aplay (`pipe_setpoint_for(256, 256)` = 640): its prime adds the ALSA buffer + the
+      period it holds LESS the one read it keeps taking in step with the hub
+      (`prime_reader_frames`), so the pipe rides 512..768 around 640 from the start (with the
+      whole buffer added it started a read deeper, 896, and the servo walked it down). The
+      resampler's queue adds its 16-frame look-ahead (0.33 ms) to every egress.
     - **A dead pw-cat during the hold is noticed (review round 1).** The hold writes nothing, so no
       write gets the `EPIPE` that respawns a dead child, and `FIONREAD` keeps answering after the
       reader closed. Every reading therefore first asks `pipe_reader_gone` (a timeout-0 `poll` on
       the write end; Linux reports `POLLERR` once the pipe has no reader) and returns
-      `BrokenPipe`, so the sink thread respawns.
-    - **Never** go back to a setpoint of `PIPE_TARGET_FRAMES` on the pre-write fill: its mean sits
-      `(quantum + block) / 2` under the hold level, a +384-frame walk at 47 corrections a second
-      after every spawn.
-    - Measured on the two-clock bench (`tests/egress_servo_1401.rs`; pw-cat at quantum 1024 vs
-      256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact event times):
-      - 0 ppm: no corrections after 60 s, true depth within 18 of 1792;
-      - +-50 ppm: <= 3 corrections a second, true depth within 53 (the servo's own view, i.e.
-        `pipe_depth_frames`, within 62: it runs ~10 further off, the 1 ms readings place each read
-        only within a millisecond);
-      - +-200 ppm: rate 9.6 a second (median 10; up to 15 in one second, the servo's own budget
-        while the 1 s error rides 128..146, just past the knee), true depth within 140, the
-        servo's view within 147;
-      - 0 trims, 0 refills, 0 starved reads in every 1 h run;
-      - 16 connect delays: first read = the prime every time, <= 9 corrections a second after the
-        spawn, settled (the servo's measured depth within 20, the true within 22) by 60 s, all 16
-        true depths 1775..1813;
-      - the residual is the 1 ms readings placing each read only within a millisecond, on top of
-        the servo's 16-frame band.
+      `BrokenPipe` naming the reader (`PipeFillWriter::with_reader`: `aplay` for the card and HDMI
+      legs, `pw-cat` otherwise), so the sink thread respawns.
+    - Measured on the two-clock benches (`tests/egress_servo_1401.rs`, frame counts, pw-cat at
+      quantum 1024 vs 256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact
+      event times; `tests/hdmi_leg_bench_1424.rs`, aplay; dev1 24.10.2026):
+      - pw-cat: 0 trims, 0 refills, 0 starved reads in every 1 h run at 0 / +-50 / +-200 ppm; the
+        ratio within 0.5 ppm of the sink; the true depth within 133 of 1792 (the spawn's phase plus
+        the walk before the first fit), the measured within 140; 16 connect delays: first read =
+        the prime every time, each spawn's depth the same at 10 s and at the end (within 20);
+      - aplay (HDMI / card): the ratio within 4.6 ppm (the 1 ms readings place the period reads
+        with a bias that turns with the read/write phase), the depth within 183 of 640, no refill,
+        trim or xrun at 0 / +-50 / +-200 ppm, connect 0..200 ms, 15..26 ms stalls;
+      - a 997 Hz tone through the real `PipeFillControl` + `EgressQueue` (`egress_asrc_1461.rs`):
+        every 50 ms window under -80 dB THD+N at 0 / +-50 / +-200 ppm and a 100 ppm step, both
+        readers (the issue-1401 servo: 7..256 windows at -29 dB).
+      - CPU (dev1, `-C opt-level=3`, load ~7): the card leg's 6 hw channels 107 us per 5.33 ms
+        block (2.0 % of one core, on the `alsa-play` thread, not the mix thread), a 2-channel aplay
+        or pw-cat pipe 37 us (0.7 %), the Janus ring 12 us per 20 ms pop.
   - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims`, the last
     `pipe_fill_frames` (measured before the last write; it rides pw-cat's quantum reads, from the
     held depth - 640 to the depth + 384, so never judge the depth from it), `pipe_start_holds`,
-    `pipe_servo_drops`,
-    `pipe_servo_repeats`, `pipe_depth_frames` (the servo's 1 s time-weighted mean) and
-    `pipe_setpoint_frames` (1792). `tx_blocks` counts written blocks only (a corrected block is one).
+    `pipe_rate_ppm` (the resampler's ratio, hub frames per written frame: a fast sink reads
+    negative), `pipe_rate_fit_ppm` (null before the first fit after a spawn or a guard),
+    `pipe_asrc_phase_frames` (the last second's depth minus the setpoint), `pipe_depth_frames` (the
+    1 s time-weighted mean) and `pipe_setpoint_frames` (1792 / 640). `tx_blocks` counts written
+    blocks only. The issue-1401 `pipe_servo_drops` / `pipe_servo_repeats` are gone.
   - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
     that is off wait in its unresolved ARP neighbour queue, charged to the socket that sent them.
     With ONE shared socket the queues of several off camboxes together filled its send buffer and
@@ -552,20 +571,19 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     - `pw-top -b` on strih-snv: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
       row's driver (the MiniFuse for the cans);
     - `/api/state` -> `program_out` and `cutters` `local_audio` (egress step 2):
-      `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-70 of it on the cans (a 50 ppm
-      MiniFuse reads ~62 off in the servo's own view, the true depth ~10 closer), and within +-20
-      on the program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
+      `pipe_setpoint_frames` 1792 (an aplay leg 640); `pipe_depth_frames` within the dead band
+      (+-448 / +-480; measured within ~140 / ~185 on the benches, fixed for a spawn's run);
+      `pipe_rate_ppm` settled at the sink's clock within a minute (a MiniFuse 50 ppm fast: about
+      -50) and then moving by tenths, `pipe_asrc_phase_frames` inside the band; `pipe_fill_frames` (one instantaneous pre-write
       reading) anywhere in depth - 640 .. depth + 384, ~1000..2350 (it rides pw-cat's 1024-frame
       reads); `pipe_refills` 0 and `pipe_trims` flat;
       `pipe_start_holds` grows only at a pw-cat (re)spawn, together with `spawns`: pw-cat's
       connect time / 5.33 ms blocks, plus after a respawn up to the 63 stale blocks the 64-block
       egress queue filled during the 1 s restart backoff (the first queued block is the prime);
       `pipe_depth_frames` reads 0 for the first second after each spawn's first read;
-    - over >= 1 h: `pipe_servo_drops - pipe_servo_repeats` grows at the sink's drift and no
-      faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0). The first minute
-      after each pw-cat (re)spawn adds the walk-in, up to ~120 corrections (see the setpoint
-      above); outside that, a jump of hundreds within a minute is a burst, a finding. Note each
-      `pw-cat` row's driver in `pw-top` (the MiniFuse for the cans);
+    - over >= 1 h: `pipe_rate_ppm` stays within a few ppm of where it settled, `pipe_refills` /
+      `pipe_trims` flat, `pipe_depth_frames` where the spawn put it (a drift of the depth means the
+      ratio is not following: a finding). Note each `pw-cat` row's driver in `pw-top`;
     - a `pipe_start_holds` that keeps climbing between spawns means pw-cat is not reading; the
       journal then shows `local-audio: ... pw-cat exited — respawning` once it dies (the hold
       notices a dead child, see above);
@@ -578,22 +596,20 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     counters, `classify_send`, `tx_dropped` on the facet + status line, the `main.rs` anchor of one
     sender per output, the sink-thread anchor feeding `record_write`) and `vban_io`'s in-file
     `a_sender_socket_never_blocks` (a `recv_from` with a 2 s timeout must return `WouldBlock` at
-    once). Step 2: `tests/egress_servo_1401.rs`:
-    - the setpoint and its derivation, the servo's budget and spacing (moved with it to
-      `pipe_drift_servo`, issue 1461), `stretch_interleaved`, the
-      bytes per plan;
+    once). Step 2 + issue 1461 lane 2: `tests/egress_servo_1401.rs`:
+    - the setpoint and its derivation, each write = exactly its report's frames through
+      `EgressQueue` (a held or trimmed block still leaves the queue);
     - the start hold, pure and on a real pipe, and a reader closed during the hold (`BrokenPipe`);
     - the starvation-only refill (hub step 4): one low reading, a period short by 1 ns, a whole
       period, a good reading in between, a pw-cat blocked in its read, the prime / trim / top-up;
-    - a guard forgetting the servo's pending budget, the servo measuring from pw-cat's first read
-      (both ways the hold ends);
-    - the facet counters, the sink-thread `recv_timeout` / `sample_fill` anchor;
+    - a guard restarting the rate fit and keeping the ratio, the depth measured from pw-cat's
+      first read (both ways the hold ends);
+    - the facet fields (the servo keys gone), the sink-thread `recv_timeout` / `sample_fill` /
+      `record_asrc_stats` anchor;
     - the two-clock bench (the 16 spawns, 0 / +-50 / +-200 ppm for 1 h; < 1 s in a debug build).
-      It bounds the TRUE depth (from exact event times) and, separately, the depth the servo
-      itself measures (the trapezoids of the hub's own readings).
-
-    Its per-second correction counts are bench seconds, not the servo's windows. At 200 ppm the
-    peak of 15 is the servo's own budget past the knee, not a straddle.
+      It bounds the TRUE depth (from exact event times), separately the depth the controller
+      itself measures, and the ratio against the sink's clock.
+    - `tests/egress_asrc_1461.rs`: the tone through both readers and the Janus ring (above).
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
     same change, which had grown past the ~300-line budget); `main()` only builds the
     `BlockLoop` and spawns it.
@@ -604,7 +620,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     (`intercom_hub::` -> `crate::`) runs the real-pipe FIONREAD test under plain `rustc --test`,
     and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
     copy its changed send-loop lines into the replica to type-check them against the real
-    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the servo + ingress test
+    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the egress + ingress test
     files (`vban_jitter_1401.rs`, `vban_jitter_bench_1401.rs`) as modules, so one replica proves
     both the egress acceptance and the unchanged ingress behaviour after the `servo_step`
     extraction. Cut the tests' `serde_json` key checks (they compile at CI). For the RED, build
@@ -645,12 +661,11 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     the band, the ratio within 3 ppm of the sender), `tests/vban_jitter_state_1401.rs` (facet,
     status line, `input_buffers` on the deployed TOML), `tests/vban_program_target_1401.rs`
     (both strih TOMLs' `target_ms`).
-- **Not covered yet (issue 1461's second lane):** the egress crossings (the card playback, the
-  HDMI and `pw-cat` pipes still use the single-frame `pipe_drift_servo`) and the phones (the
-  `PacedRing` splices, the Janus ingress `local_capture` ring with no rate handling).
+- **Issue 1461 lane 2 (the egress + the phones)** is in "The egress" above and in "25.9.2026
+  phone audio" below: no hub crossing is left that inserts or drops a frame.
 - **Tier-0 verify without cargo.**
   - A rustc `--test` replica: `fir.rs` + `block_clock.rs` + `asrc.rs` + `vban_jitter.rs` (+
-    `pipe_drift_servo.rs`, `pipe_fill.rs`, `janus_pacing.rs` for `hub_catchup_1401`) + the
+    `pipe_fill.rs`, `janus_pacing.rs` for `hub_catchup_1401` and `egress_asrc_1461`) + the
     `JitterBuffer` section of `vban_io.rs` (its `tracing::` calls pointed at a stub macro module)
     and the test files under `extern crate self as intercom_hub;`, then
     `clippy-driver --test -D warnings` on it.
@@ -901,8 +916,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   - The block loop only `push`es the phones' N-1 mix (mono) into a `janus_pacing::PacedRing`.
   - The `janus_sender` OS thread ("janus-paced-tx") sleeps to absolute 20 ms deadlines
     (`PaceSchedule`). Each tick it pops exactly one 960-frame frame, encodes it and sends one packet.
-  - An underflow sends a whole silent frame and re-primes to the target (2 frames). An overflow
-    above 5 frames trims the oldest back to the target.
+  - An underflow sends a whole silent frame and re-primes to the target (2 frames + the
+    resampler's 15-frame history). An overflow above 5 frames resyncs the oldest back to it.
   - One packet per tick keeps the RTP timestamps contiguous (+960 Opus, +160 PCMU).
   - A stall over 100 ms restarts the grid instead of bursting the missed packets.
   - It is an OS thread, not a tokio task: the tokio timer wheel rounds to whole ms.
@@ -919,18 +934,25 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   `256*1_000_000/48_000` = 5333 instead of 5333.33, so the loop ran 62.5 ppm fast. Every egress
   (the Janus ring, VBAN to the camboxes, the program/cutters pw-cat pipes) gained about 3 samples/s
   against its 48 kHz consumer. Never compute a period in truncated µs again.
-- **The ring's fill servo.** A lost mix tick (once `MissedTickBehavior::Skip`; since issue 1401
-  only a tick beyond the four the hub-mix thread runs late) or a rate offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
-  ring drops 1 ms; after 50 below target-FRAME/4 it plays 1 ms twice (both mid-frame, crossfaded).
-  - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
-    triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent
-    priming ticks is the oldest audio, dropped inaudibly), otherwise a prime that overshot to
-    ~2940 made the servo drop ~8 ms right after every (re)prime. Pinned for 16 start phases.
-  - Both splices (1 ms skip / 1 ms repeat) are 48-sample linear crossfades at mid-frame, never a
-    hard cut (a click).
-  - The 60 ms trim and the silent underflow frame are the last resort only.
-  - 20-minute simulations at ±62.5 ppm and with a skipped block every 30 s pin 0 trims and
-    0 underflows.
+- **The ring is a resampler leg (issue 1461 lane 2; the 1 ms splice servo is gone).** A lost mix
+  tick (since issue 1401 only a tick beyond the four the hub-mix thread runs late) or a rate offset
+  between the block loop's grid and the sender's drifts the fill. `PacedRing` is now the VBAN legs'
+  `vban_jitter::NetworkFill` over a sample queue: every push is a point of its rate fit, timed
+  BEFORE the ring's lock (`PacedRing::push_at`, `main.rs` stamps the block), every pop renders
+  exactly one 960-frame frame from a fractional read point (`asrc::render`); target 1920 (40 ms),
+  dead band +-480, `PacedRing::stats()`.
+  - Priming ends EXACTLY at the target + the 15-frame history (the excess that piled up during
+    the silent priming ticks is the oldest audio, dropped inaudibly). Pinned for 16 start phases.
+  - The silent underflow frame and the resync above the cap are the last resort only (still the
+    facet's `tx_underflows` / `tx_overflow_trims`).
+  - 20-minute simulations at +-62.5 ppm (the ratio within 2 ppm of the feed) and with a lost
+    block every 30 s pin 0 resyncs and 0 underflows; a 997 Hz tone through the ring at +-62.5 /
+    +-500 ppm stays under -80 dB THD+N in every 50 ms window (`egress_asrc_1461.rs`; the old 1 ms
+    splices failed 16 of 600 at +500 ppm, and a 1 kHz tone hides a 1 ms splice: 48 samples = one
+    period).
+- **The phones' INGRESS** (the room mix Janus sends back) is the resampler leg too
+  (`JitterBuffer::janus_capture`, target 2048 or the phones' `target_ms`, which `matrix.rs`
+  accepts on the janus participant since lane 2), each packet stamped before the jitter lock.
 - **Receive-side safety (review round 1).**
   - Only the session's Janus endpoint is accepted (`is_session_peer`, port + ip unless Janus
     advertised 0.0.0.0). This keeps out stray hosts only: **Janus reuses the SAME rtp port
@@ -952,8 +974,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
     not write drains it for good, and once it holds less than a quantum every cycle blocks and
     xruns (ERR ~50/s live). The 40430 s ERR-0 reading was a run with no lost blocks. Since issue
     1401 every write measures the pipe and tops a drained one up to 2 quanta. Since its egress step
-    2 a drift servo holds the pipe at a fixed depth, because the cans' sink runs on the MiniFuse
-    crystal, not the hub's clock (see "VBAN legs" above, the egress bullets).
+    2 the pipe holds a fixed depth, since issue 1461 by the resampler, because the cans' sink runs
+    on the card's crystal, not the hub's clock (see "VBAN legs" above, the egress bullets).
 - **Opus.** `[janus].codec = "opus"` (default) | `"pcmu"`. Unknown values fail the load.
   - The join sends a top-level `codec`, `rtp.payload_type` 111 and `rtp.fec: true`. The receiver
     filters on the payload type Janus echoes in `joined` (fallback: ours).
