@@ -13,7 +13,8 @@
 //!   the least-squares slope of the frames it consumed (written minus the measured fill, at each
 //!   detected read) against the hub's clock over 64 s ([`crate::asrc::RateControl::egress`]),
 //!   followed at 5 ppm/s; a phase term only while the time-weighted fill sits outside +-1/4 of the
-//!   setpoint, until it is back inside +-1/8; +-1000 ppm. No frame is ever inserted or dropped
+//!   leg's fixed latency (the setpoint plus aplay's own buffer), until it is back inside +-1/8;
+//!   +-1000 ppm. No frame is ever inserted or dropped
 //!   while the reader runs: a write is one frame shorter or longer than the block only because the
 //!   resampler's output count follows the ratio.
 //! - **A fixed setpoint, read at start** ([`pipe_setpoint_for`]): 1792 frames (37.3 ms) for a
@@ -26,7 +27,8 @@
 //!   during a catch-up stall two of pw-cat's quantum reads can land in the write gap, and the pipe
 //!   then reads low for a few ms with the late blocks about to arrive. A pw-cat blocked in its
 //!   `fread` swallows every block the moment it lands, so a really starved pipe reads ~0 on every
-//!   reading and is confirmed within one period. Every guard restarts the rate fit's series.
+//!   reading and is confirmed within one period. Every guard restarts the rate fit's series, and a
+//!   refill re-primes: the start hold again until the reader's next read.
 //! - **The start hold.** The reader takes nothing until its stream runs, and the hub keeps writing
 //!   meanwhile. Until the fill first DROPS after the spawn, a block that would take the fill above
 //!   [`PIPE_TARGET_FRAMES`] is dropped. So the first read always finds exactly the prime, whatever
@@ -338,8 +340,12 @@ impl PipeFillControl {
 
     /// The same controller whose reader first fills `frames` of its own buffer (issue 1424: aplay
     /// pulls its 1024-frame ALSA buffer + one period from the pipe the moment it starts). The prime
-    /// adds them, so the pipe still holds the target once the reader is full and the first reads
-    /// never starve it. The trim mark rises by the same amount: after a block-loop stall the catch-up
+    /// adds them less the one read the reader then keeps taking in step with the hub's writes
+    /// ([`PipeFillControl::prime_reader_frames`]), so once the reader is full the pipe holds the
+    /// target and rides one read above it: its time-average is the setpoint from the start (issue
+    /// 1461: with the whole buffer added it started a read deep, 896 frames for aplay, and the
+    /// issue-1401 servo walked it down; the resampler holds the depth it starts at). The trim mark
+    /// rises by the whole buffer: after a block-loop stall the catch-up
     /// burst lands in the pipe before aplay has moved it on into its drained buffer, and a trim there
     /// would cut real audio. The rate fit skips the reads that fill that buffer: they are the
     /// spawn's burst, not the reader's clock.
@@ -354,6 +360,11 @@ impl PipeFillControl {
         self.reader_buffer = frames;
         self.fit_from = frames as u64;
         self
+    }
+
+    /// What the prime adds for the reader's own buffer: the buffer less one read (0 for pw-cat).
+    fn prime_reader_frames(&self) -> usize {
+        self.reader_buffer.saturating_sub(self.read_frames)
     }
 
     /// The trim mark: the target + two reads, plus the reader's own buffer
@@ -465,7 +476,7 @@ impl PipeFillControl {
             };
             self.observe(mean, block_frames);
             let err = mean - setpoint as f64;
-            self.read.ratio = self.rate.step(err, setpoint as f64 / 4.0, block_frames);
+            self.read.ratio = self.rate.step(err, self.dead_band(setpoint), block_frames);
         }
         self.queued += block_frames;
         let frames = renderable(self.read, self.queued);
@@ -495,7 +506,7 @@ impl PipeFillControl {
             // trim (issue 1424: an aplay prime holds the ALSA buffer too, above its 1024 mark).
             PipeFillPlan::Drop if !self.started => PipeFillPlan::StartHold,
             PipeFillPlan::TopUp { silence_frames } if first => PipeFillPlan::TopUp {
-                silence_frames: silence_frames + self.reader_buffer,
+                silence_frames: silence_frames + self.prime_reader_frames(),
             },
             PipeFillPlan::Write => PipeFillPlan::Write,
             guard => {
@@ -530,8 +541,23 @@ impl PipeFillControl {
             // never ends one by itself, since a pw-cat blocked in its read swallows it at once;
             // the next reading tells.
             self.low_since = None;
+            if !first {
+                // A refill re-primes to the same depth (a VBAN leg's underrun does too): the start
+                // hold again until the reader's next read, so the catch-up blocks behind a stall
+                // never leave the pipe deeper than the prime (the phase term would need ~100 s at
+                // its 200 ppm to take such an excess back out).
+                self.started = false;
+            }
         }
         report
+    }
+
+    /// The phase term's dead band: a quarter of the leg's fixed latency, the pipe's setpoint plus
+    /// the reader's own buffer (aplay's ALSA buffer and the period it holds: 480 frames, where the
+    /// pipe alone would give 160, less than the +-128 its period reads ride plus a spawn's +-128
+    /// phase). A pw-cat pipe: 448.
+    fn dead_band(&self, setpoint: usize) -> f64 {
+        (setpoint + self.reader_buffer) as f64 / 4.0
     }
 
     /// Add one block's time-weighted fill to the 1 s depth window.
