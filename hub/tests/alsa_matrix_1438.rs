@@ -171,11 +171,18 @@ fn one_participant_per_card_device_and_the_keys_only_on_alsa() {
 }
 
 #[test]
-fn the_card_legs_capture_gets_the_local_capture_ring() {
+fn the_card_legs_capture_gets_the_card_resampler_leg() {
+    // Issue 1461: the card's crystal is a foreign clock, so its capture is crossed by the same
+    // resampler leg as a VBAN leg (it had the issue-1345 local-capture ring with no rate handling).
     let m = matrix(CUTTERS);
     let buffers = input_buffers(&m);
     let cutters = m.id_of("cutters").unwrap();
-    assert_eq!(buffers[cutters].kind(), BufferKind::LocalCapture);
+    assert_eq!(buffers[cutters].kind(), BufferKind::CardCapture);
+    assert_eq!(
+        buffers[cutters].network_stats().unwrap().target_frames,
+        2048,
+        "the card's default target: two 1024-frame bursts"
+    );
     let cam1 = m.id_of("cam1").unwrap();
     assert_eq!(buffers[cam1].kind(), BufferKind::VbanLeg);
 }

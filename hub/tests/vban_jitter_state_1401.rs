@@ -4,8 +4,10 @@
 //! participant, and never showed overruns at all) and the program feeds' stalls; and the hub really
 //! gives every VBAN participant the target-fill buffer. Since design 5980775411 the block loop runs
 //! missed ticks late (`caught_up_ticks`) and gives up only the part beyond four blocks
-//! (`lost_ticks`, `lost=N` on the line); a program feed's facet also shows the largest gap of the
-//! last 10 min its adaptive target follows.
+//! (`lost_ticks`, `lost=N` on the line). Since issue 1461 the facet is the resampler leg's (VBAN
+//! legs and the cutters' card capture): the fixed target, the depth, `rate_ppm`,
+//! `asrc_phase_frames` and `resyncs`, never a servo or an adaptive-target field; the status line
+//! shows the legs' resyncs and one `asrc=` group per leg that has received audio.
 
 use std::path::PathBuf;
 
@@ -54,45 +56,49 @@ out_channels = 0
     .unwrap()
 }
 
-fn facet(servo_drops: u64, servo_repeats: u64, stalls: u64) -> JitterFacet {
+fn facet(rate_ppm: f64, resyncs: u64, stalls: u64) -> JitterFacet {
     JitterFacet {
         target_frames: 768,
         depth_frames: 790,
         depth_min_frames: 610,
-        servo_drops,
-        servo_repeats,
-        setpoint_frames: 768,
-        servo_walk_steps: 0,
+        rate_ppm,
+        asrc_phase_frames: 22.0,
+        resyncs,
         stalls,
         primed: true,
-        max_gap_ms_10min: None,
     }
 }
 
 #[test]
-fn a_vban_leg_reports_its_jitter_facet_and_the_others_do_not() {
+fn a_resampler_leg_reports_its_jitter_facet_and_the_others_do_not() {
     let stats = vec![
         RuntimeStats {
-            jitter: Some(facet(12, 3, 2)),
+            jitter: Some(facet(12.5, 3, 2)),
             ..Default::default()
         },
-        // Even if a facet were attached to a non-VBAN participant, it is not rendered.
-        RuntimeStats {
-            jitter: Some(facet(1, 1, 1)),
-            ..Default::default()
-        },
+        // The daemon fills the facet only from a resampler leg's buffer: none here.
+        RuntimeStats::default(),
     ];
     let v = serde_json::to_value(HubState::snapshot(&matrix(), "v", &stats)).unwrap();
     let j = &v["participants"][0]["jitter"];
     assert_eq!(j["target_frames"], 768);
     assert_eq!(j["depth_frames"], 790);
     assert_eq!(j["depth_min_frames"], 610);
-    assert_eq!(j["servo_drops"], 12);
-    assert_eq!(j["servo_repeats"], 3);
-    assert_eq!(j["setpoint_frames"], 768);
-    assert_eq!(j["servo_walk_steps"], 0);
+    assert_eq!(j["rate_ppm"], 12.5);
+    assert_eq!(j["asrc_phase_frames"], 22.0);
+    assert_eq!(j["resyncs"], 3);
     assert_eq!(j["stalls"], 2);
     assert_eq!(j["primed"].as_bool(), Some(true));
+    // Issue 1461: no single-frame servo and no adaptive target are left to report.
+    for gone in [
+        "servo_drops",
+        "servo_repeats",
+        "setpoint_frames",
+        "servo_walk_steps",
+        "max_gap_ms_10min",
+    ] {
+        assert!(j.get(gone).is_none(), "{gone}: {j}");
+    }
     assert!(v["participants"][1].get("jitter").is_none(), "{v}");
 }
 
@@ -115,25 +121,47 @@ fn the_status_line_names_the_worst_leg_for_underruns_and_overruns() {
 }
 
 #[test]
-fn a_quiet_status_line_names_no_leg_and_no_servo_or_stalls() {
+fn a_quiet_status_line_names_no_leg_and_no_resync_or_stalls() {
     let stats = vec![RuntimeStats::default(), RuntimeStats::default()];
     let line = HubState::snapshot(&matrix(), "v", &stats).status_line();
     assert!(line.contains("underruns=0 overruns=0"), "got: {line}");
     assert!(!line.contains("servo="), "got: {line}");
+    assert!(!line.contains("resyncs="), "got: {line}");
+    assert!(!line.contains("asrc="), "got: {line}");
     assert!(!line.contains("stalls="), "got: {line}");
 }
 
 #[test]
-fn the_status_line_shows_the_servo_corrections_when_there_are_any() {
+fn the_status_line_shows_each_live_legs_resampler_and_the_resyncs() {
+    // Issue 1461: per leg that has received audio, where its clock sits against the hub's
+    // (`rate_ppm`), how far its depth is off the fixed target (`asrc_phase_frames`), its underruns
+    // and resyncs; the resyncs also lead as a total naming the worst leg. A leg that never received
+    // a packet (fohabl here) shows no group.
     let stats = vec![
         RuntimeStats {
-            jitter: Some(facet(12, 3, 0)),
+            rx_packets: 100,
+            underruns: 1,
+            jitter: Some(facet(12.5, 2, 0)),
             ..Default::default()
         },
         RuntimeStats::default(),
+        RuntimeStats {
+            jitter: Some(facet(-0.5, 0, 0)),
+            ..Default::default()
+        },
     ];
     let line = HubState::snapshot(&matrix(), "v", &stats).status_line();
-    assert!(line.contains("servo=12/3"), "got: {line}");
+    assert!(
+        line.contains(" asrc=cam1:rate_ppm=+12.5:asrc_phase_frames=+22.0:underruns=1:resyncs=2"),
+        "got: {line}"
+    );
+    assert!(line.contains(" resyncs=2(cam1)"), "got: {line}");
+    assert!(!line.contains("asrc=fohabl"), "got: {line}");
+    assert!(!line.contains("servo="), "got: {line}");
+    assert!(
+        line.starts_with("intercom-hub: status participants=3 underruns=1(cam1) overruns=0"),
+        "the totals still lead: {line}"
+    );
 }
 
 #[test]
@@ -142,19 +170,19 @@ fn the_status_line_shows_program_feed_stalls_but_not_cambox_mutes() {
     // outage). Only the program feed's stalls are a fault worth a line.
     let stats = vec![
         RuntimeStats {
-            jitter: Some(facet(0, 0, 5)),
+            jitter: Some(facet(0.0, 0, 5)),
             ..Default::default()
         },
         RuntimeStats::default(),
         RuntimeStats {
-            jitter: Some(facet(0, 0, 2)),
+            jitter: Some(facet(0.0, 0, 2)),
             ..Default::default()
         },
     ];
     let line = HubState::snapshot(&matrix(), "v", &stats).status_line();
     assert!(line.contains("stalls=2(fohabl)"), "got: {line}");
     let mutes_only = vec![RuntimeStats {
-        jitter: Some(facet(0, 0, 5)),
+        jitter: Some(facet(0.0, 0, 5)),
         ..Default::default()
     }];
     let line = HubState::snapshot(&matrix(), "v", &mutes_only).status_line();
@@ -223,55 +251,31 @@ fn the_memory_lock_shows_on_api_state_once_the_daemon_sets_it() {
 }
 
 #[test]
-fn a_program_feeds_facet_shows_its_largest_gap_and_a_camboxes_does_not() {
-    let program = JitterFacet::from(NetworkFillStats {
+fn the_facet_takes_the_controllers_numbers() {
+    let f = JitterFacet::from(NetworkFillStats {
         target_frames: 1792,
-        setpoint_frames: 1600,
-        servo_walk_steps: 64,
-        max_gap_us_10min: Some(27_641),
-        ..Default::default()
+        depth_frames: 1800,
+        depth_min_frames: 1500,
+        rate_ppm: 0.4,
+        asrc_phase_frames: 8.0,
+        resyncs: 1,
+        stalls: 2,
+        primed: true,
     });
-    assert_eq!(program.max_gap_ms_10min, Some(27.6), "0.1 ms resolution");
-    assert_eq!(program.target_frames, 1792, "the live target");
     assert_eq!(
-        (program.setpoint_frames, program.servo_walk_steps),
-        (1600, 64),
-        "a walk in progress: where it is, how many steps it took"
+        (f.target_frames, f.depth_frames, f.depth_min_frames),
+        (1792, 1800, 1500)
     );
-    let cambox = JitterFacet::from(NetworkFillStats {
-        target_frames: 768,
-        ..Default::default()
-    });
-    assert_eq!(cambox.max_gap_ms_10min, None);
-    let stats = vec![
-        RuntimeStats {
-            jitter: Some(cambox),
-            ..Default::default()
-        },
-        RuntimeStats::default(),
-        RuntimeStats {
-            jitter: Some(program),
-            ..Default::default()
-        },
-    ];
-    let v = serde_json::to_value(HubState::snapshot(&matrix(), "v", &stats)).unwrap();
-    assert!(
-        v["participants"][0]["jitter"]
-            .get("max_gap_ms_10min")
-            .is_none(),
-        "{v}"
-    );
-    assert_eq!(v["participants"][2]["jitter"]["max_gap_ms_10min"], 27.6);
-    assert_eq!(v["participants"][2]["jitter"]["target_frames"], 1792);
-    assert_eq!(v["participants"][2]["jitter"]["setpoint_frames"], 1600);
-    assert_eq!(v["participants"][2]["jitter"]["servo_walk_steps"], 64);
+    assert_eq!((f.rate_ppm, f.asrc_phase_frames), (0.4, 8.0));
+    assert_eq!((f.resyncs, f.stalls, f.primed), (1, 2, true));
 }
 
 #[test]
-fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
+fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
     // The checked-in strih-snv routing, through the real loader: every VBAN participant (the
-    // camboxes and the program feeds) gets the VBAN-leg buffer; the Janus phones and the local
-    // capture keep the local-capture ring; the program sink and the `none` slots the plain one.
+    // camboxes and the program feeds) gets the VBAN resampler leg and the cutters' card capture the
+    // same leg (issue 1461); the Janus phones keep the local-capture ring; the program sink and
+    // the `none` slots the plain one.
     let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
     assert_eq!(buffers.len(), m.participants.len());
@@ -296,13 +300,18 @@ fn the_deployed_matrix_gives_every_vban_leg_the_vban_buffer() {
         let want = if p.adapter == ADAPTER_VBAN {
             vban_legs += 1;
             BufferKind::VbanLeg
-        } else if p.adapter == ADAPTER_JANUS || local_inputs.contains(&id) {
+        } else if p.adapter == ADAPTER_JANUS {
             BufferKind::LocalCapture
+        } else if local_inputs.contains(&id) {
+            BufferKind::CardCapture
         } else {
             BufferKind::Plain
         };
         assert_eq!(b.kind(), want, "{} ({}, {})", p.name, p.role, p.adapter);
-        assert_eq!(b.network_stats().is_some(), want == BufferKind::VbanLeg);
+        assert_eq!(
+            b.network_stats().is_some(),
+            want == BufferKind::VbanLeg || want == BufferKind::CardCapture
+        );
         if p.role == PROGRAM_OUT_ROLE {
             assert_eq!(
                 b.kind(),
@@ -337,7 +346,7 @@ fn the_block_loop_catches_up_gives_up_only_the_lost_part_and_publishes_the_fill_
     );
     assert!(
         src.contains(".jitter = b.network_stats()"),
-        "the block loop publishes each VBAN leg's fill numbers to /api/state"
+        "the block loop publishes each resampler leg's fill numbers to /api/state"
     );
     assert!(
         src.contains("snapshot.caught_up_ticks = caught_up_total"),

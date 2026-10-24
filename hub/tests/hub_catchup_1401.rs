@@ -22,6 +22,7 @@
 
 use std::time::Duration;
 
+use intercom_hub::asrc::ASRC_HISTORY;
 use intercom_hub::block_clock::{
     catch_up_plan, run_batch, BlockGrid, TickBatch, CATCHUP_MAX_BLOCKS,
 };
@@ -88,21 +89,23 @@ fn every_vban_cap_is_derived_from_its_target_and_the_catch_up() {
         VBAN_PROGRAM_CAP_BLOCKS,
         vban_cap_blocks(VBAN_PROGRAM_TARGET_BLOCKS)
     );
-    assert_eq!(VBAN_PROGRAM_CAP_BLOCKS, 12, "a program feed at its floor");
-    // A program feed's cap follows its adaptive target by the same rule.
-    let mut f = NetworkFill::new(
-        VBAN_PROGRAM_TARGET_BLOCKS * BLOCK,
-        VBAN_PROGRAM_CAP_BLOCKS * BLOCK,
+    assert_eq!(
+        VBAN_PROGRAM_CAP_BLOCKS, 13,
+        "a program feed at its fixed 7-block target"
     );
-    for target in [7, 9, 12, 6] {
-        f.set_target(target * BLOCK);
+    // Issue 1461: every target is fixed from the start, and every leg's cap follows its target by
+    // the same rule. Above the cap the leg resyncs to its prime (the target plus the resampler's
+    // history).
+    for target in [3, 6, 7, 9, 12] {
         let cap = vban_cap_blocks(target) * BLOCK;
+        let mut f = NetworkFill::new(target * BLOCK, cap);
         assert_eq!(f.overrun_keep(cap), None, "target {target}");
         assert_eq!(
             f.overrun_keep(cap + 1),
-            Some(target * BLOCK),
+            Some(target * BLOCK + ASRC_HISTORY),
             "target {target}"
         );
+        assert_eq!(f.target(), target * BLOCK, "the target never moved");
     }
 }
 
@@ -319,6 +322,8 @@ impl Leg {
     fn deliver_until(&mut self, t: u64) {
         while self.next.0 <= t {
             self.fill += self.next.1;
+            self.ctl
+                .note_arrival(self.next.1, self.next.0 as f64 / NS as f64);
             if let Some(keep) = self.ctl.overrun_keep(self.fill) {
                 self.fill = keep;
                 self.overruns += 1;
@@ -335,9 +340,9 @@ impl Leg {
                 self.ran_dry += u64::from(ran_dry);
                 self.silent_after_prime += u64::from(self.primed_once);
             }
-            PopPlan::Audio { skip, take } => {
+            PopPlan::Audio { skip, consume, .. } => {
                 self.primed_once = true;
-                self.fill -= skip + take;
+                self.fill -= skip + consume;
             }
         }
     }

@@ -7,8 +7,9 @@
 //!   always finds exactly the prime.
 //! - **Drift servo.** The cans' sink is clocked by the MiniFuse crystal, not the hub's timer, and
 //!   the bound-only guards turned +-50 ppm into a dropped 5.3 ms block every ~107 s or a refill gap
-//!   every ~14 min. The VBAN legs' servo (`NetworkFill::servo_step`) now holds the pipe at the depth
-//!   the start hold leaves, with single-frame drops / repeats spread across a block.
+//!   every ~14 min. The VBAN legs' servo (since issue 1461 `pipe_drift_servo::DriftServo`, the
+//!   ingress moved to the resampler) now holds the pipe at the depth the start hold leaves, with
+//!   single-frame drops / repeats spread across a block.
 //! - **The servo reads the time-weighted fill.** pw-cat takes four hub blocks at once, so the
 //!   pre-write readings see a drift only as a whole-block step at each read/write phase crossing,
 //!   and the servo would answer in bursts (design question 5979620130). The sink thread reads the
@@ -27,11 +28,15 @@ use intercom_hub::janus_pacing::hub_block_period;
 use intercom_hub::local_audio::{
     pipe_fill_bytes, pipe_write_bytes, LocalAudioStats, PipeFillWriter, PW_GRAPH_BURST_FRAMES,
 };
+use intercom_hub::pipe_drift_servo::{
+    servo_corrections, stretch_block, DriftServo, ServoStep, SERVO_DEADBAND_FRAMES,
+    SERVO_GENTLE_DIV, SERVO_KNEE_FRAMES, SERVO_MIN_SPACING_FRAMES, SERVO_STEEP_DIV,
+    SERVO_WINDOW_FRAMES,
+};
 use intercom_hub::pipe_fill::{
     pipe_servo_setpoint, stretch_interleaved, PipeFillControl, PipeFillPlan, PipeServoDepth,
     PipeWriteReport, PIPE_HIGH_FRAMES, PIPE_SAMPLE_INTERVAL, PIPE_TARGET_FRAMES,
 };
-use intercom_hub::vban_jitter::{NetworkFill, PopPlan, ServoStep};
 
 /// The hub block on strih-snv (`[hub].block_frames`).
 const BLOCK: usize = 256;
@@ -89,44 +94,68 @@ fn the_setpoint_is_the_time_average_the_start_hold_leaves() {
 }
 
 #[test]
-fn the_servo_step_is_exactly_the_pop_servo() {
-    // The egress reuses the VBAN legs' servo: one controller fed through plan_pop (primed at the
-    // target) and one through servo_step see the same fills and must decide the same.
-    let target = 1536;
-    let mut pop = NetworkFill::new(target, 2816);
-    let mut step = NetworkFill::new(target, 2816);
-    let mut corrections = 0;
-    for i in 0..200_000usize {
-        // A slow walk past the knee and back, with a block of ripple.
-        let walk = (i as f64 / 2_000.0).sin() * 400.0;
-        let ripple = (i % 4) * 64;
-        let fill = (target as f64 + walk) as usize + ripple;
-        let fill = if i == 0 { target } else { fill };
-        let planned = pop.plan_pop(fill, BLOCK);
-        let stepped = step.servo_step(fill, BLOCK);
-        let expected = match stepped {
-            ServoStep::Keep => BLOCK,
-            ServoStep::Drop => BLOCK + 1,
-            ServoStep::Repeat => BLOCK - 1,
-        };
-        assert_eq!(
-            planned,
-            PopPlan::Audio {
-                skip: 0,
-                take: expected
-            },
-            "pop {i} at fill {fill}"
-        );
-        if stepped != ServoStep::Keep {
-            corrections += 1;
+fn the_servo_budget_is_gentle_below_the_knee_steep_past_it_and_never_the_whole_error() {
+    // Moved from the ingress tests with the servo itself (issue 1461): only the pipes use it now.
+    assert_eq!(servo_corrections(0), 0);
+    assert_eq!(servo_corrections(SERVO_DEADBAND_FRAMES), 0, "the band");
+    assert_eq!(servo_corrections(SERVO_DEADBAND_FRAMES + 1), 1);
+    let gentle_max = servo_corrections(SERVO_KNEE_FRAMES);
+    assert_eq!(
+        gentle_max,
+        (SERVO_KNEE_FRAMES - SERVO_DEADBAND_FRAMES).div_ceil(SERVO_GENTLE_DIV)
+    );
+    assert!(gentle_max <= 7, "{gentle_max}");
+    assert_eq!(
+        servo_corrections(SERVO_KNEE_FRAMES + 2 * SERVO_STEEP_DIV),
+        gentle_max + 2
+    );
+    let cap = SERVO_WINDOW_FRAMES / SERVO_MIN_SPACING_FRAMES;
+    assert_eq!(servo_corrections(100_000), cap);
+    let mut prev = 0;
+    for e in 0..4_000 {
+        let n = servo_corrections(e);
+        assert!(n >= prev, "monotone at {e}");
+        assert!(n <= e.saturating_sub(SERVO_DEADBAND_FRAMES), "{e}: {n}");
+        prev = n;
+    }
+}
+
+#[test]
+fn the_pipe_servo_spaces_its_corrections_over_the_next_second() {
+    // A fill held 100 frames high: after the first 1 s window the servo plans
+    // servo_corrections(100) drops for the next second, at least 1000 output frames apart.
+    let mut servo = DriftServo::new(SETPOINT, 4096);
+    let mut at = Vec::new();
+    for i in 0..(2 * SERVO_WINDOW_FRAMES / BLOCK) {
+        if servo.servo_step(SETPOINT + 100, BLOCK) != ServoStep::Keep {
+            at.push(i * BLOCK);
         }
     }
-    assert!(corrections > 100, "the walk exercised the servo");
-    let (a, b) = (pop.stats(), step.stats());
-    assert_eq!(
-        (a.servo_drops, a.servo_repeats, a.depth_frames),
-        (b.servo_drops, b.servo_repeats, b.depth_frames)
-    );
+    assert_eq!(at.len(), servo_corrections(100), "{at:?}");
+    assert!(at
+        .windows(2)
+        .all(|w| w[1] - w[0] >= SERVO_MIN_SPACING_FRAMES));
+    assert_eq!(servo.stats().servo_drops as usize, at.len());
+    assert_eq!(servo.target(), SETPOINT);
+    // A restart (a guard refilled the pipe) forgets the planned budget.
+    servo.restart();
+    assert_eq!(servo.servo_step(SETPOINT + 100, BLOCK), ServoStep::Keep);
+}
+
+#[test]
+fn stretch_block_keeps_both_ends_and_spreads_one_frame() {
+    let ramp = |n: usize| (0..n).map(|i| i as i16).collect::<Vec<i16>>();
+    assert_eq!(stretch_block(&ramp(BLOCK), BLOCK), ramp(BLOCK));
+    let out = stretch_block(&ramp(BLOCK + 1), BLOCK);
+    assert_eq!((out[0], out[BLOCK - 1]), (0, BLOCK as i16));
+    let steps: Vec<i16> = out.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(steps.iter().filter(|&&d| d == 2).count(), 1);
+    let out = stretch_block(&ramp(BLOCK - 1), BLOCK);
+    let steps: Vec<i16> = out.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(steps.iter().filter(|&&d| d == 0).count(), 1);
+    assert_eq!(stretch_block(&[], 4), vec![0; 4]);
+    assert_eq!(stretch_block(&[9], 3), vec![9; 3]);
+    assert!(stretch_block(&[1, 2], 0).is_empty());
 }
 
 #[test]

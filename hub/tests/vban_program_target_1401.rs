@@ -5,6 +5,9 @@
 //! the strih program audio still dropped out. The program feeds (every VBAN leg that is not a
 //! cambox) get a target that covers that gap plus one hub block; the camboxes (Linux, even pacing)
 //! keep the 3-block target and its lower talkback latency.
+//!
+//! Since issue 1461 the program feeds' target is FIXED at 7 blocks (37.3 ms): the afternoon's
+//! 27.6 ms gap + one block + half the ~6 ms burst, never adapted while running.
 
 use std::time::{Duration, Instant};
 
@@ -18,8 +21,10 @@ use intercom_hub::vban_jitter::{
 const BLOCK: usize = 256;
 const RATE: u64 = 48_000;
 
-/// The measured worst gap between two fohabl bursts (4.10.2026), in microseconds.
+/// The measured worst gap between two fohabl bursts (4.10.2026 morning), in microseconds.
 const MEASURED_MAX_GAP_US: u64 = 19_400;
+/// The largest gap measured later that day (13:56), which the fixed target covers (issue 1461).
+const AFTERNOON_MAX_GAP_US: u64 = 27_600;
 
 fn burst(frames: usize, first: i16) -> DecodedAudio {
     DecodedAudio {
@@ -90,7 +95,11 @@ fn the_program_feed_target_covers_the_measured_gap_plus_one_block() {
         target_us >= MEASURED_MAX_GAP_US + block_us,
         "target {target_us} us must cover the 19.4 ms gap + one block"
     );
-    assert_eq!(VBAN_PROGRAM_TARGET_BLOCKS, 6, "32 ms");
+    assert!(
+        target_us >= AFTERNOON_MAX_GAP_US + block_us + 3_000,
+        "target {target_us} us must cover the 27.6 ms gap + one block + half a burst"
+    );
+    assert_eq!(VBAN_PROGRAM_TARGET_BLOCKS, 7, "37.3 ms, fixed (issue 1461)");
     assert_eq!(
         VBAN_PROGRAM_CAP_BLOCKS - VBAN_PROGRAM_TARGET_BLOCKS,
         VBAN_CAP_BLOCKS - VBAN_TARGET_BLOCKS,
@@ -147,4 +156,37 @@ fn the_deployed_matrix_gives_program_feeds_the_larger_target_and_camboxes_the_sm
     }
     assert_eq!(camboxes, 7);
     assert_eq!(program_feeds, 3, "fohabl, lv1, mbc");
+}
+
+#[test]
+fn every_deployed_ingress_target_comes_from_its_toml_target_ms() {
+    // Issue 1461: both strih hubs declare each crossing's fixed target in the TOML (`target_ms`,
+    // rounded up to whole blocks), the cameras 3 blocks, the program feeds 7, the card capture 8.
+    for (name, toml) in [
+        ("strih-snv", include_str!("../../intercom.strih-snv.toml")),
+        ("strih-pp", include_str!("../../intercom.strih-pp.toml")),
+    ] {
+        let m = Matrix::from_toml(toml).unwrap();
+        let buffers = input_buffers(&m);
+        for (p, b) in m.participants.iter().zip(&buffers) {
+            let want = match (p.role.as_str(), p.adapter.as_str()) {
+                (CAMBOX_ROLE, _) => Some(3 * BLOCK),
+                (_, ADAPTER_VBAN) => Some(7 * BLOCK),
+                ("cutters", _) => Some(8 * BLOCK),
+                _ => None,
+            };
+            let Some(want) = want else { continue };
+            assert!(
+                p.target_ms.is_some(),
+                "{name} {}: declared in the TOML",
+                p.name
+            );
+            assert_eq!(
+                b.network_stats().map(|s| s.target_frames),
+                Some(want),
+                "{name} {}",
+                p.name
+            );
+        }
+    }
 }
