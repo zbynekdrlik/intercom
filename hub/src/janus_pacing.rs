@@ -171,7 +171,10 @@ impl PacedRing {
             } => {
                 self.buf.drain(..skip.min(self.buf.len()));
                 let queued = self.buf.make_contiguous();
-                let input = queued[..read.frames_needed(FRAME_48K).min(queued.len())].to_vec();
+                let need = read.frames_needed(FRAME_48K);
+                // plan_pop only plans audio when the queue holds what the render reads.
+                debug_assert!(queued.len() >= need, "{} < {need}", queued.len());
+                let input = queued[..need.min(queued.len())].to_vec();
                 self.buf.drain(..consume.min(self.buf.len()));
                 PoppedFrame {
                     kind: PopKind::Audio,

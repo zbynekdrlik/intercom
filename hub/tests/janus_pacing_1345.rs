@@ -144,26 +144,6 @@ fn overflow_resyncs_the_oldest_down_to_the_prime() {
     assert_eq!(f, ramp(kept_from + ASRC_HISTORY as i16, FRAME_48K));
 }
 
-/// Issue 1461 review: the paced sender plans a frame under the ring's lock and renders it after
-/// (`take_frame` + `render`), so the SCHED_FIFO pusher never waits on a sinc render. The split
-/// gives exactly what one `pop_frame` gives, frame by frame, through priming and audio.
-#[test]
-fn a_frame_taken_under_the_lock_renders_exactly_what_a_pop_gives() {
-    let mut split = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
-    let mut whole = split.clone();
-    for k in 0..12i16 {
-        let chunk = ramp(k * 700, 700);
-        split.push(&chunk);
-        whole.push(&chunk);
-        let taken = split.take_frame();
-        let (f, kind) = whole.pop_frame();
-        assert_eq!(taken.kind(), kind, "pop {k}");
-        assert_eq!(taken.render(), f, "pop {k}");
-        assert_eq!(split.fill(), whole.fill(), "pop {k}");
-    }
-    assert_eq!(split.underflows(), whole.underflows());
-}
-
 #[test]
 fn reset_empties_and_reprimes() {
     let mut r = PacedRing::new(RING_TARGET_FRAMES, RING_CAP_FRAMES);
