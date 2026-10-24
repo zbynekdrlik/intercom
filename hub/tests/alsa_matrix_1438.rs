@@ -322,10 +322,18 @@ fn an_s32_pipe_carries_four_bytes_a_sample_and_reads_its_fill_in_frames() {
     assert_eq!(queued % (6 * 4), 0, "whole S32 frames");
     let mut all = vec![0u8; queued];
     reader.read_exact(&mut all).unwrap();
-    let tail = &all[queued - block.len() * 4..];
-    assert_eq!(tail, PcmFormat::S32Le.encode(&block), "the block, widened");
+    // Since the egress resampler (issue 1461 lane 2) the block reaches the pipe through the render
+    // queue: at ratio 1 the phase-0 render is the identity, delayed by the queue's look-ahead, so the
+    // pipe ends with the block's first frames widened, the last few still held back.
+    let held = (0..=32usize)
+        .find(|&k| {
+            let n = block.len() - k * 6;
+            n * 4 <= queued && all[queued - n * 4..] == PcmFormat::S32Le.encode(&block[..n])[..]
+        })
+        .expect("the block, widened, delayed by at most 32 frames");
+    let n = block.len() - held * 6;
     assert!(
-        all[..queued - block.len() * 4].iter().all(|&b| b == 0),
+        all[..queued - n * 4].iter().all(|&b| b == 0),
         "the prime is silence"
     );
 }
