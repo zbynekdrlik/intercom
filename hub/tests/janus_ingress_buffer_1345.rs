@@ -28,9 +28,9 @@ fn janus_participants_get_the_resampler_leg() {
         // Issue 1461 lane 2: the phones run on the browser's / Janus's clock, a foreign clock like
         // a VBAN sender's, so their ingress is the same resampler leg with a fixed target (the
         // local-capture ring only trimmed).
-        assert_ne!(
+        assert_eq!(
             buffers[id].kind(),
-            BufferKind::LocalCapture,
+            BufferKind::JanusCapture,
             "the Janus (phones) ingress is no longer the trim-only local-capture ring"
         );
         let fill = buffers[id]

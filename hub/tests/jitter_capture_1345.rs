@@ -5,9 +5,9 @@
 //! * (a) the LOCAL CAPTURE ring. The MiniFuse drives the PipeWire graph at quantum 1024, so the
 //!   `pw-cat --record` child delivers >= 1024-frame bursts that the hub pops as 256-frame blocks.
 //!   The generic 2048-frame, no-prefill buffer spliced about 8 times a second (4 underruns/s +
-//!   4 overruns/s live). The capture ring prefills to a target fill before the first pop. After an
-//!   underrun it waits to refill without zero-splicing a partial block. On overrun it drops back
-//!   down to the target.
+//!   4 overruns/s live). Issue 1461 replaced that ring with the resampler leg (the card capture in
+//!   lane 1, the phones in lane 2), whose prefill, whole-silent-block underruns and resyncs are
+//!   pinned in `vban_jitter_1401.rs` / `asrc_1461.rs`; the ring and its tests here are gone.
 //! * (e) a STALE stream (no packet for > `STALE_STREAM_MS`) no longer counts an underrun every
 //!   block, and its level reads as silence (-120 dBFS) instead of the last packet's level forever.
 //! * the mono cambox fan-out: a cambox sends MONO VBAN, so a mono packet for a participant
@@ -19,22 +19,6 @@ use std::time::{Duration, Instant};
 use intercom_hub::vban_io::{DecodedAudio, JitterBuffer, STALE_STREAM_MS};
 
 const BLOCK: usize = 256;
-const BURST: usize = 1024;
-const TARGET: usize = 2 * BURST;
-const CAP: usize = 32 * BLOCK;
-
-/// A stereo packet whose two channels carry a contiguous ramp starting at `start` (so any splice —
-/// a dropped or zero-filled sample — shows up as a discontinuity in the popped sequence).
-fn stereo_ramp(start: i64, frames: usize) -> DecodedAudio {
-    let ch: Vec<i16> = (0..frames as i64)
-        .map(|i| ((start + i) % 30000) as i16)
-        .collect();
-    DecodedAudio {
-        stream_name: "cutters".into(),
-        channels: vec![ch.clone(), ch],
-        frames,
-    }
-}
 
 fn mono(samples: Vec<i16>) -> DecodedAudio {
     let frames = samples.len();
@@ -43,126 +27,6 @@ fn mono(samples: Vec<i16>) -> DecodedAudio {
         channels: vec![samples],
         frames,
     }
-}
-
-#[test]
-fn capture_ring_prefills_to_the_target_before_the_first_pop() {
-    let mut jb = JitterBuffer::local_capture(CAP, TARGET);
-    let t0 = Instant::now();
-    jb.push_at(&stereo_ramp(1, BURST), t0);
-    // Below the target: the pop is silence and consumes NOTHING (prefill), and no underrun counts.
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert!(b.iter().all(|c| c.iter().all(|&s| s == 0)));
-    assert_eq!(jb.buffered_frames(), BURST, "prefill must not consume");
-    assert_eq!(jb.underruns, 0);
-    // A second burst reaches the target: audio starts at the very first captured sample.
-    jb.push_at(&stereo_ramp(1 + BURST as i64, BURST), t0);
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert_eq!(
-        b[0][0], 1,
-        "the first popped sample is the first captured one"
-    );
-    assert_eq!(b[0][BLOCK - 1], BLOCK as i16);
-    assert_eq!(jb.buffered_frames(), TARGET - BLOCK);
-}
-
-#[test]
-fn capture_ring_absorbs_1024_frame_bursts_without_a_single_splice() {
-    // pw-cat delivers one 1024-frame burst per 4 hub ticks (quantum 1024 vs 256-frame blocks),
-    // sometimes a tick LATE. The popped audio must be one unbroken ramp: 0 underruns, 0 overruns.
-    let mut jb = JitterBuffer::local_capture(CAP, TARGET);
-    let t0 = Instant::now();
-    let mut next_push: i64 = 1;
-    let mut popped: Vec<i16> = Vec::new();
-    for tick in 0..4000u64 {
-        let now = t0 + Duration::from_micros(tick * 5333);
-        // A burst every 4 ticks; every 7th burst arrives one tick late.
-        let burst_idx = tick / 4;
-        let due = if burst_idx % 7 == 3 {
-            tick % 4 == 1
-        } else {
-            tick % 4 == 0
-        };
-        if due {
-            jb.push_at(&stereo_ramp(next_push, BURST), now);
-            next_push += BURST as i64;
-        }
-        let b = jb.pop_block_at(BLOCK, now);
-        if b[0].iter().any(|&s| s != 0) || !popped.is_empty() {
-            popped.extend_from_slice(&b[0]);
-        }
-    }
-    assert_eq!(
-        jb.underruns, 0,
-        "bursty-but-steady capture must never underrun"
-    );
-    assert_eq!(
-        jb.overruns, 0,
-        "bursty-but-steady capture must never overrun"
-    );
-    for (i, w) in popped.windows(2).enumerate() {
-        assert_eq!(
-            (w[1] as i64 - w[0] as i64).rem_euclid(30000),
-            1,
-            "splice at popped sample {i}: {} -> {}",
-            w[0],
-            w[1]
-        );
-    }
-    assert!(popped.len() > 3000 * BLOCK);
-}
-
-#[test]
-fn capture_ring_underrun_waits_to_refill_and_never_zero_splices_a_partial_block() {
-    let mut jb = JitterBuffer::local_capture(CAP, TARGET);
-    let t0 = Instant::now();
-    jb.push_at(&stereo_ramp(1, TARGET + 100), t0);
-    // Drain every full block: TARGET + 100 frames = 8 full blocks + 100 left over.
-    for _ in 0..(TARGET / BLOCK) {
-        let b = jb.pop_block_at(BLOCK, t0);
-        assert!(b[0][0] != 0);
-    }
-    assert_eq!(jb.buffered_frames(), 100);
-    // 100 < 256: the pop is a WHOLE silent block, counts one underrun, and keeps the 100 frames.
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert!(b[0].iter().all(|&s| s == 0), "never a partial-voice block");
-    assert_eq!(jb.underruns, 1);
-    assert_eq!(jb.buffered_frames(), 100, "the leftover voice is kept");
-    // Still refilling: silence again, no second underrun.
-    jb.push_at(&stereo_ramp(1 + (TARGET + 100) as i64, BURST), t0);
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert!(b[0].iter().all(|&s| s == 0));
-    assert_eq!(
-        jb.underruns, 1,
-        "waiting to refill is one underrun, not one per block"
-    );
-    // Back at the target: the voice resumes exactly where it stopped.
-    jb.push_at(&stereo_ramp(1 + (TARGET + 100 + BURST) as i64, BURST), t0);
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert_eq!(b[0][0], (TARGET + 1) as i16, "resumes at the kept leftover");
-    for w in b[0].windows(2) {
-        assert_eq!(w[1] - w[0], 1);
-    }
-}
-
-#[test]
-fn capture_ring_overrun_drops_back_to_the_target_keeping_the_newest_audio() {
-    let mut jb = JitterBuffer::local_capture(CAP, TARGET);
-    let t0 = Instant::now();
-    let total = CAP + BLOCK;
-    jb.push_at(&stereo_ramp(1, total), t0);
-    assert_eq!(jb.overruns, 1);
-    assert_eq!(
-        jb.buffered_frames(),
-        TARGET,
-        "an overrun drops down to the target"
-    );
-    let b = jb.pop_block_at(BLOCK, t0);
-    assert_eq!(
-        b[0][0],
-        (total - TARGET + 1) as i16,
-        "the newest TARGET frames are kept"
-    );
 }
 
 #[test]

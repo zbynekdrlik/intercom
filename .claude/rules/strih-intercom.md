@@ -287,9 +287,9 @@ What was wrong live, and how the code now handles it. Read this before touching 
 - **The capture ring.** The MiniFuse drives the graph at quantum 1024 (`clock.quantum 1024`, ALSA
   `period-size 1024`), so `pw-cat --record` delivers 1024-frame bursts. The generic 2048-frame,
   no-prefill `JitterBuffer` spliced ~8×/s.
-  - `JitterBuffer::local_capture(32 blocks, 2048)` prefills to the target. An underrun outputs
-    WHOLE silent blocks until refilled (never a partial zero-splice). An overrun drops back to the
-    TARGET, not the cap.
+  - The 24.9. fix was `JitterBuffer::local_capture(32 blocks, 2048)` (prefill, whole silent
+    blocks, overrun back to the target). Issue 1461 replaced it with the resampler leg (the card
+    capture in lane 1, the phones in lane 2) and deleted the ring.
 - **`pw-cat --latency` takes SAMPLES or a time unit, never `N/rate`.** `--latency 256/48000` is
   rejected (`bad latency value … (bad unit)`) and ignored. `--latency 256` with `--rate 48000`
   gives `node.latency = "256/48000"`.
@@ -411,8 +411,6 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - A packet after a stale gap counts one STALL, drops the old tail (never replayed ahead of the
     fresh audio) and re-primes.
   - A packet with a different channel count also restarts the leg.
-  - `local_capture` (no production participant since issue 1461 lane 2; its tests remain) counts
-    its underruns at once.
 - **Observability.**
   - `/api/state`, every resampler leg (VBAN and the card capture): `jitter: {target_frames (fixed),
     depth_frames (1 s mean pre-pop depth ahead of the read point), depth_min_frames, rate_ppm (the

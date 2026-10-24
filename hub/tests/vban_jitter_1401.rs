@@ -466,9 +466,11 @@ fn the_card_capture_is_the_same_resampler_leg_and_the_others_report_no_fill() {
     let plain = JitterBuffer::new(CAP);
     assert_eq!(plain.kind(), BufferKind::Plain);
     assert!(plain.network_stats().is_none());
-    let capture = JitterBuffer::local_capture(CAP, TARGET);
-    assert_eq!(capture.kind(), BufferKind::LocalCapture);
-    assert!(capture.network_stats().is_none());
+    // Issue 1461 lane 2: the phones' ingress is the same resampler leg (the local-capture ring
+    // is gone).
+    let phones = JitterBuffer::janus_capture(32 * BLOCK, 2048, 48_000);
+    assert_eq!(phones.kind(), BufferKind::JanusCapture);
+    assert_eq!(phones.network_stats().unwrap().target_frames, 2048);
     // A missed tick leaves them untouched.
     let t0 = Instant::now();
     let mut plain = JitterBuffer::new(CAP);

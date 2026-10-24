@@ -201,23 +201,17 @@ pub const STALE_STREAM_MS: u64 = 500;
 /// A per-participant jitter buffer: planar sample queues with underrun/overrun accounting and the
 /// age of the last received packet.
 ///
-/// Three fill policies share the one type:
+/// Two fill policies share the one type:
 ///
 /// * [`JitterBuffer::vban_leg`] — the VBAN network legs (the FOH program feed, the camboxes'
-///   talkback, issue 1401) and, through [`JitterBuffer::card_capture`], the cutters' card capture:
+///   talkback, issue 1401) and, through [`JitterBuffer::card_capture`] and
+///   [`JitterBuffer::janus_capture`], the cutters' card capture and the phones' Janus room mix:
 ///   every input that crosses a foreign clock. A FIXED target fill with prefill, one whole silent
 ///   block per underrun, and the crossing done by the resampler (issue 1461, [`crate::asrc`]):
 ///   each pop renders one block from a fractional read point, never a frame inserted or dropped.
 ///   The policy itself is [`crate::vban_jitter::NetworkFill`]. Its underrun counts only when the
 ///   stream continues; a stream back after going stale counts one STALL and starts over without
 ///   its old tail (a muted cambox stops sending; that is not a dropout).
-/// * [`JitterBuffer::local_capture`] — the Janus (phones) ingress (issue 1345; its crossing is
-///   issue 1461's second lane). `pw-cat` hands the hub >= 1024-frame bursts (the graph runs at quantum
-///   1024) that the block loop pops as 256-frame blocks, so the buffer holds a TARGET fill (about 2x
-///   the burst): it prefills to the target before the first pop, after an underrun it outputs WHOLE
-///   silent blocks until it has refilled to the target (never a zero-spliced partial block
-///   mid-voice), and on overrun it drops back down to the target (not just to the cap, which would
-///   overrun again at once).
 /// * [`JitterBuffer::new`] — the plain policy, for a participant with no ingress (an
 ///   `adapter = "none"` slot, the `program_out` sink): pop whatever is queued, zero-pad a short
 ///   block, drop the OLDEST samples beyond the cap.
@@ -247,8 +241,6 @@ pub struct JitterBuffer {
 pub enum BufferKind {
     /// [`JitterBuffer::new`].
     Plain,
-    /// [`JitterBuffer::local_capture`].
-    LocalCapture,
     /// [`JitterBuffer::vban_leg`].
     VbanLeg,
     /// [`JitterBuffer::card_capture`]: the same resampler leg, fed by the cutters' card.
@@ -262,8 +254,6 @@ pub enum BufferKind {
 enum FillPolicy {
     /// [`JitterBuffer::new`]: pop whatever is queued, zero-pad, drop down to the cap.
     Plain,
-    /// [`JitterBuffer::local_capture`]: `priming` = waiting to (re)fill to `target` before audio flows.
-    LocalCapture { target: usize, priming: bool },
     /// [`JitterBuffer::vban_leg`] / [`JitterBuffer::card_capture`]: the fixed target fill and the
     /// resampler (issues 1401 + 1461), and which of the two it is.
     Network(Box<NetworkFill>, BufferKind),
@@ -286,20 +276,6 @@ impl JitterBuffer {
             last_peak: 0,
             origin: None,
             fanned: false,
-        }
-    }
-
-    /// A LOCAL-CAPTURE buffer (see the type doc): holds `target_frames` of audio, prefills to it
-    /// before the first pop and after every underrun, and drops back to it when it would exceed
-    /// `cap_frames`. The target is clamped into `1..=cap_frames`.
-    pub fn local_capture(cap_frames: usize, target_frames: usize) -> Self {
-        let cap = cap_frames.max(1);
-        JitterBuffer {
-            policy: FillPolicy::LocalCapture {
-                target: target_frames.clamp(1, cap),
-                priming: true,
-            },
-            ..JitterBuffer::new(cap)
         }
     }
 
@@ -354,7 +330,6 @@ impl JitterBuffer {
     pub fn kind(&self) -> BufferKind {
         match self.policy {
             FillPolicy::Plain => BufferKind::Plain,
-            FillPolicy::LocalCapture { .. } => BufferKind::LocalCapture,
             FillPolicy::Network(_, kind) => kind,
         }
     }
@@ -402,8 +377,8 @@ impl JitterBuffer {
     }
 
     /// Push a decoded packet's planar audio received at `now`, counting one packet and at most one
-    /// overrun. On overrun the plain policy drops the oldest samples down to the cap; the
-    /// local-capture and VBAN-leg policies drop them down to the target.
+    /// overrun. On overrun the plain policy drops the oldest samples down to the cap; a resampler
+    /// leg resyncs them down to its target.
     ///
     /// VBAN-leg policy: a packet after more than [`STALE_STREAM_MS`] of silence (a muted cambox
     /// unmuted, a restarted sender) counts one stall and starts the leg over — the tail left from
@@ -457,13 +432,9 @@ impl JitterBuffer {
                 overran = true;
             }
         } else {
-            let keep = match self.policy {
-                FillPolicy::LocalCapture { target, .. } => target,
-                _ => self.cap_frames,
-            };
             for q in &mut self.channels {
                 if q.len() > self.cap_frames {
-                    let drop = q.len() - keep;
+                    let drop = q.len() - self.cap_frames;
                     q.drain(0..drop);
                     overran = true;
                 }
@@ -492,16 +463,15 @@ impl JitterBuffer {
 
     /// Pop one block of `frames` frames as planar channels at `now`.
     ///
-    /// Plain policy: pad any short channel with silence. Local-capture policy: while priming, or
-    /// when fewer than `frames` are queued, output a WHOLE silent block and consume nothing (the
-    /// queued voice is kept for when the buffer has refilled to the target). Resampler-leg policy:
-    /// the same whole-silent-block rule (one block per underrun, then re-prime), and every audio
-    /// block rendered by the resampler from the leg's read point ([`crate::asrc::render`]).
+    /// Plain policy: pad any short channel with silence. Resampler-leg policy: while priming, or
+    /// when fewer frames are queued than one block needs, output a WHOLE silent block and consume
+    /// nothing (one block per underrun, then re-prime), and every audio block rendered by the
+    /// resampler from the leg's read point ([`crate::asrc::render`]).
     ///
     /// ONE underrun is counted when a stream runs short — only a PREVIOUSLY-LIVE (at least one packet)
-    /// and NOT STALE ([`STALE_STREAM_MS`]) stream; a local-capture or VBAN-leg buffer counts it once
-    /// on entering the refill wait, not once per silent block. A VBAN leg counts it at its next
-    /// packet, and only if that packet continues the stream (see [`JitterBuffer::push_at`]).
+    /// and NOT STALE ([`STALE_STREAM_MS`]) stream; a resampler leg counts it once on entering the
+    /// refill wait, at its next packet, and only if that packet continues the stream (see
+    /// [`JitterBuffer::push_at`]).
     pub fn pop_block_at(&mut self, frames: usize, now: Instant) -> Vec<Vec<i16>> {
         let n_ch = self.channels.len().max(1);
         let countable = self.last_rx.is_some() && !self.is_stale_at(now);
@@ -543,30 +513,6 @@ impl JitterBuffer {
                     out
                 }
             };
-        }
-
-        if let FillPolicy::LocalCapture { target, priming } = &mut self.policy {
-            let target = *target;
-            // Refill to the target — and to at least one whole block, so a target below the block
-            // size can never flap between "refilled" and "ran dry" on the same pop.
-            if *priming && buffered >= target.max(frames) {
-                *priming = false;
-            }
-            if !*priming && buffered < frames {
-                // Ran dry: one underrun, then wait to refill to the target.
-                *priming = true;
-                if countable {
-                    self.underruns += 1;
-                }
-            }
-            if *priming {
-                return vec![vec![0i16; frames]; n_ch];
-            }
-            return self
-                .channels
-                .iter_mut()
-                .map(|q| q.drain(0..frames).collect())
-                .collect();
         }
 
         let mut out = Vec::with_capacity(n_ch);
