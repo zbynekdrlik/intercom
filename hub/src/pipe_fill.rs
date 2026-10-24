@@ -437,3 +437,43 @@ pub fn stretch_interleaved(interleaved: &[i16], channels: usize, out_frames: usi
     }
     out
 }
+
+/// The samples side of one egress pipe (issue 1461): the hub blocks given to the pipe, and what
+/// each planned write ([`PipeFillControl::plan_block`]) puts into the pipe, as interleaved PCM16.
+/// Pure, so a two-clock bench can push a tone through the real controller and grade what the
+/// reader would play.
+#[derive(Debug, Clone)]
+pub struct EgressQueue {
+    channels: usize,
+}
+
+impl EgressQueue {
+    /// A queue for `channels` interleaved channels.
+    pub fn new(channels: usize) -> Self {
+        EgressQueue {
+            channels: channels.max(1),
+        }
+    }
+
+    /// The interleaved samples the write `report` (planned for `block`) puts into the pipe, or
+    /// `None` when the block is not written (a trim or the start hold).
+    pub fn render(&mut self, report: &PipeWriteReport, block: &[i16]) -> Option<Vec<i16>> {
+        let n = self.channels;
+        let frames = block.len() / n;
+        let block = &block[..frames * n];
+        match report.plan {
+            PipeFillPlan::Drop | PipeFillPlan::StartHold => None,
+            PipeFillPlan::Write => Some(block.to_vec()),
+            PipeFillPlan::ServoDrop | PipeFillPlan::ServoRepeat => Some(stretch_interleaved(
+                block,
+                n,
+                report.plan.written_frames(frames),
+            )),
+            PipeFillPlan::TopUp { silence_frames } => {
+                let mut out = vec![0i16; silence_frames * n];
+                out.extend_from_slice(block);
+                Some(out)
+            }
+        }
+    }
+}

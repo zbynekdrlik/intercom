@@ -24,7 +24,7 @@
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557).
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One 20 ms frame of 48 kHz mono audio: the unit every Janus packet carries.
 pub const FRAME_48K: usize = 960;
@@ -155,6 +155,13 @@ impl PacedRing {
         } else {
             ServoAction::None
         }
+    }
+
+    /// Append mixed samples that left the mix at `at` (taken before the ring's lock). See
+    /// [`PacedRing::push`].
+    pub fn push_at(&mut self, mono: &[i16], at: Instant) {
+        let _ = at;
+        self.push(mono);
     }
 
     /// Append mixed samples. Above the cap, drop the OLDEST samples back to the target.

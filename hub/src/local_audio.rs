@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::alsa_card::PcmFormat;
-use crate::pipe_fill::{stretch_interleaved, PipeFillControl, PipeServoDepth};
+use crate::pipe_fill::{stretch_interleaved, EgressQueue, PipeFillControl, PipeServoDepth};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
 // The pipe's fill controller (and the graph quantum it is built on) lives in `pipe_fill`; these
@@ -154,6 +154,8 @@ pub struct PipeFillWriter<W> {
     /// every pw-cat pipe, whose bytes stay exactly as before.
     format: PcmFormat,
     control: PipeFillControl,
+    /// The samples each planned write puts into the pipe.
+    queue: EgressQueue,
     /// The controller's clock: nanoseconds since this writer (this pw-cat child) was created.
     epoch: Instant,
 }
@@ -173,6 +175,7 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
             channels: usize::from(channels.max(1)),
             format: PcmFormat::S16Le,
             control,
+            queue: EgressQueue::new(usize::from(channels.max(1))),
             epoch: Instant::now(),
         }
     }
@@ -216,8 +219,12 @@ impl<W: Write + AsFd> PipeFillWriter<W> {
         let report = self
             .control
             .plan_block(self.now_ns(), fill_frames, block_frames);
-        if let Some(bytes) = pipe_write_bytes(report.plan, interleaved, self.channels) {
-            self.pipe.write_all(&self.format.from_s16le_bytes(bytes))?;
+        if let Some(samples) = self.queue.render(&report, interleaved) {
+            self.pipe.write_all(
+                &self
+                    .format
+                    .from_s16le_bytes(interleaved_to_le_bytes(&samples)),
+            )?;
         }
         Ok(report)
     }

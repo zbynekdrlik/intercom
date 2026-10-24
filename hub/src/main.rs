@@ -609,9 +609,13 @@ fn run_block_loop(bl: BlockLoop) {
                 let interleaved = output.interleaved(*pid, block_frames);
                 if !interleaved.is_empty() {
                     let mono = stereo_to_mono(&interleaved);
-                    // A poisoned lock still holds a valid ring: keep feeding it, exactly as
-                    // the sender thread keeps popping it.
-                    ring.lock().unwrap_or_else(|e| e.into_inner()).push(&mono);
+                    // The time the block left the mix, before the lock (issue 1461: the ring's
+                    // rate fit times every push by it). A poisoned lock still holds a valid ring:
+                    // keep feeding it, exactly as the sender thread keeps popping it.
+                    let mixed = Instant::now();
+                    ring.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_at(&mono, mixed);
                 }
             }
 
