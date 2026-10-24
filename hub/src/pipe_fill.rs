@@ -80,7 +80,8 @@ pub const PIPE_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 /// a quantum plus 1.5 and 2.5 blocks, depending on where pw-cat's first read falls inside a hub
 /// block (1664..1920 frames); the middle of that, over every such phase, is the prime minus half a
 /// quantum: 2048 + 256 - 512 = 1792 frames (37.3 ms) at the 256-frame hub block. A spawn starts
-/// within half a block (+-128 frames) of it, inside the phase term's dead band (+-448).
+/// within half a block (+-128 frames) of it, inside the phase term's dead band (+-448). The
+/// resampler's queue holds its 16-frame look-ahead (0.33 ms) on top of the pipe.
 pub const fn pipe_setpoint(block_frames: usize) -> usize {
     pipe_setpoint_for(block_frames, PW_GRAPH_BURST_FRAMES)
 }
@@ -108,7 +109,9 @@ pub const fn pipe_setpoint_for(block_frames: usize, read_frames: usize) -> usize
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeFillPlan {
     /// The pipe is starved (or freshly spawned) and holds less than one hub block: write
-    /// `silence_frames` of silence (up to [`PIPE_TARGET_FRAMES`]), then the rendered audio.
+    /// `silence_frames` of silence, then the rendered audio, together the target plus one block
+    /// (the prime also carries a reader's own buffer). On the prime the silence is the target plus
+    /// the resampler's 16-frame look-ahead, which the first rendered block falls short of a block.
     TopUp { silence_frames: usize },
     /// The pipe holds more than [`PIPE_HIGH_FRAMES`]: drop the block (a trim).
     Drop,
@@ -501,6 +504,16 @@ impl PipeFillControl {
                 }
                 guard
             }
+        };
+        // A top-up's silence also covers what the rendered audio falls short of a whole block (the
+        // resampler's 16-frame look-ahead on the prime), so it always leaves the target plus one
+        // block: the first read finds the same prime as before the resampler, and the setpoint is
+        // still the time-average the start hold leaves.
+        let plan = match plan {
+            PipeFillPlan::TopUp { silence_frames } => PipeFillPlan::TopUp {
+                silence_frames: silence_frames + block_frames.saturating_sub(frames),
+            },
+            other => other,
         };
         let report = PipeWriteReport {
             fill_frames,
