@@ -91,7 +91,9 @@ the hub loads the new one), then restart the hub. strih-pp first. Live check: `c
 http://<box>:8790/api/state | jq '.participants[] | select(.name=="cutters") | .alsa'` -> present, both
 sides `running: true`, the format; the journal shows `card leg cutters aplay opens hw:CARD=...` once per
 side; xruns flat; talkback + headphones checked by ear. Rollback: the TOML adapter back to `pipewire`
-with the old node keys (listed in the converter's docstring and the strih-pp TOML header).
+with the old node keys (listed in the converter's docstring and the strih-pp TOML header). On a box the
+issue-1440 purge ran on (strih-snv, and strih-pp since 24.10.2026) PipeWire must be reinstalled first
+(`.claude/rules/strih-pipewire-purge.md` "Rollback").
 
 ## Tests + Tier-0
 
