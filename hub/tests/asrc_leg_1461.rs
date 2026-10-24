@@ -172,7 +172,7 @@ fn grade(out: &[i16], ppm: f64) -> (f64, usize, usize) {
     let mut worst = f64::NEG_INFINITY;
     let mut over = 0;
     let mut windows = 0;
-    for chunk in out.chunks_exact(WINDOW) {
+    for chunk in out.as_chunks::<WINDOW>().0 {
         let x: Vec<f64> = chunk.iter().map(|&v| f64::from(v)).collect();
         let db = thd_n_db(&x, w0);
         worst = worst.max(db);
