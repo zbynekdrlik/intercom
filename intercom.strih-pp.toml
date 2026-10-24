@@ -15,7 +15,8 @@
 # PipeWire node. A card that leaves USB is the leg DOWN, never a fallback: on 22.10.2026 the pw-cat legs
 # re-routed into the `strih-program` sink while the MG-XU was unplugged. Rollback: adapter = "pipewire" with
 # pipewire_target/source = "alsa_output/alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo" and
-# pipewire_channel_map = "FL,FR".
+# pipewire_channel_map = "FL,FR" -- since 24.10.2026 that rollback also needs PipeWire reinstalled first (the
+# issue-1440 purge removed it; .claude/rules/strih-pipewire-purge.md "Rollback").
 # 24.10.2026 (issue 1461): every ingress leg crosses its sender's clock with the hub's resampler and holds a
 # FIXED target depth, `target_ms` rounded up to whole 256-frame blocks and read at start only: the cameras
 # 16 ms (3 blocks), lv1 37.33 ms (7 blocks), the MG-XU capture 42.67 ms (8 blocks).
