@@ -3,7 +3,7 @@
 //! ([`intercom_hub::vban_jitter::NetworkFill`]).
 //!
 //! Part 1 pins the resampler itself: phase 0 at ratio 1 is the identity, every phase has DC gain
-//! 1, a sine read at any ratio inside +-500 ppm lands on the continuous sine, and rendering in
+//! 1, a sine read at any ratio inside the +-1000 ppm clamp lands on the continuous sine, and rendering in
 //! blocks equals rendering in one pass (the fractional read phase carries across blocks).
 //!
 //! Part 2 is the two-clock bench on frame counts: a sender `ppm` off the hub's clock delivers
@@ -93,7 +93,9 @@ fn a_sine_read_at_any_ratio_lands_on_the_continuous_sine() {
         let input: Vec<i16> = (0..12_000)
             .map(|n| sine(n as f64, hz, amp).round() as i16)
             .collect();
-        for ppm in [-500.0, -137.0, -50.0, 0.0, 50.0, 137.0, 500.0] {
+        for ppm in [
+            -1000.0, -500.0, -137.0, -50.0, 0.0, 50.0, 137.0, 540.0, 1000.0,
+        ] {
             for start in [0.0, 0.25, 0.37, 0.999] {
                 let read = ReadPoint {
                     pos: ASRC_HISTORY as f64 + start,
@@ -512,10 +514,20 @@ fn a_lost_hub_tick_is_given_up_at_once_and_the_depth_stays() {
 }
 
 #[test]
+fn the_cam1_headset_adc_at_plus_540ppm_holds_its_depth_for_two_hours() {
+    // The measured cam1 ADC (48 026 samples/s, issue 1345): inside the 1000 ppm clamp, so no
+    // resync, ever (review round 1: the design's 500 ppm clamp would have cut it every ~13 min).
+    let sc = cambox(540.0, 2.0, 9);
+    let o = run(&sc);
+    assert_held(&sc, &o);
+    assert!((o.final_rate_ppm - 540.0).abs() < 3.0, "{o:?}");
+}
+
+#[test]
 fn a_sender_past_the_clamp_is_counted_never_adapted_to() {
-    // 600 ppm is 100 ppm past the clamp: the leg keeps drifting high, and the cap answers it with
+    // 1100 ppm is 100 ppm past the clamp: the leg keeps drifting high, and the cap answers it with
     // counted resyncs back to the SAME target, never a moved target.
-    let sc = cambox(600.0, 1.0, 8);
+    let sc = cambox(1100.0, 1.0, 8);
     let o = run(&sc);
     assert!(o.resyncs > 0, "{o:?}");
     assert!(!o.target_moved);

@@ -375,11 +375,10 @@ fn mono_cambox_leg_8h_at_plus_and_minus_20ppm_never_underruns() {
 }
 
 #[test]
-fn cambox_headset_adc_at_the_500ppm_clamp_is_absorbed_for_an_hour() {
-    // The cam1 headset ADC measured 48 026 samples/s against the hub (issue 1345, +540 ppm): the
-    // resampler's ratio is clamped to +-500 ppm (issue 1461), so the bench runs the clamp itself.
-    // A sender past it is counted, never adapted to (`asrc_1461.rs`).
-    let sc = Scenario::new(CAMBOX, 500.0, 1.0, 3600.0, 5);
+fn cambox_headset_adc_at_plus_540ppm_is_absorbed_for_an_hour() {
+    // The cam1 headset ADC measured 48 026 samples/s against the hub (issue 1345): with no rate
+    // handling that was one overrun every ~5 s. The resampler (clamp 1000 ppm) follows it.
+    let sc = Scenario::new(CAMBOX, 540.0, 1.0, 3600.0, 5);
     let o = run(&sc);
     assert_clean(&sc, &o, 3.0);
 }
@@ -414,10 +413,10 @@ fn missed_hub_ticks_are_read_past_at_once_and_the_depth_stays() {
 
 #[test]
 fn frequent_missed_ticks_never_disturb_the_rate() {
-    // A hub that misses a tick every 0.5 s while a cambox ADC runs at the +500 ppm clamp: the rate
-    // fit times every packet on the hub's clock, so the missed blocks never bend it, and the drift
+    // A hub that misses a tick every 0.5 s while the cam1 ADC runs +540 ppm fast: the rate fit
+    // times every packet on the hub's clock, so the missed blocks never bend it, and the drift
     // never piles up into resyncs.
-    let mut sc = Scenario::new(CAMBOX, 500.0, 1.0, 600.0, 13);
+    let mut sc = Scenario::new(CAMBOX, 540.0, 1.0, 600.0, 13);
     sc.hub_skip_every_s = Some(0.5);
     let o = run(&sc);
     assert_clean(&sc, &o, 3.0);
