@@ -62,6 +62,7 @@ fn facet(rate_ppm: f64, resyncs: u64, stalls: u64) -> JitterFacet {
         depth_frames: 790,
         depth_min_frames: 610,
         rate_ppm,
+        rate_fit_ppm: Some(rate_ppm),
         asrc_phase_frames: 22.0,
         resyncs,
         stalls,
@@ -85,6 +86,7 @@ fn a_resampler_leg_reports_its_jitter_facet_and_the_others_do_not() {
     assert_eq!(j["depth_frames"], 790);
     assert_eq!(j["depth_min_frames"], 610);
     assert_eq!(j["rate_ppm"], 12.5);
+    assert_eq!(j["rate_fit_ppm"], 12.5);
     assert_eq!(j["asrc_phase_frames"], 22.0);
     assert_eq!(j["resyncs"], 3);
     assert_eq!(j["stalls"], 2);
@@ -136,7 +138,7 @@ fn the_status_line_shows_each_live_legs_resampler_and_the_resyncs() {
     // Issue 1461: per leg that has received audio, where its clock sits against the hub's
     // (`rate_ppm`), how far its depth is off the fixed target (`asrc_phase_frames`), its underruns
     // and resyncs; the resyncs also lead as a total naming the worst leg. A leg that never received
-    // a packet (fohabl here) shows no group.
+    // a packet (fohabl here) shows no group, nor one that is not playing now.
     let stats = vec![
         RuntimeStats {
             rx_packets: 100,
@@ -151,6 +153,11 @@ fn the_status_line_shows_each_live_legs_resampler_and_the_resyncs() {
         },
     ];
     let line = HubState::snapshot(&matrix(), "v", &stats).status_line();
+    // A leg that is not playing now (re-priming, muted) shows no group either.
+    let mut quiet = stats.clone();
+    quiet[0].jitter = quiet[0].jitter.map(|j| JitterFacet { primed: false, ..j });
+    let quiet_line = HubState::snapshot(&matrix(), "v", &quiet).status_line();
+    assert!(!quiet_line.contains("asrc="), "got: {quiet_line}");
     assert!(
         line.contains(" asrc=cam1:rate_ppm=+12.5:asrc_phase_frames=+22.0:underruns=1:resyncs=2"),
         "got: {line}"
@@ -257,6 +264,7 @@ fn the_facet_takes_the_controllers_numbers() {
         depth_frames: 1800,
         depth_min_frames: 1500,
         rate_ppm: 0.4,
+        rate_fit_ppm: None,
         asrc_phase_frames: 8.0,
         resyncs: 1,
         stalls: 2,
@@ -267,6 +275,7 @@ fn the_facet_takes_the_controllers_numbers() {
         (1792, 1800, 1500)
     );
     assert_eq!((f.rate_ppm, f.asrc_phase_frames), (0.4, 8.0));
+    assert_eq!(f.rate_fit_ppm, None, "no fit yet");
     assert_eq!((f.resyncs, f.stalls, f.primed), (1, 2, true));
 }
 

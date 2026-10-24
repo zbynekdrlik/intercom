@@ -387,8 +387,11 @@ fn spawn_vban_receive(
                         audio,
                         sample_rate: rate,
                     } => {
+                        // The arrival time, before any lock: the resampler leg's rate fit times
+                        // every packet by it (issue 1461).
+                        let arrived = Instant::now();
                         if let Some(rejects) = decode_rejects.get_mut(id) {
-                            note_decoded(rejects, &audio.stream_name, from, Instant::now());
+                            note_decoded(rejects, &audio.stream_name, from, arrived);
                         }
                         let Some(conv) = converters.get_mut(id) else {
                             continue;
@@ -402,7 +405,7 @@ fn spawn_vban_receive(
                             // same lock every block (issue 1401). Nothing is logged under it.
                             if let Ok(mut jb) = jitter.lock() {
                                 if let Some(b) = jb.get_mut(id) {
-                                    b.push(&audio);
+                                    b.push_at(&audio, arrived);
                                 }
                             }
                         }

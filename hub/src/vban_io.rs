@@ -238,6 +238,8 @@ pub struct JitterBuffer {
     last_peak: i16,
     /// The resampler leg's time origin: its arrival times are seconds after this (issue 1461).
     origin: Option<Instant>,
+    /// The last packet was mono fanned into ch2: a pop renders ch1 once and copies it.
+    fanned: bool,
 }
 
 /// Which fill policy a [`JitterBuffer`] runs (see the type doc), as [`JitterBuffer::kind`] reports it.
@@ -281,6 +283,7 @@ impl JitterBuffer {
             last_rx: None,
             last_peak: 0,
             origin: None,
+            fanned: false,
         }
     }
 
@@ -423,6 +426,8 @@ impl JitterBuffer {
                 now.saturating_duration_since(origin).as_secs_f64(),
             );
         }
+        // Fanned only while every packet since the queues were last emptied was a fanned mono one.
+        self.fanned = fan_mono && (self.fanned || self.channels.is_empty());
         self.ensure_channels(n_ch);
         for (c, q) in self.channels.iter_mut().enumerate().take(n_ch) {
             let src = if fan_mono { 0 } else { c };
@@ -505,17 +510,29 @@ impl JitterBuffer {
                     skip,
                     read,
                     consume,
-                } => self
-                    .channels
-                    .iter_mut()
-                    .map(|q| {
+                } => {
+                    for q in &mut self.channels {
                         q.drain(0..skip);
-                        let mut block = vec![0i16; frames];
-                        asrc::render(read, q.make_contiguous(), &mut block);
+                        q.make_contiguous();
+                    }
+                    // A fanned mono packet put the same samples in ch1 and ch2: render once.
+                    let distinct = if self.fanned { 1 } else { n_ch };
+                    let inputs: Vec<&[i16]> = self
+                        .channels
+                        .iter()
+                        .take(distinct)
+                        .map(|q| q.as_slices().0)
+                        .collect();
+                    let mut out = vec![vec![0i16; frames]; distinct];
+                    asrc::render_planar(read, &inputs, &mut out);
+                    while out.len() < n_ch {
+                        out.push(out[0].clone());
+                    }
+                    for q in &mut self.channels {
                         q.drain(0..consume);
-                        block
-                    })
-                    .collect(),
+                    }
+                    out
+                }
             };
         }
 

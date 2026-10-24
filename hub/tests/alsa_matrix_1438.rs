@@ -171,6 +171,25 @@ fn one_participant_per_card_device_and_the_keys_only_on_alsa() {
 }
 
 #[test]
+fn target_ms_is_refused_on_an_output_only_participant() {
+    // Issue 1461 review round 1: a target on a participant with no ingress would be silently
+    // ignored; the loader refuses it instead.
+    let err = refused(
+        r#"
+[[participant]]
+name = "speakers"
+role = "speakers"
+adapter = "alsa"
+alsa_card = "SPK"
+target_ms = 16.0
+in_channels = 0
+out_channels = 2
+"#,
+    );
+    assert!(err.contains("target_ms is only for"), "{err}");
+}
+
+#[test]
 fn the_card_legs_capture_gets_the_card_resampler_leg() {
     // Issue 1461: the card's crystal is a foreign clock, so its capture is crossed by the same
     // resampler leg as a VBAN leg (it had the issue-1345 local-capture ring with no rate handling).

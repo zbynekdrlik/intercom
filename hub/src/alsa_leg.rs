@@ -402,9 +402,12 @@ fn alsa_capture_loop(
                 channels: planar,
                 frames,
             };
+            // The arrival time, before the lock: the card leg's rate fit times every block by it
+            // (issue 1461).
+            let arrived = Instant::now();
             if let Ok(mut jb) = jitter.lock() {
                 if let Some(b) = jb.get_mut(spec.participant) {
-                    b.push(&audio);
+                    b.push_at(&audio, arrived);
                 }
             }
             stats.record_rx();

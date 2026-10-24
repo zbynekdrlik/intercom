@@ -204,7 +204,7 @@ fn a_slow_cambox_is_resampled_never_a_frame_repeated() {
 }
 
 #[test]
-fn a_cambox_at_the_clamp_is_resampled_never_a_frame_inserted_or_dropped() {
+fn a_cambox_at_500ppm_is_resampled_never_a_frame_inserted_or_dropped() {
     assert_clean(500.0);
     assert_clean(-500.0);
 }

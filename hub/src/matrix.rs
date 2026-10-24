@@ -431,16 +431,18 @@ impl Matrix {
                     p.adapter
                 );
             }
-            // The ingress resampler leg's fixed target (issue 1461): only where there is one.
+            // The ingress resampler leg's fixed target (issue 1461): only where there is one (a
+            // VBAN leg, or a card / PipeWire capture), never on an output-only participant.
             if let Some(ms) = p.target_ms {
-                if p.adapter != ADAPTER_VBAN
-                    && p.adapter != ADAPTER_ALSA
-                    && p.adapter != ADAPTER_PIPEWIRE
-                {
+                let capture = (p.adapter == ADAPTER_ALSA || p.adapter == ADAPTER_PIPEWIRE)
+                    && p.in_channels > 0
+                    && p.role != PROGRAM_OUT_ROLE;
+                if p.adapter != ADAPTER_VBAN && !capture {
                     bail!(
-                        "participant '{}': target_ms is only for a vban / alsa / pipewire ingress (got '{}')",
+                        "participant '{}': target_ms is only for a vban leg or a capture input (got adapter '{}' with {} in_channels)",
                         p.name,
-                        p.adapter
+                        p.adapter,
+                        p.in_channels
                     );
                 }
                 if crate::vban_jitter::target_frames_from_ms(

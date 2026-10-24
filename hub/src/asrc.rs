@@ -45,11 +45,17 @@ pub const ASRC_HISTORY: usize = ASRC_TAPS / 2 - 1;
 /// Input frames the filter reads ahead of the read point.
 pub const ASRC_LOOKAHEAD: usize = ASRC_TAPS / 2;
 
-/// The ratio is clamped to `1 +- ASRC_MAX_PPM * 1e-6`.
-pub const ASRC_MAX_PPM: f64 = 500.0;
+/// The ratio is clamped to `1 +- ASRC_MAX_PPM * 1e-6`. 1000 ppm, the range the issue-1401 servo
+/// covered (977 ppm): the cam1 headset ADC measured +540 ppm (`capture 48026 samp/s`, 19.9.2026),
+/// so the design's +-500 would have left it ~1.9 frames/s of uncorrected drift and a counted resync
+/// (a ~32 ms cut of the talkback) every ~13 min (issue 1461 review round 1). The filter is the same
+/// at either clamp.
+pub const ASRC_MAX_PPM: f64 = 1000.0;
 
-/// The Kaiser shape of the prototype: about 100 dB of stop band; a fractional read lands within
-/// -97 dB of the continuous signal up to 10 kHz (-88 dB at 16 kHz). Beta 8 left -82 dB.
+/// The Kaiser shape of the prototype. The cut-off is the input Nyquist (24 kHz) and the 32 taps
+/// leave a transition of about 19-29 kHz, so the ~100 dB stop band starts near 29 kHz (images of
+/// program content up to ~19 kHz). A fractional read lands within -97 dB of the continuous signal
+/// up to 10 kHz (-88 dB at 16 kHz); beta 8 left -82 dB at 1 kHz.
 pub const ASRC_KAISER_BETA: f64 = 10.0;
 
 /// The rate fit's window in 1 s bins.
@@ -99,6 +105,12 @@ fn table() -> &'static [f64] {
         }
         t
     })
+}
+
+/// Build the polyphase table now. The first render would otherwise build it (4097 Kaiser taps,
+/// ~0.4 ms) on the real-time hub-mix thread; every leg constructor calls this at start.
+pub fn warm() {
+    let _ = table();
 }
 
 /// The coefficients for a read position `frac` (0..1) past an input frame: the two neighbouring
@@ -180,6 +192,20 @@ fn for_each_frame(
     }
 }
 
+/// One output sample: the 32 coefficients over the 32 input frames from `base`, or `None` when the
+/// taps run past the input. Eight partial sums, so the compiler can keep them in vector lanes (a
+/// single running sum is a serial chain it may not reorder).
+fn dot(c: &[f64; ASRC_TAPS], input: &[i16], base: usize) -> Option<i16> {
+    let x: &[i16; ASRC_TAPS] = input.get(base..base + ASRC_TAPS)?.try_into().ok()?;
+    let mut acc = [0.0f64; 8];
+    for (cs, xs) in c.chunks(8).zip(x.chunks(8)) {
+        for ((a, &c), &x) in acc.iter_mut().zip(cs).zip(xs) {
+            *a += c * f64::from(x);
+        }
+    }
+    Some(to_i16(acc.iter().sum()))
+}
+
 fn to_i16(acc: f64) -> i16 {
     acc.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
@@ -189,10 +215,20 @@ fn to_i16(acc: f64) -> i16 {
 /// [`ReadPoint::frames_needed`] first, so this never happens on a planned pop).
 pub fn render(read: ReadPoint, input: &[i16], out: &mut [i16]) {
     for_each_frame(read, out.len(), |k, base, c| {
-        out[k] = match input.get(base..base + ASRC_TAPS) {
-            Some(x) => to_i16(c.iter().zip(x).map(|(c, &x)| c * f64::from(x)).sum()),
-            None => 0,
-        };
+        out[k] = dot(c, input, base).unwrap_or(0);
+    });
+}
+
+/// Render several planar channels at once: `outs[ch]` from `inputs[ch]`, every output as long as
+/// the first. The coefficients are computed once per frame for every channel (the hub's pop path).
+pub fn render_planar(read: ReadPoint, inputs: &[&[i16]], outs: &mut [Vec<i16>]) {
+    let frames = outs.first().map_or(0, Vec::len);
+    for_each_frame(read, frames, |k, base, c| {
+        for (input, out) in inputs.iter().zip(outs.iter_mut()) {
+            if let Some(slot) = out.get_mut(k) {
+                *slot = dot(c, input, base).unwrap_or(0);
+            }
+        }
     });
 }
 
@@ -292,6 +328,10 @@ impl RateControl {
     /// The stream restarted (a stall, a reshaped sender): its arrival series starts over. The
     /// ratio is kept (the sender's clock did not change) and held until the next fit.
     pub fn restart(&mut self) {
+        self.err_frames = 0;
+        self.err_sum = 0.0;
+        self.err_n = 0;
+        self.phasing = false;
         self.bins.clear();
         self.bin = None;
         self.bin_n = 0;

@@ -784,9 +784,11 @@ fn local_source_loop(
                         channels: planar,
                         frames,
                     };
+                    // The arrival time, before the lock (issue 1461: the capture's rate fit).
+                    let arrived = Instant::now();
                     if let Ok(mut jb) = jitter.lock() {
                         if let Some(b) = jb.get_mut(cfg.participant_id) {
-                            b.push(&audio);
+                            b.push_at(&audio, arrived);
                         }
                     }
                     stats.rx_blocks.fetch_add(1, Ordering::Relaxed);

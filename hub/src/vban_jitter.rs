@@ -33,7 +33,7 @@
 //! Pure and std-only, so it verifies with a rustc `--test` replica under Tier-0 (issue 557), and
 //! the hours-long two-clock bench runs on frame counts alone.
 
-use crate::asrc::{RateControl, ReadPoint, ASRC_HISTORY};
+use crate::asrc::{RateControl, ReadPoint, ASRC_HISTORY, ASRC_LOOKAHEAD};
 
 /// The hub rate every leg runs at unless told otherwise (`[hub] sample_rate`).
 pub const HUB_RATE_HZ: u32 = 48_000;
@@ -71,7 +71,10 @@ pub const VBAN_PROGRAM_TARGET_BLOCKS: usize = 7;
 pub const VBAN_PROGRAM_CAP_BLOCKS: usize = vban_cap_blocks(VBAN_PROGRAM_TARGET_BLOCKS);
 
 /// The default target depth of the cutters' card capture: 2048 frames (42.7 ms), the depth the
-/// issue-1345 capture ring held for the card's 1024-frame bursts (two bursts).
+/// issue-1345 capture ring held (two of a `pw-cat --record` child's 1024-frame bursts), kept by issue
+/// 1461 lane 1. The deployed `alsa` adapter's `arecord` delivers one 256-frame ALSA period at a time,
+/// so a smaller target (3-4 blocks) is likely enough for it: lower it per box with `target_ms` once
+/// the live capture jitter is read (the cutters' talkback to the cameramen carries all of it).
 pub const CARD_CAPTURE_TARGET_FRAMES: usize = 2048;
 
 /// The largest `target_ms` a participant may declare.
@@ -117,6 +120,9 @@ pub struct NetworkFillStats {
     /// The resampler's ratio in ppm off 1: the sender's clock against the hub's, plus the phase
     /// term while the depth sits outside the dead band.
     pub rate_ppm: f64,
+    /// The last least-squares fit of the sender's rate in ppm off the hub's, `None` before the
+    /// first fit after a (re)start. Past the clamp the two differ (the fit says how far).
+    pub rate_fit_ppm: Option<f64>,
     /// The mean depth of the last second minus the target, in frames: what the phase term acts on
     /// outside +-1/4 of the target.
     pub asrc_phase_frames: f64,
@@ -139,6 +145,8 @@ pub struct NetworkFill {
     live: bool,
     read: ReadPoint,
     rate: RateControl,
+    /// The hub rate (output frames per second): the depth statistics' 1 s window.
+    hub_rate: usize,
     /// Input frames received since the last restart (the rate fit's arrival series).
     arrived: u64,
     win_sum: f64,
@@ -161,6 +169,7 @@ impl NetworkFill {
     /// [`NetworkFill::new`] for a hub running at `rate` Hz.
     pub fn with_rate(target_frames: usize, cap_frames: usize, rate: u32) -> Self {
         let cap = cap_frames.max(1);
+        crate::asrc::warm();
         NetworkFill {
             target: target_frames.clamp(1, cap),
             cap,
@@ -168,6 +177,7 @@ impl NetworkFill {
             live: false,
             read: ReadPoint::at_prime(1.0),
             rate: RateControl::new(rate),
+            hub_rate: rate.max(1) as usize,
             arrived: 0,
             win_sum: 0.0,
             win_min: f64::INFINITY,
@@ -238,6 +248,7 @@ impl NetworkFill {
         self.arrived = 0;
         self.rate.restart();
         self.restart_window();
+        self.forget_depth();
     }
 
     /// The stream came back after going stale and its buffer was emptied: one more stall, then
@@ -262,7 +273,11 @@ impl NetworkFill {
             .unwrap_or(usize::MAX)
             .saturating_mul(frames);
         let (next, consume) = self.read.advanced(lost);
-        let floor = self.target.saturating_sub(frames / 2).max(frames) as f64;
+        // Never below what the next pop needs, so the give-up never causes an underrun itself.
+        let floor = self
+            .target
+            .saturating_sub(frames / 2)
+            .max(frames + ASRC_LOOKAHEAD + 1) as f64;
         if next.depth(fill.saturating_sub(consume)) >= floor {
             self.read = next;
             return consume;
@@ -309,6 +324,7 @@ impl NetworkFill {
             self.arrived = 0;
             self.rate.restart();
             self.restart_window();
+            self.forget_depth();
             return PopPlan::Silent { ran_dry: true };
         }
         self.observe(self.read.depth(fill), frames);
@@ -339,12 +355,19 @@ impl NetworkFill {
         self.win_min = self.win_min.min(depth);
         self.win_pops += 1;
         self.win_frames = self.win_frames.saturating_add(frames);
-        if self.win_frames < HUB_RATE_HZ as usize {
+        if self.win_frames < self.hub_rate {
             return;
         }
         self.last_mean = self.win_sum / self.win_pops as f64;
         self.last_min = self.win_min;
         self.restart_window();
+    }
+
+    /// Forget the last second's depth (a stream ran dry or restarted): `/api/state` shows no stale
+    /// depth from before it.
+    fn forget_depth(&mut self) {
+        self.last_mean = 0.0;
+        self.last_min = 0.0;
     }
 
     /// Start the next 1 s window of the depth statistics.
@@ -363,6 +386,7 @@ impl NetworkFill {
             depth_frames: self.last_mean.max(0.0).round() as usize,
             depth_min_frames: self.last_min.max(0.0).round() as usize,
             rate_ppm: tenth(self.rate.rate_ppm()),
+            rate_fit_ppm: self.rate.fitted_ppm().map(tenth),
             asrc_phase_frames: if self.last_mean > 0.0 {
                 tenth(self.last_mean - self.target as f64)
             } else {

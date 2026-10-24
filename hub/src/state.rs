@@ -31,6 +31,9 @@ pub struct JitterFacet {
     /// The resampler's ratio in ppm off 1 (0.1 ppm resolution): the sender's clock against the
     /// hub's, plus the phase term while the depth sits outside +-1/4 of the target.
     pub rate_ppm: f64,
+    /// The last least-squares fit of the sender's rate in ppm (0.1 ppm), null before the first fit
+    /// after a (re)start. It differs from `rate_ppm` while the ratio follows it, or past the clamp.
+    pub rate_fit_ppm: Option<f64>,
     /// The last second's mean depth minus the target, in frames (0.1 resolution).
     pub asrc_phase_frames: f64,
     /// Times the queue went above its cap and was resynced to the target (each also counts in
@@ -163,6 +166,7 @@ impl From<NetworkFillStats> for JitterFacet {
             depth_frames: s.depth_frames,
             depth_min_frames: s.depth_min_frames,
             rate_ppm: s.rate_ppm,
+            rate_fit_ppm: s.rate_fit_ppm,
             asrc_phase_frames: s.asrc_phase_frames,
             resyncs: s.resyncs,
             stalls: s.stalls,
@@ -354,7 +358,7 @@ impl HubState {
     /// lost on every output; a tick it caught up is no loss and stays off the line), the VBAN
     /// packets dropped on a backed-up send socket as
     /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the resampler legs'
-    /// resyncs as `resyncs=N(<worst leg>)` and, for every leg that has received audio, its
+    /// resyncs as `resyncs=N(<worst leg>)` and, for every leg that is playing now, its
     /// resampler as `asrc=<leg>:rate_ppm=..:asrc_phase_frames=..:underruns=..:resyncs=..` (issue
     /// 1461), and dropped wrong-rate VBAN packets as
     /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
@@ -392,13 +396,14 @@ impl HubState {
         } else {
             String::new()
         };
-        // Every resampler leg that has received audio (issue 1461): where its clock sits against
-        // the hub's and how far its depth is off the target.
+        // Every resampler leg that is playing now (issue 1461): where its clock sits against the
+        // hub's and how far its depth is off the target. A muted cambox or a stopped feed is left
+        // out (its underruns and resyncs still lead the line as totals).
         let asrc: String = self
             .participants
             .iter()
             .filter(|p| p.rx_packets > 0)
-            .filter_map(|p| p.jitter.map(|j| (p, j)))
+            .filter_map(|p| p.jitter.filter(|j| j.primed).map(|j| (p, j)))
             .map(|(p, j)| {
                 format!(
                     " asrc={}:rate_ppm={:+.1}:asrc_phase_frames={:+.1}:underruns={}:resyncs={}",
