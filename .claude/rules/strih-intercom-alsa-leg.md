@@ -71,7 +71,9 @@ the cutters' playback INTO the `strih-program` sink and their capture onto its m
 - strih-pp: the MG-XU was NOT on USB (disconnect 23.10. 16:55:58). Card ID `MGXU` from
   `/var/lib/alsa/asound.state` (2 ch each way); its sample formats are unknown, which is why the format
   is read from the card at spawn.
-- No WirePlumber deny rule on purpose (design: phase 4 removes WirePlumber). PipeWire still manages the
+- No WirePlumber deny rule on purpose: phase 4 (issue 1440) purges PipeWire + WirePlumber on a strih box
+  whose facts need none (strih-snv; `.claude/rules/strih-pipewire-purge.md`), and verify item 9b then
+  reads the card PCMs held by aplay / arecord. Until then (and on strih-pp) PipeWire still manages the
   card: while anything plays to it (it is the default sink on strih-snv) aplay/arecord get EBUSY on every
   retry, and verify FAILs "not moving audio". PipeWire releases an idle node (suspend timeout).
 

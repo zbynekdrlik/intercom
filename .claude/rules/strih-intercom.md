@@ -169,6 +169,13 @@ strih, and a second hub sending VBAN back to them is double talkback.
 > **Issue 1438:** the cutters left PipeWire: both TOMLs put them on the `alsa` card leg
 > (`.claude/rules/strih-intercom-alsa-leg.md`). The pw-cat paths below stay as the hub's `pipewire`
 > adapter (the strih-pp `program_out` sink, and the cutters' rollback).
+>
+> **Issue 1440 (history from here on, for strih-snv):** a strih box whose facts declare the program
+> VBAN and whose TOML has no `pipewire` participant has NO PipeWire: setup step 12 pins it out and
+> purges it, step 13's hub drop-in drops the `pipewire` group + runtime env (the DynamicUser decision
+> below then reads: the operator user for the HDMI leg's `~/.Xauthority` and the card's `audio` group
+> only). strih-pp keeps this section's graph until its own program VBAN lands
+> (`.claude/rules/strih-pipewire-purge.md`).
 
 The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
 `pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
