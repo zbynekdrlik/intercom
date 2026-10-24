@@ -938,7 +938,10 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   `vban_jitter::NetworkFill` over a sample queue: every push is a point of its rate fit, timed
   BEFORE the ring's lock (`PacedRing::push_at`, `main.rs` stamps the block), every pop renders
   exactly one 960-frame frame from a fractional read point (`asrc::render`); target 1920 (40 ms),
-  dead band +-480, `PacedRing::stats()`.
+  dead band +-480. The sender plans the frame under the ring's lock (`PacedRing::take_frame`, a
+  ~1000-sample copy) and renders it after the lock (`PoppedFrame::render`), so the SCHED_FIFO
+  pusher never waits on a sinc render. The janus facet carries the ring's `tx_rate_ppm` and
+  `tx_asrc_phase_frames` next to `tx_underflows` / `tx_overflow_trims`.
   - Priming ends EXACTLY at the target + the 15-frame history (the excess that piled up during
     the silent priming ticks is the oldest audio, dropped inaudibly). Pinned for 16 start phases.
   - The silent underflow frame and the resync above the cap are the last resort only (still the

@@ -32,7 +32,6 @@ const BLOCK: usize = 256;
 /// 1 ms splice would be invisible in it.
 const TONE_HZ: f64 = 997.0;
 const AMP: f64 = 16_384.0;
-const NS: u64 = 1_000_000_000;
 const MS: u64 = 1_000_000;
 const US: u64 = 1_000;
 /// The model's time step.

@@ -11,7 +11,8 @@
 //! late aplay start is the start hold (never a trim), a block-loop stall that aplay's own buffer
 //! rides out must never get silence written into it, and the pipe must sit at the 640-frame setpoint.
 //! Since issue 1461 the HDMI clock is crossed by the resampler: the ratio follows the drift and the
-//! depth keeps the phase its spawn gave it inside the dead band (+-160), no correction is counted.
+//! depth keeps the phase its spawn gave it inside the dead band (480: a quarter of the pipe +
+//! aplay's buffer), no correction is counted.
 //! Std-only (Tier-0 replica).
 
 use intercom_hub::asrc::ASRC_LOOKAHEAD;

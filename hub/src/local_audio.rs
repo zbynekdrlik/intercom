@@ -384,10 +384,12 @@ pub struct LocalAudioFacet {
     /// quantum reads (from about the held depth - 640 to the depth + 384 at the 256-frame block),
     /// so read `pipe_depth_frames` for the held depth.
     pub pipe_fill_frames: u64,
-    /// Blocks dropped by the start hold: written while pw-cat had not read since its spawn, so
-    /// every spawn starts at the same depth (issue 1401). It grows only around a spawn: by pw-cat's
-    /// connect time / one hub block, plus, after a respawn, up to the 63 blocks the egress queue
-    /// filled during the restart backoff. A count that keeps climbing means pw-cat is not reading.
+    /// Blocks dropped by the start hold: written while the reader had not read since its spawn
+    /// or since a refill (issue 1461: a refill re-primes), so every (re)prime starts at the same
+    /// depth (issue 1401). It grows around a spawn (by the reader's connect time / one hub block,
+    /// plus, after a respawn, up to the 63 blocks the egress queue filled during the restart
+    /// backoff) and by the catch-up blocks behind a stall that ended in a refill. A count that
+    /// keeps climbing without spawns or refills means the reader is not reading.
     pub pipe_start_holds: u64,
     /// The resampler's ratio in ppm off 1 (issue 1461): hub frames per written frame, so a sink
     /// running fast against the hub reads negative (a 50 ppm fast MiniFuse: about -50).
@@ -396,10 +398,11 @@ pub struct LocalAudioFacet {
     /// after a (re)spawn or a guard.
     pub pipe_rate_fit_ppm: Option<f64>,
     /// The last second's mean time-weighted fill minus the setpoint: the phase term acts only
-    /// outside +-1/4 of the setpoint and brings it back to +-1/8.
+    /// outside a quarter of the leg's fixed latency (the setpoint plus aplay's own buffer: 448
+    /// frames for pw-cat, 480 for aplay) and brings it back to an eighth.
     pub pipe_asrc_phase_frames: f64,
     /// The mean time-weighted pipe fill over the last complete 1 s, in frames: within the dead
-    /// band (+-1/4) of `pipe_setpoint_frames` once settled. 0 until the first second after the
+    /// band (448 / 480) of `pipe_setpoint_frames` once settled. 0 until the first second after the
     /// reader's first read completes; after a respawn it keeps the previous child's value until the
     /// new child's first read, then reads 0 until that child's first second completes.
     pub pipe_depth_frames: u64,
@@ -723,7 +726,7 @@ pub(crate) fn log_pipe_write(label: &str, target: &str, report: &PipeWriteReport
             tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} pipe above the trim mark — block dropped");
         }
         PipeFillPlan::StartHold => {
-            tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} pw-cat not reading yet — block dropped by the start hold");
+            tracing::debug!(%target, fill_frames = report.fill_frames, "local-audio: {label} reader not reading yet (after its spawn or a refill) — block dropped by the start hold");
         }
         PipeFillPlan::Write => {}
     }

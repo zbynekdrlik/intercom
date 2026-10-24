@@ -245,6 +245,8 @@ fn state_renders_the_janus_facet_only_for_the_janus_participant() {
         tx_interval_ms_max: 20.5,
         tx_underflows: 2,
         tx_overflow_trims: 1,
+        tx_rate_ppm: -0.4,
+        tx_asrc_phase_frames: 12.0,
         rx_lost_frames: 3,
     });
     let hs = HubState::snapshot(&m, "1.7.0-test", &stats);
@@ -266,6 +268,9 @@ fn state_renders_the_janus_facet_only_for_the_janus_participant() {
     assert_eq!(phones["janus"]["tx_interval_ms_max"], 20.5);
     assert_eq!(phones["janus"]["tx_underflows"], 2);
     assert_eq!(phones["janus"]["tx_overflow_trims"], 1);
+    // Issue 1461 lane 2: the egress ring's resampler is on the facet like every other crossing.
+    assert_eq!(phones["janus"]["tx_rate_ppm"], -0.4);
+    assert_eq!(phones["janus"]["tx_asrc_phase_frames"], 12.0);
     assert_eq!(phones["janus"]["rx_lost_frames"], 3);
     // A non-janus participant omits the facet entirely (skip_serializing_if).
     assert!(cam1.get("janus").is_none(), "cam1 must have no janus facet");

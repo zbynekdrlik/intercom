@@ -28,7 +28,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::asrc;
+use crate::asrc::{self, ReadPoint};
 use crate::vban_jitter::{NetworkFill, NetworkFillStats, PopPlan};
 
 /// One 20 ms frame of 48 kHz mono audio: the unit every Janus packet carries.
@@ -138,8 +138,18 @@ impl PacedRing {
     }
 
     /// Take exactly one [`FRAME_48K`] frame. Silence while priming or on an underflow (then the
-    /// ring re-primes to the target); audio otherwise, rendered by the resampler.
+    /// ring re-primes to the target); audio otherwise, rendered by the resampler. See
+    /// [`PacedRing::take_frame`] for the split the sender thread uses.
     pub fn pop_frame(&mut self) -> (Vec<i16>, PopKind) {
+        let frame = self.take_frame();
+        (frame.render(), frame.kind())
+    }
+
+    /// Plan one frame and copy out what its render reads, without rendering it: the paced sender
+    /// takes this under the ring's lock and renders after releasing it ([`PoppedFrame::render`]),
+    /// so the SCHED_FIFO block loop that pushes into the ring never waits on a sinc render (std
+    /// mutexes have no priority inheritance; the copy is ~1000 samples).
+    pub fn take_frame(&mut self) -> PoppedFrame {
         match self.fill.plan_pop(self.buf.len(), FRAME_48K) {
             PopPlan::Silent { ran_dry } => {
                 let kind = if ran_dry {
@@ -148,7 +158,11 @@ impl PacedRing {
                 } else {
                     PopKind::Priming
                 };
-                (vec![0; FRAME_48K], kind)
+                PoppedFrame {
+                    kind,
+                    read: None,
+                    input: Vec::new(),
+                }
             }
             PopPlan::Audio {
                 skip,
@@ -156,10 +170,14 @@ impl PacedRing {
                 consume,
             } => {
                 self.buf.drain(..skip.min(self.buf.len()));
-                let mut out = vec![0i16; FRAME_48K];
-                asrc::render(read, self.buf.make_contiguous(), &mut out);
+                let queued = self.buf.make_contiguous();
+                let input = queued[..read.frames_needed(FRAME_48K).min(queued.len())].to_vec();
                 self.buf.drain(..consume.min(self.buf.len()));
-                (out, PopKind::Audio)
+                PoppedFrame {
+                    kind: PopKind::Audio,
+                    read: Some(read),
+                    input,
+                }
             }
         }
     }
@@ -189,6 +207,31 @@ impl PacedRing {
     /// Resyncs back to the target above the cap.
     pub fn trims(&self) -> u64 {
         self.trims
+    }
+}
+
+/// One frame [`PacedRing::take_frame`] planned: silence, or the queued samples it reads and the
+/// read point to render them from.
+#[derive(Debug, Clone)]
+pub struct PoppedFrame {
+    kind: PopKind,
+    read: Option<ReadPoint>,
+    input: Vec<i16>,
+}
+
+impl PoppedFrame {
+    /// What the frame is: audio, priming silence, or an underflow's silence.
+    pub fn kind(&self) -> PopKind {
+        self.kind
+    }
+
+    /// The frame's [`FRAME_48K`] samples: silence, or the resampler's render of the copied input.
+    pub fn render(&self) -> Vec<i16> {
+        let mut out = vec![0i16; FRAME_48K];
+        if let Some(read) = self.read {
+            asrc::render(read, &self.input, &mut out);
+        }
+        out
     }
 }
 

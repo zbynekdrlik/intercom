@@ -31,6 +31,7 @@ use crate::janus_codec::{RxDecoder, TxEncoder};
 use crate::janus_pacing::{IntervalStats, PacedRing};
 use crate::janus_sender::{spawn_paced_sender, PacedSenderConfig, PacedSenderShared, TxTarget};
 use crate::vban_io::{DecodedAudio, JitterBuffer};
+use crate::vban_jitter::NetworkFillStats;
 
 // ---------------------------------------------------------------------------------------------
 // 1. RTP (PCMU + Opus)
@@ -414,6 +415,9 @@ pub struct JanusSharedStats {
     tx_interval_max_us: AtomicU64,
     tx_underflows: AtomicU64,
     tx_overflow_trims: AtomicU64,
+    /// f64 bits (issue 1461): the egress ring's resampler ratio and phase.
+    tx_rate_ppm: AtomicU64,
+    tx_asrc_phase_frames: AtomicU64,
     rx_lost_frames: AtomicU64,
     /// Wall-clock start of the current session, for `session_age_s` (None = not joined).
     session_started: Mutex<Option<Instant>>,
@@ -438,6 +442,11 @@ pub struct JanusStats {
     pub tx_underflows: u64,
     /// Times the ring overflowed and was trimmed back to its target.
     pub tx_overflow_trims: u64,
+    /// The egress ring's resampler ratio in ppm off 1 (issue 1461): the block loop's grid against
+    /// the paced sender's (about 0 on one box; a lost mix tick shows as a short negative excursion).
+    pub tx_rate_ppm: f64,
+    /// The ring's last-second mean depth minus its 1920-frame target.
+    pub tx_asrc_phase_frames: f64,
     /// Received frames that were lost on the wire and concealed (FEC/PLC).
     pub rx_lost_frames: u64,
 }
@@ -475,6 +484,8 @@ impl JanusSharedStats {
             tx_interval_ms_max: self.tx_interval_max_us.load(Ordering::Relaxed) as f64 / 1000.0,
             tx_underflows: self.tx_underflows.load(Ordering::Relaxed),
             tx_overflow_trims: self.tx_overflow_trims.load(Ordering::Relaxed),
+            tx_rate_ppm: f64::from_bits(self.tx_rate_ppm.load(Ordering::Relaxed)),
+            tx_asrc_phase_frames: f64::from_bits(self.tx_asrc_phase_frames.load(Ordering::Relaxed)),
             rx_lost_frames: self.rx_lost_frames.load(Ordering::Relaxed),
         }
     }
@@ -483,9 +494,13 @@ impl JanusSharedStats {
         self.tx_packets.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn publish_ring(&self, underflows: u64, trims: u64) {
+    pub(crate) fn publish_ring(&self, underflows: u64, trims: u64, ring: &NetworkFillStats) {
         self.tx_underflows.store(underflows, Ordering::Relaxed);
         self.tx_overflow_trims.store(trims, Ordering::Relaxed);
+        self.tx_rate_ppm
+            .store(ring.rate_ppm.to_bits(), Ordering::Relaxed);
+        self.tx_asrc_phase_frames
+            .store(ring.asrc_phase_frames.to_bits(), Ordering::Relaxed);
     }
 
     pub(crate) fn publish_intervals(&self, intervals: &IntervalStats) {

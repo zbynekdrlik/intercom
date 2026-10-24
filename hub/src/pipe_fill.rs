@@ -236,7 +236,8 @@ pub struct PipeAsrcStats {
     pub rate_ppm: f64,
     /// The last least-squares fit, in the same sense; `None` before the first after a (re)start.
     pub rate_fit_ppm: Option<f64>,
-    /// The last second's mean depth minus the setpoint: what the phase term acts on outside +-1/4.
+    /// The last second's mean depth minus the setpoint: what the phase term acts on outside the
+    /// dead band (a quarter of the setpoint plus the reader's own buffer).
     pub phase_frames: f64,
 }
 

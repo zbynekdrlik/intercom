@@ -112,13 +112,16 @@ fn paced_sender_loop(
             thread::sleep(wait);
         }
 
-        // Always pop, joined or not: the ring stays drained and the grid never pauses.
-        let (frame, underflows, trims) = {
+        // Always pop, joined or not: the ring stays drained and the grid never pauses. The frame
+        // is planned under the lock and rendered after it (issue 1461: the block loop pushing into
+        // the ring is SCHED_FIFO, so it never waits on a resampler render).
+        let (popped, underflows, trims, ring_stats) = {
             let mut r = ring.lock().unwrap_or_else(|e| e.into_inner());
-            let (frame, _) = r.pop_frame();
-            (frame, r.underflows(), r.trims())
+            let popped = r.take_frame();
+            (popped, r.underflows(), r.trims(), r.stats())
         };
-        stats.publish_ring(underflows, trims);
+        let frame = popped.render();
+        stats.publish_ring(underflows, trims, &ring_stats);
 
         match shared.target() {
             None => {

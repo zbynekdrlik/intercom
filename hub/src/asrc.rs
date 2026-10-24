@@ -394,6 +394,8 @@ impl RateControl {
                 } else if slope > 0.0 {
                     self.fitted = Some(1.0 / slope);
                 }
+                // An egress slope <= 0 (a reader that consumed nothing over the window) keeps the
+                // last fit; every path that stalls a reader restarts the series anyway.
             }
         }
     }
