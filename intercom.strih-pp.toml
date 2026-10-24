@@ -16,6 +16,9 @@
 # re-routed into the `strih-program` sink while the MG-XU was unplugged. Rollback: adapter = "pipewire" with
 # pipewire_target/source = "alsa_output/alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo" and
 # pipewire_channel_map = "FL,FR".
+# 24.10.2026 (issue 1461): every ingress leg crosses its sender's clock with the hub's resampler and holds a
+# FIXED target depth, `target_ms` rounded up to whole 256-frame blocks and read at start only: the cameras
+# 16 ms (3 blocks), lv1 37.33 ms (7 blocks), the MG-XU capture 42.67 ms (8 blocks).
 # Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
@@ -44,6 +47,7 @@ adapter = "vban"
 host = "10.77.9.61"
 in_stream = "cam1"
 out_stream = "cam1"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -54,6 +58,7 @@ adapter = "vban"
 host = "10.77.9.64"
 in_stream = "cam4"
 out_stream = "cam4"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -64,6 +69,7 @@ adapter = "vban"
 host = "10.77.9.66"
 in_stream = "cam6"
 out_stream = "cam6"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -74,6 +80,7 @@ adapter = "vban"
 host = "10.77.9.67"
 in_stream = "cam7"
 out_stream = "cam7"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -83,6 +90,7 @@ role = "program_ref"
 adapter = "vban"
 host = "lv1.lan"
 in_stream = "strih"
+target_ms = 37.33
 in_channels = 2
 out_channels = 0
 
@@ -97,6 +105,7 @@ alsa_out_channels = 2
 alsa_in_channels = 2
 alsa_channel_map = "1,2"
 alsa_in_channel_map = "1,2"
+target_ms = 42.67
 in_channels = 2
 out_channels = 2
 

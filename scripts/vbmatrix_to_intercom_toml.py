@@ -104,6 +104,14 @@ _MINIFUSE_ALSA_PERIOD_FRAMES = 256
 # day put noise into the cameramen's headsets; the talkback level is set on the MiniFuse preamp.
 TALKBACK_MAKEUP_DB = 0.0
 
+# issue 1461: every ingress resampler leg's FIXED target depth in ms (the hub rounds it up to whole
+# 256-frame blocks and reads it at start only, never adapting it): a cambox 3 blocks (16 ms), a
+# program feed 7 blocks (37.33 ms: the FOH sender's largest measured gap 27.6 ms + a block + half
+# a burst), the cutters' card capture 8 blocks (42.67 ms: two of the card's 1024-frame bursts).
+TARGET_MS_CAMBOX = "16.0"
+TARGET_MS_PROGRAM = "37.33"
+TARGET_MS_CARD = "42.67"
+
 _TALKBACK_DST_ROLES = ("cambox", "phones")
 
 
@@ -252,6 +260,15 @@ def build_model(xml_text):
         s["in_channels"] = max(s["in_channels"], pt["in_ch"])
         d["out_channels"] = max(d["out_channels"], pt["out_ch"])
 
+    # issue 1461: the fixed target of every ingress resampler leg.
+    for p in participants.values():
+        if p["role"] == "cambox":
+            p["target_ms"] = TARGET_MS_CAMBOX
+        elif p["adapter"] == "vban":
+            p["target_ms"] = TARGET_MS_PROGRAM
+        elif p["name"] == "cutters" and p["in_channels"] > 0:
+            p["target_ms"] = TARGET_MS_CARD
+
     # issue 1438: the cutters' card leg. The mics are the MiniFuse's first hw inputs, the cans its
     # first hw outputs (issue 1345: the operator hears the N-1 mix in the headphones), on the card's
     # 6 channels each way.
@@ -349,6 +366,8 @@ def render(model):
         if "source_streams" in p:
             joined = ", ".join(f'"{s}"' for s in p["source_streams"])
             out.append(f"source_streams = [{joined}]")
+        if "target_ms" in p:
+            out.append(f'target_ms = {p["target_ms"]}')
         out.append(f'in_channels = {p["in_channels"]}')
         out.append(f'out_channels = {p["out_channels"]}')
         out.append("")

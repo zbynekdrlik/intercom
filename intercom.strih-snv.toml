@@ -29,6 +29,7 @@ adapter = "vban"
 host = "cam1.lan"
 in_stream = "cam1"
 out_stream = "cam1"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -39,6 +40,7 @@ adapter = "vban"
 host = "cam2.lan"
 in_stream = "cam2"
 out_stream = "cam2"
+target_ms = 16.0
 in_channels = 8
 out_channels = 2
 
@@ -49,6 +51,7 @@ adapter = "vban"
 host = "cam3.lan"
 in_stream = "cam3"
 out_stream = "cam3"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -59,6 +62,7 @@ adapter = "vban"
 host = "cam4.lan"
 in_stream = "cam4"
 out_stream = "cam4"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -69,6 +73,7 @@ adapter = "vban"
 host = "cam5.lan"
 in_stream = "cam5"
 out_stream = "cam5"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -79,6 +84,7 @@ adapter = "vban"
 host = "cam6.lan"
 in_stream = "cam6"
 out_stream = "cam6"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -89,6 +95,7 @@ adapter = "vban"
 host = "cam7.lan"
 in_stream = "cam7"
 out_stream = "cam7"
+target_ms = 16.0
 in_channels = 2
 out_channels = 2
 
@@ -98,6 +105,7 @@ role = "program_ref"
 adapter = "vban"
 host = "fohabl.lan"
 in_stream = "fohabl-strih"
+target_ms = 37.33
 in_channels = 4
 out_channels = 0
 
@@ -107,6 +115,7 @@ role = "program_ref"
 adapter = "vban"
 host = "lv1.lan"
 in_stream = "lv1-strih"
+target_ms = 37.33
 in_channels = 2
 out_channels = 0
 
@@ -116,6 +125,7 @@ role = "program_ref"
 adapter = "vban"
 host = "mbc.lan"
 in_stream = "mbc-strih"
+target_ms = 37.33
 in_channels = 0
 out_channels = 0
 
@@ -130,6 +140,7 @@ alsa_out_channels = 6
 alsa_in_channels = 6
 alsa_channel_map = "1,2,3,4"
 alsa_in_channel_map = "1,2"
+target_ms = 42.67
 in_channels = 2
 out_channels = 4
 
