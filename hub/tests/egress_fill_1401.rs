@@ -188,6 +188,31 @@ fn a_four_channel_sink_measures_its_fill_in_four_channel_frames() {
 }
 
 #[test]
+fn an_aplay_pipe_names_aplay_when_its_reader_is_gone() {
+    // Issue 1461 lane 2: the card and HDMI legs share this writer, and their respawn line read
+    // `reason=pw-cat closed its stdin pipe (aplay: ...)` for an aplay child (strih-snv, 24.10.2026).
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    let mut sink = PipeFillWriter::new(writer, 2, RATE).with_reader("aplay");
+    drop(reader);
+    let e = sink.sample_fill().expect_err("a dead reader is noticed");
+    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+    let msg = e.to_string();
+    assert!(msg.contains("aplay closed its stdin pipe"), "{msg}");
+    assert!(!msg.contains("pw-cat"), "{msg}");
+    // A pw-cat pipe keeps its own name.
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    let mut sink = PipeFillWriter::new(writer, 2, RATE);
+    drop(reader);
+    let msg = sink.sample_fill().expect_err("a dead pw-cat").to_string();
+    assert!(msg.contains("pw-cat closed its stdin pipe"), "{msg}");
+    // The aplay legs name their own binary: AplaySink spawns both the HDMI and the card aplay.
+    let src =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/hdmi_leg.rs"))
+            .expect("read hdmi_leg.rs");
+    assert!(src.contains(".with_reader("), "AplaySink names its reader");
+}
+
+#[test]
 fn the_local_audio_facet_counts_refills_trims_and_the_last_fill_but_not_the_prime() {
     let stats = LocalAudioStats::default();
     // The prime after a spawn is not a refill: `pipe_refills` stays 0 in a healthy run.
