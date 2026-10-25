@@ -180,7 +180,7 @@ strih, and a second hub sending VBAN back to them is double talkback.
 
 The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
 `pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
-hub stays Tier-0 / CI-buildable; a native `pipewire-rs` impl is a later 2nd impl of the SAME
+hub stays CI-buildable; a native `pipewire-rs` impl is a later 2nd impl of the SAME
 `LocalAudioSink`/`LocalAudioSource` trait). Design: issue 1344 comment 5750031080, Prístup 1.
 
 ### Root cause (corrected 20.9. — the OBS program is a NETWORK stream, not the MiniFuse)
@@ -329,13 +329,6 @@ What was wrong live, and how the code now handles it. Read this before touching 
   `.with_min_channels(in_channels ≥ 2)` copies ch1 into ch2 (ONLY ch2, never padding up to 8
   channels, which would count as short). Without that, a cam came out left-only and 6 dB down in
   the phones' stereo→mono average.
-- **Tier-0 verify of these pure parts:** a rustc replica.
-  - Extract `DecodedAudio` + `STALE_STREAM_MS..peak_dbfs` from `vban_io.rs` (since issue 1401
-    that section imports `crate::vban_jitter`, so put `vban_jitter.rs` in the replica too), or the
-    whole `mulaw.rs`.
-  - Wrap the integration test file as a `#[cfg(test)] mod` with its `use intercom_hub::…` line
-    stripped.
-  - Run it with `rustc --edition 2021 --test`.
 
 ## VBAN legs — fixed target fill + the resampler (issues 1401 + 1461)
 
@@ -619,25 +612,6 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
     same change, which had grown past the ~300-line budget); `main()` only builds the
     `BlockLoop` and spawns it.
-  - Tier-0 verify: the "VBAN rate" rlib recipe plus a `libc` rlib from
-    `~/.cargo/registry/src/*/libc-0.2.*/src/lib.rs` (`--cfg 'feature="std"'`, no build-script cfg
-    is needed on x86_64 gnu). A root that `#[path]`-includes the real vban_io + its deps,
-    `local_audio.rs` with its serde derive stripped and the test file as a module
-    (`intercom_hub::` -> `crate::`) runs the real-pipe FIONREAD test under plain `rustc --test`,
-    and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
-    copy its changed send-loop lines into the replica to type-check them against the real
-    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the egress + ingress test
-    files (`vban_jitter_1401.rs`, `vban_jitter_bench_1401.rs`) as modules, so one replica proves
-    both the egress acceptance and the unchanged ingress behaviour after the `servo_step`
-    extraction. Cut the tests' `serde_json` key checks (they compile at CI). For the RED, build
-    the same root from `git show <base>:` sources without `pipe_fill`. Compile the bench at
-    `-C opt-level=2 -C debug-assertions=on -C overflow-checks=on` for speed, and once at
-    opt-level 0 for the CI runtime.
-  - **Gotcha: a code move out of `main()` leaves bindings only CI's clippy sees.** Moving the
-    block loop into `run_block_loop` left `let block_frames` in `main()` unread, which is
-    `unused_variables` under the job's `-D warnings` (caught by review round 2, not by any
-    replica). After any move in `main.rs`, check every `let` left in each fn still has a read
-    that is not a `.field` access or a `key:` in a struct literal.
   - **Probing socket/neighbour behaviour locally (no rig):** a non-blocking python UDP socket
     sending 1052-byte packets at 187.5/s to unused addresses on an empty, no-carrier docker bridge
     on dev1 (`ip -br addr` shows a `br-*` DOWN with 172.18.0.1/16) never leaves the box. One
@@ -647,7 +621,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   `.claude/rules/strih-intercom-hub-mix.md` (auto-loads on `block_clock`, `mix_thread`, `asrc`,
   `main.rs`, `vban_io`, `inputs`, their tests and the unit): the `hub-mix` SCHED_FIFO 10 thread,
   the catch-up of up to four late ticks, the measured stall-length table and its residuals, the
-  fixed program target, the live check and the Tier-0 replicas.
+  fixed program target and the live check.
 - **Tests + the bench.**
   - `tests/asrc_1461.rs`: the resampler (unity ratio at phase 0 = a delayed identity, DC gain 1 at
     every phase and ratio, a 100 Hz / 1 kHz / 5 kHz sine read at -1000..+1000 ppm from four start
@@ -669,20 +643,6 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     (both strih TOMLs' `target_ms`).
 - **Issue 1461 lane 2 (the egress + the phones)** is in "The egress" above and in "25.9.2026
   phone audio" below: no hub crossing is left that inserts or drops a frame.
-- **Tier-0 verify without cargo.**
-  - A rustc `--test` replica: `fir.rs` + `block_clock.rs` + `asrc.rs` + `vban_jitter.rs` (+
-    `pipe_fill.rs`, `janus_pacing.rs` for `hub_catchup_1401` and `egress_asrc_1461`) + the
-    `JitterBuffer` section of `vban_io.rs` (its `tracing::` calls pointed at a stub macro module)
-    and the test files under `extern crate self as intercom_hub;`, then
-    `clippy-driver --test -D warnings` on it.
-    Extract the section by the doc-comment markers "/// One decoded VBAN packet" .. "/// Encode an
-    interleaved" and "/// A stream whose last packet" .. "/// A UDP sender".
-  - The whole real `vban_io.rs` type-checks with the rlib recipe in "VBAN rate" above (add
-    `vban_jitter.rs` to the `#[path]` root).
-  - `state.rs` + `inputs.rs` run without serde: strip `Serialize` / `#[serde(...)]` and stub
-    `JanusStats` / `LocalAudioFacet` / `VideoStats` / a `Matrix { hub, participants }` with
-    `local_inputs()` and the local-capture constants.
-  - A RED proof for a round of changes: the same replica built from `git show <prev>:` sources.
 
 ## VBAN rate — the hub honours the header sample rate (issue 1345, 24.9.2026)
 
@@ -731,8 +691,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
     `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
     count (`strih_intercom_hub_version_grade`, below).
   - Tests: `intercom/hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
-    half, CI only; the status line + snapshot are mirrored in a stub-matrix replica of state.rs).
-    Every plain-rustc replica that mounts `vban_io.rs` now mounts `vban_classify.rs` next to it.
+    half).
   - Open (review round 1, design-accepted): verify item 16 NOTEs a hub older than the checkout on
     nearly every run, because the workspace version moves on every PR while an installed hub is
     never replaced; grading by "the hub source changed since the hub's commit" needs git history the
@@ -755,18 +714,6 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
   bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
   new crate.
-- **Tier-0 verify.** A rustc replica of `fir.rs` + `vban_rate.rs` + `mulaw.rs` with the pure half of
-  `tests/vban_rate_1345.rs` (cut at its `// ---- wiring` marker) + the two mulaw test files, run
-  with `rustc --edition 2021 --test`. `clippy-driver --edition 2021 --test -D warnings <replica.rs>`
-  applies the real clippy lints to the pure modules without cargo.
-- **Type-checking `vban_io.rs` without cargo.** Its only external crates are `anyhow`, `tracing` and
-  `intercom-vban`, so build those as rlibs straight from `~/.cargo/registry/src/*/` with `rustc`
-  (`once_cell` → `tracing-core` with `--cfg 'feature="std"' --cfg 'feature="once_cell"'` →
-  `pin-project-lite` → `tracing` with `--cfg 'feature="std"'`; `anyhow` alone), then
-  `clippy-driver --test -D warnings --extern …` a replica root that `#[path]`-includes fir / mulaw /
-  vban_rate / vban_io. That runs vban_io's own in-file tests too. Put the rustc lines in a script
-  file: an inline `--cfg 'feature="std"'` inside a compound Bash call is refused by the worktree
-  guard. `state.rs` / `main.rs` (serde derive, tokio) still first compile at CI.
 
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
@@ -835,18 +782,13 @@ placeholder secret, never inlined — and `strih_janus_ws_jcfg_text`, loopback-o
 `tests/strih_provision_pure_functions.rs`. `verify-strih.sh` item 17 is REPORT-ONLY (janus
 installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_room_jcfg_ok`).
 
-### Tier-0 story (M3a)
+### Tests (M3a)
 
-- **Locally:** `cargo fmt --all --check` (parses all the new Rust), a standalone `rustc --test`
-  replica of `mulaw.rs` + the pure RTP/JSON builders (RED→GREEN), the converter pytest, `bash -n` +
-  `shellcheck -S warning` on the scripts, the doc-lazy grep, the anchor occurrence sweep, and the
-  first-compile lint hand-audit (`chunks_exact`, `Json<Arc<T>>`+serde `rc`, dead fields, checked
-  div, `too_many_arguments`, `map_or`→`is_some_and`, `redundant_locals` on a `let x = x;`).
-- **At CI (first real compile):** the `intercom-hub` job type-checks + runs the new tests
-  (`mulaw_g711`, `janus_rtp`, `janus_config`, `janus_session` — the fake-Janus tokio test —
-  + the updated `deployed_matrix`) and clippy `-D warnings` (reqwest rustls, no openssl). The
-  sourced-lib janus renderer harness runs in the appliance `test` job. Expect a Rust TYPE mistake
-  to surface at CI, not locally.
+- The `intercom-hub` job runs the new tests (`mulaw_g711`, `janus_rtp`, `janus_config`,
+  `janus_session` — the fake-Janus tokio test — + the updated `deployed_matrix`) and clippy
+  `-D warnings` (reqwest rustls, no openssl); the sourced-lib janus renderer harness runs in the
+  appliance `test` job. Also: the converter pytest, `bash -n` + `shellcheck -S warning` on the
+  scripts, the doc-lazy grep, the anchor occurrence sweep.
 
 ## Milestone map
 
@@ -881,37 +823,28 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   future converter/XML change that produces a byte-parity-passing but daemon-REJECTED TOML fails at
   CI, not at rig startup. Keep that test's expected shape (15 participants / 216 points) in sync.
 
-## Tier-0 (issue 557) — what verifies locally vs at CI
+## Verification
 
-- **A routing-TOML change runs through the REAL `Matrix::from_toml` locally, no cargo** (issue 1439,
-  24.10.2026): `gh run download <latest green dev ci.yml run> -n intercom-hub-linux-amd64 -D <scratch>`,
-  then `<scratch>/intercom-hub --check-config --config intercom/intercom.<box>.toml` prints `loads (N
-  participants, M points)` or the refusal. Pin the counts the hub prints in the deployed-matrix tests;
-  delete the scratch binary after.
-- **Locally:** `cargo fmt --all --check` (parses all the new Rust), the converter pytest, `python3 -c
-  "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`, `bash -n`/`shellcheck -S warning`
-  on the scripts, the doc-lazy grep on touched `.rs`. A worktree lane can ALSO cross-check the
-  generated TOML against every `Matrix::from_toml` invariant with a small `tomllib` script (known
-  roles/adapters, channel bounds, no self-route).
-- **At CI (first real compile):** the `intercom-hub` job type-checks + runs the Rust unit tests
-  (matrix/engine/vban_io/state/http, incl. the random-port VBAN loopback) + the moved codec tests;
-  the appliance `test` job runs `tests/intercom_hub_provisioning.rs` (the static anchors). Expect a
-  Rust TYPE mistake to surface at CI, not locally.
-- **What the first compile actually caught (19.9.2026, three CI rounds — hand-audit these BEFORE the
-  next new crate lands):** (1) `chunks_exact(N)` with a constant N → the Rust 1.98 deny lint
-  `chunks_exact_to_as_chunks` (use `as_chunks::<N>().0.iter()` + `from_le_bytes(*c)`; bkshading.md
+- **A routing-TOML change runs through the REAL `Matrix::from_toml`** (issue 1439):
+  `cargo run -p intercom-hub -- --check-config --config intercom/intercom.<box>.toml` prints `loads (N
+  participants, M points)` or the refusal. Pin the counts the hub prints in the deployed-matrix tests.
+- **Also:** the converter pytest, `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`,
+  `bash -n`/`shellcheck -S warning` on the scripts, the doc-lazy grep on touched `.rs`.
+- **CI:** the `intercom-hub` job runs the Rust unit tests (matrix/engine/vban_io/state/http, incl.
+  the random-port VBAN loopback) + the moved codec tests; the appliance `test` job runs
+  `tests/intercom_hub_provisioning.rs` (the static anchors).
+- **What the first compile actually caught (19.9.2026, three CI rounds):** (1) `chunks_exact(N)`
+  with a constant N → the Rust 1.98 deny lint `chunks_exact_to_as_chunks` (use `as_chunks::<N>().0.iter()` + `from_le_bytes(*c)`; bkshading.md
   lists the same trap); (2) an axum handler returning `Json<Arc<T>>` fails the `Handler` bound
   (E0277) unless serde's **`rc`** feature is on — serde has no `Serialize for Arc<T>` otherwise;
   (3) clippy `-D warnings` on the hub: a struct field only ever WRITTEN (`dead_code`), `if n == 0 {0}
   else {a / n}` (manual checked division → `a.checked_div(n).unwrap_or(0)`), and a fn with 8 params
   incl. `self` (`too_many_arguments`, cap 7 → group them in a borrowed `OutBlock<'_>` struct, not an
   `#[allow]`). A lib lint stops clippy before the bin/tests are linted, so each round can reveal a
-  NEW layer — audit main.rs + tests with the same list rather than waiting for the next round.
+  NEW layer.
   (4) issue 1344: `io::Error::new(io::ErrorKind::Other, msg)` → the warn-by-default `style` lint
   `clippy::io_other_error` (Rust ≥ 1.87), which is a HARD error under the hub's `-D warnings` gate;
-  use `io::Error::other(msg)`. This is invisible to the Tier-0 local net (`cargo fmt` doesn't lint),
-  so grep every new `io::Error::new(...Other...)` site before a push. Add `io_other_error` to the
-  hand-audit list above alongside `dead_code` / `too_many_arguments`.
+  use `io::Error::other(msg)`.
 
 ## 25.9.2026 phone audio: a paced 20 ms sender + Opus (issue 1345, design comment 5828489060)
 
@@ -933,7 +866,6 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   - A stall over 100 ms restarts the grid instead of bursting the missed packets.
   - It is an OS thread, not a tokio task: the tokio timer wheel rounds to whole ms.
     `std::thread::sleep` on strih-snv wakes with sd 0.027 ms / max 0.29 ms (measured 25.9.).
-    dev1 under load 10 on 4 cores measures sd 0.7-2 ms, so judge pacing ON strih-snv, not dev1.
   - The async session task (`run_janus_participant`) keeps the HTTP session, the keepalive (its own
     spawned task, so a slow POST never holds up receive) and the decoder. It points the sender at
     each session via `PacedSenderShared::set_target`. A failed send sets a flag the task checks
@@ -1005,16 +937,6 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   (last 5 s of real send spacing), `tx_underflows`, `tx_overflow_trims` and `rx_lost_frames`.
   - Acceptance after deploy: `codec: "opus"`, sd < 0.5, max < 21 on strih-snv.
   - Then a udp 6990 capture: spacing sd < 0.5 ms, max < 21 ms.
-- **Tier-0 verify without cargo.**
-  - `janus_pacing` is std-only: a rustc `--test` replica + `clippy-driver`.
-  - `janus_codec` against the REAL `opus` crate: rustc the `opusic-sys` and `opus` sources from a
-    downloaded `.crate` as rlibs, and link the SYSTEM `libopus.so.0` with
-    `-C link-arg=/usr/lib/x86_64-linux-gnu/libopus.so.0`. opusic-sys has no `#[link]`, so the lib
-    must be passed explicitly. The system lib is 1.4 and the bundled one newer; the API is the same.
-  - `janus_sender` type-checks the same way with `tracing` built per the vban_io recipe, and the
-    pure half of `janus_rtp.rs` awk-extracted with its serde derives stripped. A loopback smoke
-    runs the real thread against a 5.33 ms feeder.
-  - `janus_rtp`'s runtime (reqwest/tokio) and `main.rs` still first compile at CI.
 
 ## M3b — the phone PWA (served by the hub) + the LAN-HTTPS interkom front (issue 1345)
 
@@ -1154,7 +1076,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `scripts/dev1-shading-https-install.sh --site interkom --install` / `--check`, exactly like the
   shading site. The lane only renders + tests.
 
-### Tier-0 (issue 557) — what verified M3b locally
+### Verification (M3b)
 
 - `cargo fmt --all --check` (parses the new http.rs + the integration test); `python3 -m pytest`
   on `test_intercom_webui_1345.py` + `test_shading_https_install_808.py`; `bash -n` +
@@ -1177,7 +1099,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   above. Chromium fake media gives both meters a real signal; 390x844 viewport; every test asserts
   a COMPLETELY empty console. The spec neutralises the SW registration and wraps `getUserMedia` to
   count the PAGE's prompts (the double's room audio uses the unwrapped `window.__realGUM`).
-- **Local run under Tier-0 (no npm install needed):** borrow an existing `@playwright/test`
+- **Local run (no npm install needed):** borrow an existing `@playwright/test`
   (`NODE_PATH=<repo>/e2e/node_modules`, run its `cli.js test` from `intercom/tests/e2e`) and point
   `INTERKOM_E2E_CHROMIUM` at an installed Chromium when the revisions differ. Run it from a script
   FILE (`bash /abs/run.sh`); the worktree guard refuses the inline shape.
@@ -1201,9 +1123,8 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 - Gotchas kept from M3b: a python static test can't catch a JS/CSS runtime bug — run the browser
   check; and the service worker + HTTP cache serve a stale `app.js` across a same-origin re-run
   after an edit — verify on a FRESH origin (a different port).
-- **At CI (first compile):** the `intercom-hub` job type-checks + runs the Rust route/asset unit
-  tests. Expect a Rust TYPE mistake to surface at CI, not locally (the M1 first-compile list above
-  still applies — axum `Json<Arc<T>>` needs serde `rc` (already on), `chunks_exact` deny lint, etc.).
+- **CI:** the `intercom-hub` job runs the Rust route/asset unit tests (the M1 first-compile list
+  above still applies — axum `Json<Arc<T>>` needs serde `rc` (already on), `chunks_exact` deny lint, etc.).
 
 ## M3c — Interkom picture (MJPEG) (issue 1345)
 
@@ -1270,14 +1191,9 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 - Curl-able liveness once the hub runs against a live NDI source:
   `curl -o f.jpg http://strih-snv:8790/interkom.jpg` (200 + a JPEG when a frame is flowing; 503 until
   the first frame). The `video` facet is on `curl http://strih-snv:8790/api/state`.
-- **Tier-0 (locally, no cargo):** `cargo fmt --all --check`; a standalone `rustc --edition 2021
-  --test` replica of the pure pieces (framing / stale / decimator / BGRX→RGB) run RED→GREEN; the
-  converter pytest; `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`; the
-  doc-lazy grep. CI (the `intercom-hub` job, default + `--no-default-features`) is the first real
-  compile — hand-audit the M1/M3a first-compile lint layer (`chunks_exact`, `Json<Arc<T>>`+serde
-  `rc`, dead fields, `map_or`→`is_some_and`, `manual_range_contains`→`(a..=b).contains`,
-  `too_many_arguments`); the ndi-gated `ndi_source.rs` compiles ONLY under `--features ndi`, so a
-  `-D warnings` lint there surfaces at CI, not locally.
+- **Checks:** `cargo fmt --all --check`; the converter pytest; `python3 -c "import yaml;
+  yaml.safe_load(open('.github/workflows/ci.yml'))"`; the doc-lazy grep. CI runs the `intercom-hub`
+  job default + `--no-default-features`; the ndi-gated `ndi_source.rs` compiles ONLY under `--features ndi`.
 - **Live end-to-end (supervisor, needs the rig):** run the hub `--features ndi` against a live NDI
   source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
   in when the source drops.

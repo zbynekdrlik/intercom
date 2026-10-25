@@ -90,8 +90,8 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   - The unit change applies at the next hub restart: setup-strih step 13 reinstalls the unit but
     never restarts a running hub, so a box reads `memory_locked: false` until it is restarted.
   - Tests: `intercom/hub/tests/memory_lock_1401.rs` (std + the crate; the decision, the pre-fault,
-    the main.rs order and the unit pins), the `/api/state` field in `vban_jitter_state_1401.rs` (CI
-    only), `tests/python/test_strih_hub_memlock_1401.py`. Tier-0: add `memory_lock_1401` to R1.
+    the main.rs order and the unit pins), the `/api/state` field in `vban_jitter_state_1401.rs`,
+    `tests/python/test_strih_hub_memlock_1401.py`.
 - **Absolute deadlines.** `MonoClock::sleep_until` = `clock_nanosleep(CLOCK_MONOTONIC,
   TIMER_ABSTIME)`. EINTR resumes toward the same deadline; any other error falls back to a relative
   sleep, so the real-time thread can never spin. The grid is `block_clock::BlockGrid`: tick n is due
@@ -226,7 +226,7 @@ guard and one cap rule.
     up to four ticks late up to five more blocks plus the phase and the jitter arrive. Under the
     old 5-block headroom they reached the cap, the leg trimmed to its target and the caught-up pops
     then ran it dry.
-- **Tests** (all Tier-0 replicable):
+- **Tests**:
   - `tests/setpoint_walk_1401.rs` and `tests/adaptive_target_1401.rs` were removed with the walk
     and the adaptive target (issue 1461).
   - `hub_catchup_1401.rs`: the derived caps, the 21-24 ms and 26 ms rows.
@@ -235,7 +235,7 @@ guard and one cap rule.
     refill re-primes (the start hold until the next read), which keeps the 40 ms row's pipes free of
     trims now that the resampler's phase term, not a steep servo, would take the excess out.
   - `egress_fill_1401.rs`: the guard table with `starved`.
-  - `vban_jitter_state_1401.rs` (CI only): since issue 1461 `rate_ppm`, `asrc_phase_frames` and
+  - `vban_jitter_state_1401.rs`: since issue 1461 `rate_ppm`, `asrc_phase_frames` and
     `resyncs` in the facet, never a servo field.
   - A mutation pass over the walk, the refill and the caps (17 mutants) leaves no survivor. Several
     pins exist because an earlier test set let a mutant through: the band, the drift-first order
@@ -243,47 +243,8 @@ guard and one cap rule.
     share (found by review round 1), and a second's corrections staying spread across it (an
     uncapped walk plan otherwise bunched them at the 1000-frame spacing).
 
-## Tier-0 verify (no cargo)
+## Test notes
 
-Three plain-rustc replicas over the real sources and the "VBAN rate" rlibs (anyhow, tracing,
-intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
-`extern crate self as intercom_hub;`, so the real test files compile unchanged:
-
-- **R1:** fir / mulaw / vban_rate / vban_jitter / asrc / block_clock / mix_thread / pipe_fill /
-  janus_pacing / vban_io, local_audio with its serde derive stripped, and the
-  test files `hub_catchup_1401`, `mix_thread_1401`, `vban_jitter_1401`, `vban_jitter_bench_1401`,
-  `asrc_1461`, `asrc_leg_1461`, `egress_asrc_1461`, `egress_servo_1401` (minus its serde_json key check),
-  `egress_fill_1401` (cut to its five pipe tests: the target, the guard table, FIONREAD, the two
-  real-pipe sink writers; the rest needs state / matrix), under `rustc --test` and
-  `clippy-driver --test -D warnings`. A lighter std-only root (issue 1461 lane 1) mounts only
-  fir / block_clock / vban_jitter / asrc / pipe_fill / janus_pacing and the
-  JitterBuffer section of vban_io (its `tracing::` calls pointed at a stub macro module). Set
-  `CARGO_MANIFEST_DIR=<worktree>/intercom/hub` at COMPILE time for the tests that read the unit and
-  main.rs. 112 tests, ~5 s at opt-level 2; at opt-level 0 (CI's debug) the 21-24 ms bench row
-  takes ~6 s and the growing-gap replay ~10 s.
-- **R2:** state.rs (serde stripped, its in-file tests cut) + inputs.rs over stub matrix /
-  local_audio / janus_rtp / ndi_video modules. Since step 4 `vban_jitter` needs `block_clock`
-  (`vban_cap_blocks` reads `CATCHUP_MAX_BLOCKS`), so the root `#[path]`-includes it too. It
-  mirrors the status-line assertions of `vban_jitter_state_1401.rs` on the same three-participant
-  matrix.
-- **R3:** main.rs's `BlockLoop`, `run_block_loop`, `LocalAudioWiring`, the spawn + watch snippet
-  and the receive task's push + target-change snippet, cut out and type-checked + clippy-linted
-  against the real modules with stub `Engine`, `watch::Sender` and stats types. Since issue 1467
-  the receive task is `spawn_vban_receive`: cut its `Ok((len, from)) => match classify_packet ...`
-  arm and SPLICE the text into a sync `match` over a list of datagrams with python (`include!` cannot
-  stand in for match arms), so the real arm runs against the real vban_io / vban_classify /
-  vban_rate. Every root that mounts `vban_io.rs` also mounts `vban_classify.rs`.
-- **CI only:** `vban_jitter_state_1401.rs` (serde_json + `Matrix::from_toml`) and the deployed-TOML
-  tests (`vban_program_target_1401`'s two). `vban_program_target_1401`'s
-  three other tests run in a one-off root the same way (minus the matrix imports). A first cut of the lost-ticks
-  status-line test expected `participants=2` on a three-participant matrix and no replica compiled
-  it (review 1): mirror such an assertion in R2 before pushing.
-- **A merged replica root hides CI's dead code (issue 1461 lane 2).** One root that mounts every
-  test file as a module under `#![allow(dead_code)]` (or with a sibling file using the helper)
-  passes clippy while CI, where each `tests/*.rs` is its own crate, fails `-D warnings` on an
-  unused const. Also lint every touched std-only test file as ITS OWN crate: build the hub modules
-  into an rlib (`rustc --crate-type rlib --crate-name intercom_hub -A dead_code lib.rs`), then
-  `clippy-driver --edition 2021 --test -D warnings tests/<f>.rs --extern intercom_hub=<rlib>`.
 - **A tone grader needs a frequency that is not a whole number of cycles per splice.** A 1 kHz
   tone repeats every 48 samples, exactly the Janus ring's old 1 ms splice, so a crossfaded 1 ms
   drop/repeat was invisible to THD+N; `egress_asrc_1461.rs` uses 997 Hz. Check the grader's own
@@ -293,10 +254,8 @@ intercom-vban, libc; `.claude/rules/strih-intercom.md`). The root starts with
   backed by the `sched_setscheduler(2)` man page and the live `ps -L` check above.
 - The resampler tests (`asrc_1461`, `asrc_leg_1461`, the re-pinned benches) run about 19 s at
   opt-level 0 on dev1; `vban_program_target_1401`'s 10 min sample-level replay alone takes ~30 s.
-- **Mutation probe (no cargo, step 4).** Copy `intercom/hub/src`, `intercom/hub/tests` and
-  `systemd/intercom-hub.service` into a scratch root, apply ONE exact-string replacement to a
-  source file (assert it matches once), and run the R1 script with `WT=<scratch root>`,
-  `CLIPPY=0` and `TESTS=` the touched test files. A mutant that passes is a missing pin. Step 4's
+- **Mutation probe (step 4).** Apply ONE exact-string replacement to a source file (assert it
+  matches once) and run the touched test files. A mutant that passes is a missing pin. Step 4's
   first test set let 4 of 14 through (the band, drift-first, keeping the window at `set_target`,
   the cancel of the unspent walk share), each now pinned. Two survivors are equivalent on
   256-frame blocks and are not gaps: `since_walk` starting at 0, and the walk spacing rounded

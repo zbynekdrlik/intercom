@@ -89,7 +89,7 @@ Design: issue 1424 comment 6151522810 (Approach 1).
   EDID hex trips the secret-staging hook (32-hex lines): `# airuleset:secret-ok <reason>` on the
   `git commit`.
 
-## Tests + Tier-0
+## Tests
 
 - `hdmi_audio_1424.rs` (std-only): parsers on the live captures, the resolve, the IEC958 argv, the
   aplay/xrandr argv, the ELD watch decision, the leg stats, the start hold.
@@ -97,11 +97,7 @@ Design: issue 1424 comment 6151522810 (Approach 1).
   1024-frame ALSA buffer on its own clock, 0.1 ms steps, the sink's 1 ms readings continue through a
   block-loop stall): no refill/trim/xrun at 0/±50/±200 ppm, connect delays 0..200 ms, 15..26 ms stalls,
   the pipe back at 640.
-- `hdmi_matrix_1424.rs` + `deployed_matrix_pp_1412.rs`: CI only (serde/toml).
-- Local: a plain-rustc replica (`#[path]` mounts of hdmi_audio, hdmi_leg, pipe_fill, local_audio with
-  its serde derive stripped, vban_io + deps; rlibs anyhow/tracing/libc/intercom-vban per
-  `strih-intercom.md` "VBAN rate") + `clippy-driver --test -D warnings`; state.rs/matrix.rs type-check
-  with serde stripped and a `toml` stub module.
+- `hdmi_matrix_1424.rs` + `deployed_matrix_pp_1412.rs` (serde/toml).
 
 ## Live acceptance (supervisor, after the hub deploy + part 2)
 
