@@ -356,7 +356,13 @@ impl HubState {
     }
 
     /// Attach each VBAN return leg's current address (issue 1431), as `(participant id, state)`.
-    pub fn attach_return_addrs(&mut self, _legs: Vec<(usize, ReturnAddrState)>) {}
+    pub fn attach_return_addrs(&mut self, legs: Vec<(usize, ReturnAddrState)>) {
+        for (id, state) in legs {
+            if let Some(p) = self.participants.get_mut(id) {
+                p.return_addr = Some(state);
+            }
+        }
+    }
 
     /// A one-line status summary for the periodic log (a dev1 watchdog greps it): the underruns and
     /// overruns summed over every participant, each naming the leg with the most (issue 1401:
