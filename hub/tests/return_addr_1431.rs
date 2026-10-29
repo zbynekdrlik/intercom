@@ -163,6 +163,32 @@ fn the_learn_filter_locks_the_table_only_on_a_new_steady_source() {
     );
 }
 
+/// Review round 2: a camera that moves away and back to an address it used before is followed both
+/// ways, each move logged once.
+#[test]
+fn a_camera_moving_back_to_an_old_address_is_followed() {
+    let mut f = LearnFilter::new(3);
+    let mut t = table();
+    let mut moves = Vec::new();
+    for last in [61, 62, 61] {
+        assert_eq!(
+            feed(&mut f, 0, ip(last), LEARN_CONFIRM_PACKETS),
+            1,
+            "{last}"
+        );
+        moves.push(t.learn(0, ip(last)).map(|c| (c.old, c.new)));
+    }
+    assert_eq!(
+        moves,
+        vec![
+            None,
+            Some((Some(sa(61)), sa(62))),
+            Some((Some(sa(62)), sa(61)))
+        ],
+        "the first packet from the configured address moves nothing"
+    );
+}
+
 /// Review round 1: two senders using one stream name (a stray tool, a duplicated box) must not
 /// flip the leg, lock the table or log on every packet.
 #[test]
@@ -333,10 +359,17 @@ fn main_learns_in_the_receive_task_and_sends_from_the_table() {
     let lp = body("fn run_block_loop(");
     assert!(lp.contains(".currents()"));
     assert!(lp.contains("attach_return_addrs("));
-    assert!(
-        !lp.contains("unwrap_or_default"),
-        "a poisoned table lock never silences every leg"
-    );
+    // A poisoned table lock is recovered, never an empty list that silences every leg: each
+    // read of the table in the block loop goes through `into_inner`.
+    for read in [".currents()", ".states()"] {
+        let at = lp.find(read).expect(read);
+        let lock = lp[..at].rfind("return_addrs").expect("the table lock");
+        assert!(
+            lp[lock..at].contains(".unwrap_or_else(|e| e.into_inner())"),
+            "{read} reads a recovered lock: {}",
+            &lp[lock..at]
+        );
+    }
     let refresh = body("fn spawn_output_resolve_refresh(");
     assert!(refresh.contains(".set_configured("));
     assert!(
