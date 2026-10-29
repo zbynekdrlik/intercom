@@ -42,6 +42,7 @@ pub mod mix_thread;
 pub mod mulaw;
 pub mod ndi_video;
 pub mod pipe_fill;
+pub mod return_addr;
 pub mod state;
 pub mod turn;
 pub mod vban_classify;

@@ -27,7 +27,8 @@ fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
         m.participants.iter().all(|p| p.adapter != ADAPTER_PIPEWIRE),
         "no pipewire participant on strih-pp"
     );
-    assert_eq!((m.participants.len(), m.points.len()), (8, 74));
+    // issue 1431: every camera cam1-7 (a joint event brings the SNV cameras here too).
+    assert_eq!((m.participants.len(), m.points.len()), (11, 164));
     assert!(m.janus.is_some(), "the phones leg");
     assert_eq!(
         m.video.as_ref().map(|v| v.ndi_source_name.as_str()),
@@ -39,7 +40,10 @@ fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
         .map(|(id, _, _)| m.participants[*id].name.clone())
         .collect();
     sent.sort();
-    assert_eq!(sent, ["cam1", "cam4", "cam6", "cam7"]);
+    assert_eq!(
+        sent,
+        ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+    );
 }
 
 /// issue 1412 slice B: the Linux stream box takes its program audio as VBAN `stream` from lv1

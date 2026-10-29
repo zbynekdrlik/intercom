@@ -39,6 +39,7 @@ use intercom_hub::mix_thread::{
     MIX_THREAD_NAME,
 };
 use intercom_hub::mulaw::stereo_to_mono;
+use intercom_hub::return_addr::{LearnFilter, ReturnAddrs};
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
@@ -122,26 +123,29 @@ async fn main() -> Result<()> {
     let input_streams = matrix.vban_input_streams();
     let outputs = matrix.vban_outputs();
     let n_outputs = outputs.len();
-    // Output destinations are resolved ONCE here and refreshed by a background task every
-    // OUTPUT_RESOLVE_REFRESH_S (a cambox on a new DHCP lease is picked up within a minute) — the
-    // block loop below only ever sends to a cached SocketAddr. A host STRING on that hot path was a
-    // synchronous getaddrinfo per 5.33 ms block (M1b live finding, 19.9.2026: ~95 pkt/s instead of
-    // 187.5 + a jitter-buffer overrun storm). A failed refresh keeps the last-known-good address.
-    let out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>> = Arc::new(Mutex::new(
-        outputs
-            .iter()
-            .map(|(_, stream, host)| {
-                let a = resolve_vban_addr(host, intercom_vban::VBAN_PORT);
-                match a {
-                    Some(addr) => tracing::info!(%stream, %host, %addr, "VBAN output resolved"),
-                    None => tracing::warn!(%stream, %host, "VBAN output UNRESOLVED at start — will retry every {OUTPUT_RESOLVE_REFRESH_S}s"),
+    // Each output leg's return address (issue 1431): the TOML host is resolved ONCE here (and
+    // refreshed by a background task every OUTPUT_RESOLVE_REFRESH_S, a cambox on a new DHCP lease
+    // is picked up within a minute) as the START-UP address; from the leg's first packet on, the
+    // receive task moves it to the source IP its own stream arrives from, so a camera that sends to
+    // whichever strih `strih.lan` names gets its mix back there. The block loop below only ever
+    // sends to a cached SocketAddr: a host STRING on that hot path was a synchronous getaddrinfo
+    // per 5.33 ms block (M1b live finding, 19.9.2026: ~95 pkt/s instead of 187.5 + a jitter-buffer
+    // overrun storm). A failed refresh keeps the last-known-good address.
+    let return_addrs: Arc<Mutex<ReturnAddrs>> = Arc::new(Mutex::new(ReturnAddrs::from_matrix(
+        &matrix,
+        |host| {
+            let a = resolve_vban_addr(host, intercom_vban::VBAN_PORT);
+            match a {
+                Some(addr) => tracing::info!(%host, %addr, "VBAN output start-up address resolved"),
+                None => {
+                    tracing::warn!(%host, "VBAN output UNRESOLVED at start — will retry every {OUTPUT_RESOLVE_REFRESH_S}s and take the address of its first packet")
                 }
-                a
-            })
-            .collect(),
-    ));
+            }
+            a
+        },
+    )));
     spawn_output_resolve_refresh(
-        out_addrs.clone(),
+        return_addrs.clone(),
         outputs.iter().map(|(_, _, h)| h.clone()).collect(),
     );
     let engine = Arc::new(Engine::new(matrix.clone()));
@@ -274,14 +278,15 @@ async fn main() -> Result<()> {
     // (`decode_rejects`, the same slot) and logged once per transition; unknown names stay silent.
     let rate_stats: Arc<Vec<VbanRateStats>> =
         Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
-    spawn_vban_receive(
+    spawn_vban_receive(VbanReceive {
         vban_socket,
         input_streams,
-        jitter.clone(),
-        rate_stats.clone(),
+        jitter: jitter.clone(),
+        rate_stats: rate_stats.clone(),
+        return_addrs: return_addrs.clone(),
         n,
         sample_rate,
-    );
+    });
 
     // --- block/mix thread: pop a block from every buffer, mix N-1, send each cambox's stream --
     // One NON-BLOCKING send socket per output slot (issue 1401): one shared blocking socket let the
@@ -304,7 +309,7 @@ async fn main() -> Result<()> {
         rate_stats,
         outputs,
         senders,
-        out_addrs,
+        return_addrs,
         janus_ring,
         janus_report,
         local_audio,
@@ -364,16 +369,24 @@ async fn main() -> Result<()> {
 /// its `decode_rejects` slot and logged (issue 1467); foreign traffic is ignored. The converters and
 /// the reject state live in this task alone (no lock); nothing is logged under the jitter lock, since
 /// the real-time hub-mix thread takes that lock every block (issue 1401).
-fn spawn_vban_receive(
-    vban_socket: tokio::net::UdpSocket,
-    input_streams: HashMap<String, usize>,
-    jitter: Arc<Mutex<Vec<JitterBuffer>>>,
-    rate_stats: Arc<Vec<VbanRateStats>>,
-    n: usize,
-    sample_rate: u32,
-) {
+///
+/// Issue 1431: a decoded packet also teaches its participant's return leg the address it came from
+/// (`ReturnAddrs::learn`). The table is locked only when a stream's source IP changed and held for
+/// `LEARN_CONFIRM_PACKETS` packets ([`LearnFilter`]), never per packet, and the change is logged
+/// after the lock.
+fn spawn_vban_receive(rx: VbanReceive) {
+    let VbanReceive {
+        vban_socket,
+        input_streams,
+        jitter,
+        rate_stats,
+        return_addrs,
+        n,
+        sample_rate,
+    } = rx;
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
+        let mut learn_filter = LearnFilter::new(n);
         let mut converters: Vec<VbanRateConverter> = (0..n)
             .map(|_| VbanRateConverter::new(sample_rate))
             .collect();
@@ -392,6 +405,15 @@ fn spawn_vban_receive(
                         let arrived = Instant::now();
                         if let Some(rejects) = decode_rejects.get_mut(id) {
                             note_decoded(rejects, &audio.stream_name, from, arrived);
+                        }
+                        if learn_filter.is_new(id, from.ip()) {
+                            let change = return_addrs
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .learn(id, from.ip());
+                            if let Some(change) = change {
+                                tracing::info!("{}", change.log_line());
+                            }
                         }
                         let Some(conv) = converters.get_mut(id) else {
                             continue;
@@ -428,6 +450,18 @@ fn spawn_vban_receive(
     });
 }
 
+/// What the VBAN receive task owns (grouped: one argument, clippy's `too_many_arguments`).
+struct VbanReceive {
+    vban_socket: tokio::net::UdpSocket,
+    input_streams: HashMap<String, usize>,
+    jitter: Arc<Mutex<Vec<JitterBuffer>>>,
+    rate_stats: Arc<Vec<VbanRateStats>>,
+    /// Every output leg's return address, learned here per packet (issue 1431).
+    return_addrs: Arc<Mutex<ReturnAddrs>>,
+    n: usize,
+    sample_rate: u32,
+}
+
 /// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
 /// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
 fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
@@ -445,10 +479,9 @@ fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
 
 /// Re-resolve the VBAN output hosts every `OUTPUT_RESOLVE_REFRESH_S` off the hot path (a cambox on a
 /// new DHCP lease is picked up within a minute). A failed lookup keeps the last-known-good address.
-fn spawn_output_resolve_refresh(
-    out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>>,
-    hosts: Vec<String>,
-) {
+/// It moves only a leg's START-UP address: a leg that has learned its address from its own stream
+/// keeps it (issue 1431).
+fn spawn_output_resolve_refresh(return_addrs: Arc<Mutex<ReturnAddrs>>, hosts: Vec<String>) {
     tokio::spawn(async move {
         let mut ticker =
             tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
@@ -463,13 +496,17 @@ fn spawn_output_resolve_refresh(
                     .collect::<Vec<_>>()
             })
             .await;
-            if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
-                for (slot, a) in cur.iter_mut().zip(fresh) {
-                    if a.is_some() && *slot != a {
-                        tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
-                        *slot = a;
-                    }
-                }
+            let Ok(fresh) = fresh else { continue };
+            let changes: Vec<_> = {
+                let mut table = return_addrs.lock().unwrap_or_else(|e| e.into_inner());
+                fresh
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(slot, a)| a.and_then(|addr| table.set_configured(slot, addr)))
+                    .collect()
+            };
+            for change in changes {
+                tracing::info!("{} (start-up address re-resolved)", change.log_line());
             }
         }
     });
@@ -486,8 +523,9 @@ struct BlockLoop {
     outputs: Vec<(usize, String, String)>,
     /// One non-blocking send socket per output slot (issue 1401).
     senders: Vec<VbanSender>,
-    /// Each output slot's last resolved address, refreshed off the hot path.
-    out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>>,
+    /// Each output slot's return address: learned from the leg's own stream, else its resolved
+    /// start-up address (issue 1431).
+    return_addrs: Arc<Mutex<ReturnAddrs>>,
     janus_ring: Option<Arc<Mutex<PacedRing>>>,
     janus_report: Option<(usize, Arc<intercom_hub::janus_rtp::JanusSharedStats>)>,
     local_audio: LocalAudioWiring,
@@ -514,7 +552,7 @@ fn run_block_loop(bl: BlockLoop) {
         rate_stats,
         outputs,
         senders,
-        out_addrs,
+        return_addrs,
         janus_ring,
         janus_report,
         local_audio,
@@ -640,8 +678,11 @@ fn run_block_loop(bl: BlockLoop) {
 
             // Send each cambox its mixed stereo stream — to the CACHED resolved address only,
             // through the slot's own non-blocking socket.
-            let addrs: Vec<Option<SocketAddr>> =
-                out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
+            // A poisoned lock still holds a valid table (no method panics halfway): keep sending.
+            let addrs: Vec<Option<SocketAddr>> = return_addrs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .currents();
             for (slot, ((id, stream, host), sender)) in outputs.iter().zip(&senders).enumerate() {
                 let Some(addr) = addrs.get(slot).copied().flatten() else {
                     if cycle.is_multiple_of(status_every as u64) {
@@ -706,6 +747,13 @@ fn run_block_loop(bl: BlockLoop) {
                     }
                 }
                 let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                // Each VBAN leg's current return address (issue 1431); the states are copied out
+                // of the lock and attached after it.
+                let return_states = return_addrs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .states();
+                snapshot.attach_return_addrs(return_states);
                 // The run's late ticks (issue 1401): a caught-up one is no loss, a lost one is a
                 // block lost on every output.
                 snapshot.caught_up_ticks = caught_up_total;

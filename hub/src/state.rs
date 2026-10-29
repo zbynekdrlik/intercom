@@ -14,6 +14,7 @@ use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
+use crate::return_addr::ReturnAddrState;
 use crate::vban_jitter::NetworkFillStats;
 
 /// A resampler leg's jitter buffer as `/api/state` shows it (issues 1401 + 1461): the fixed target
@@ -258,6 +259,10 @@ pub struct ParticipantState {
     /// The card leg (issue 1438), present only for an `alsa` participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alsa: Option<AlsaLegState>,
+    /// The VBAN return leg's current address (issue 1431), present only for a participant the hub
+    /// sends a VBAN stream to. Set by the daemon after the snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_addr: Option<ReturnAddrState>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -331,6 +336,7 @@ impl HubState {
                     alsa: matrix
                         .alsa_spec(id)
                         .map(|spec| AlsaLegState::new(spec, s.alsa.unwrap_or_default())),
+                    return_addr: None,
                 }
             })
             .collect();
@@ -346,6 +352,15 @@ impl HubState {
             lost_ticks: 0,
             mix_thread_sched: None,
             memory_locked: None,
+        }
+    }
+
+    /// Attach each VBAN return leg's current address (issue 1431), as `(participant id, state)`.
+    pub fn attach_return_addrs(&mut self, legs: Vec<(usize, ReturnAddrState)>) {
+        for (id, state) in legs {
+            if let Some(p) = self.participants.get_mut(id) {
+                p.return_addr = Some(state);
+            }
         }
     }
 

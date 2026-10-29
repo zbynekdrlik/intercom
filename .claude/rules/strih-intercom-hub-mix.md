@@ -145,7 +145,8 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
     26 / 27 ms; from 27 ms the program pipe 30).
 - **Residual: locks shared with SCHED_OTHER threads.** Std mutexes have no priority inheritance.
   The mix thread takes the jitter buffers' mutex (the VBAN receive task, the local capture threads
-  and the Janus adapter push into it), the Janus ring's and the `out_addrs` mutex, and the watch
+  and the Janus adapter push into it), the Janus ring's and the return-address table's mutex (the
+  VBAN receive task takes it only when a stream's source IP changes, issue 1431), and the watch
   channel's write lock on every publish (its readers, the status task and the HTTP handlers, only
   clone the snapshot's Arc under the read lock). A SCHED_OTHER
   holder preempted mid-section (each holds it for a few µs) holds the real-time thread until it
