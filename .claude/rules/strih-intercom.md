@@ -33,7 +33,46 @@ converter). Design: issue 1345 comment "Design (main, 19.9.2026)"; the VB-Matrix
 stream name == its own `camN` on `0.0.0.0:6980` (any other name ignored), playing them stereo. The
 hub must speak exactly this: it demuxes incoming `camN` into that participant's jitter buffer
 (unknown names dropped), and sends each cambox's mixed **stereo PCM16** output back as stream `camN`
-to `camN.lan:6980`. Because the codec is the SAME crate, the bytes are identical by construction.
+to port 6980 of the address `camN`'s own stream arrives from (issue 1431, below; the TOML `host`,
+`camN.lan` on SNV, is only the start-up address). Because the codec is the SAME crate, the bytes are
+identical by construction.
+
+## Each return leg follows its own stream's source (issue 1431, a joint event)
+
+A camera sends to `strih.lan:6980`, so `strih.lan` is the ONE switch of a joint event (the PP
+cameras on the SNV strih). The hub therefore sends each `camN` return leg to the SOURCE IP of
+`camN`'s own incoming stream, port 6980 (the cambox sends from an ephemeral port and listens on
+6980, `src/intercom.rs`), learned per packet. Design: issue 1431 comment 6486486003.
+
+- **`intercom/hub/src/return_addr.rs` (pure).** `ReturnAddrs` = one entry per declared VBAN leg
+  (`Matrix::vban_outputs`, slot order = the senders'). Current address = the learned one, else the
+  resolved TOML host (the START-UP address, used before the first packet). `learn` (a decoded
+  packet of the participant's own `in_stream`), `set_configured` (the 60 s DNS refresh: it never
+  overrides a learned address), `currents` (the block loop), `states` (`/api/state`). A participant
+  exists only when its leg is configured: an undeclared stream stays foreign traffic.
+- **The locks.** The receive task keeps a `LearnFilter` (the last source IP per participant) and
+  takes the table's lock only when a stream's source changes, never per packet; the change is logged
+  after the lock, once per change: `leg camN return address <old> -> <new>` (`unresolved` for none).
+  The block loop copies `currents()` out of the same lock once per block (it was the `out_addrs`
+  vector before).
+- **`/api/state`:** each leg's `return_addr: {addr, source}`, `source` = `learned` / `configured` /
+  `unresolved`; absent on a participant without a leg.
+- **Both venue hubs list cam1-7.** `intercom.strih-snv.toml` always did (`camN.lan`, generated, the
+  byte-parity pin is unchanged). `intercom.strih-pp.toml` lists the literal `10.77.9.6N` (a camera
+  has the same address at both venues; the PP router has no `camN.lan`), the PP shape for every
+  camera: the full camera mesh, the cutters and the phones on both ears.
+- **N-1 and the sockets are unchanged:** a learned address only re-targets the leg's own
+  non-blocking socket; what is mixed into it is still the matrix's.
+- **The "never send VBAN to a real cambox while another hub is live" rule still holds:** a learned
+  address is one that just sent this hub its own stream. The start-up address is still sent to
+  before the first packet, exactly as before.
+- **Known limit: a muted cambox sends nothing** (`src/intercom.rs`: it starts MUTED after every boot
+  and sends only while unmuted), so a leg learns its address only after the cameraman's first
+  unmute. Until then the start-up address is used, which is right as long as the camera keeps its
+  fixed `10.77.9.6N` at both venues.
+- Tests: `intercom/hub/tests/return_addr_1431.rs` (the table, the filter, `/api/state`, both TOMLs'
+  legs, the PP mesh, the `main.rs` wiring anchor); the PP counts in `deployed_matrix_pp_1412.rs` and
+  `tests/python/test_strih_pp_box_1412.py` (11 participants / 164 points).
 
 ## The N-1 (mix-minus) invariant — enforced structurally, not by config
 
