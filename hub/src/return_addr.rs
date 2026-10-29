@@ -12,8 +12,21 @@
 //!   a stream of an undeclared name is foreign traffic as before;
 //! - change what is mixed: the N-1 invariant lives in `Matrix::from_toml` + the engine; a learned
 //!   address only re-targets the leg's own non-blocking socket (one per output slot, issue 1401);
-//! - send to a box that is not talking to this hub: a learned address is one this hub just
-//!   received the same `camN` stream from.
+//! - flip on a stream that arrives from two senders: a new source is taken only after
+//!   [`LEARN_CONFIRM_PACKETS`] packets in a row from it ([`LearnFilter`]), so two senders of one
+//!   name (a stray tool, a duplicated box) never move the leg, lock the table or log per packet;
+//! - learn an IPv6 address: the senders are IPv4 sockets, so an IPv4-mapped source
+//!   (`::ffff:a.b.c.d`, a dual-stack bind) is learned as its IPv4 address and a real IPv6 one is
+//!   ignored (the leg keeps its address).
+//!
+//! Known limits:
+//! - an address never expires: a hub keeps sending a leg's learned (or start-up) address after the
+//!   camera moved to another hub. While the two venue hubs sit on separate camera LANs that
+//!   address is an absent neighbour there and costs nothing; never run two hubs that reach the
+//!   same cameras (the cambox has no source filter: double talkback). A silence timeout is no fix,
+//!   since a muted cambox sends nothing and still needs its mix;
+//! - the rig LAN is trusted: a host that sends a steady `camN` stream redirects that leg, as it
+//!   could already inject audio into it.
 //!
 //! Pure and std-only (serde for the `/api/state` view): the receive task learns, the block loop
 //! reads [`ReturnAddrs::currents`], the refresh task moves the start-up address.
@@ -27,8 +40,18 @@ use crate::matrix::Matrix;
 /// The port a cambox listens on for its return mix (the VBAN port, never the packet's source port).
 pub const RETURN_PORT: u16 = intercom_vban::VBAN_PORT;
 
-/// Packets in a row from one new source before a leg learns it.
-pub const LEARN_CONFIRM_PACKETS: u32 = 1;
+/// Packets in a row from one new source before a leg learns it: 8 cambox packets = 21 ms of a
+/// camera's stream (128 frames each at 48 kHz). Two senders alternating never get there.
+pub const LEARN_CONFIRM_PACKETS: u32 = 8;
+
+/// The address a leg can send to from `from`: IPv4 (an IPv4-mapped IPv6 address unmapped), else
+/// `None` (the senders are IPv4 sockets).
+fn ipv4_source(from: IpAddr) -> Option<IpAddr> {
+    match from.to_canonical() {
+        v4 @ IpAddr::V4(_) => Some(v4),
+        IpAddr::V6(_) => None,
+    }
+}
 
 /// Where a leg's current return address comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -156,6 +179,7 @@ impl ReturnAddrs {
     /// `from:6980`. `None` for a participant without a configured leg, or when the leg's current
     /// address did not move (the first packet from the configured address only marks it learned).
     pub fn learn(&mut self, participant: usize, from: IpAddr) -> Option<ReturnChange> {
+        let from = ipv4_source(from)?;
         let slot = self.slot_of.get(participant).copied().flatten()?;
         let leg = &mut self.legs[slot];
         let old = leg.current();
@@ -196,30 +220,50 @@ fn change(leg: &ReturnLeg, old: Option<SocketAddr>) -> Option<ReturnChange> {
     })
 }
 
-/// The receive task's per-participant memory of the last source IP, so the shared table (whose
-/// lock the real-time block loop takes every block) is locked only when a stream's source changes,
-/// never per packet.
+/// The receive task's per-participant memory of the accepted source IP and of a candidate, so the
+/// shared table (whose lock the real-time block loop takes every block) is locked only when a
+/// stream's source has CHANGED and held for [`LEARN_CONFIRM_PACKETS`] packets, never per packet.
 #[derive(Debug, Clone, Default)]
 pub struct LearnFilter {
-    last: Vec<Option<IpAddr>>,
+    slots: Vec<FilterSlot>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FilterSlot {
+    accepted: Option<IpAddr>,
+    candidate: Option<(IpAddr, u32)>,
 }
 
 impl LearnFilter {
     pub fn new(n_participants: usize) -> Self {
         LearnFilter {
-            last: vec![None; n_participants],
+            slots: vec![FilterSlot::default(); n_participants],
         }
     }
 
-    /// True the first time `participant`'s stream arrives from `from` (and remembers it). An id
-    /// outside the matrix is never new.
+    /// True on the packet that makes a new source of `participant`'s stream steady (its
+    /// [`LEARN_CONFIRM_PACKETS`]th in a row), and remembers it. A packet from the accepted source
+    /// or from another candidate restarts the count. An id outside the matrix is never new.
     pub fn is_new(&mut self, participant: usize, from: IpAddr) -> bool {
-        match self.last.get_mut(participant) {
-            Some(last) if *last != Some(from) => {
-                *last = Some(from);
-                true
-            }
-            _ => false,
+        let from = from.to_canonical();
+        let Some(slot) = self.slots.get_mut(participant) else {
+            return false;
+        };
+        if slot.accepted == Some(from) {
+            slot.candidate = None;
+            return false;
+        }
+        let seen = match slot.candidate {
+            Some((ip, n)) if ip == from => n + 1,
+            _ => 1,
+        };
+        if seen >= LEARN_CONFIRM_PACKETS {
+            slot.accepted = Some(from);
+            slot.candidate = None;
+            true
+        } else {
+            slot.candidate = Some((from, seen));
+            false
         }
     }
 }

@@ -371,8 +371,9 @@ async fn main() -> Result<()> {
 /// the real-time hub-mix thread takes that lock every block (issue 1401).
 ///
 /// Issue 1431: a decoded packet also teaches its participant's return leg the address it came from
-/// (`ReturnAddrs::learn`). The table is locked only when a stream's source IP changes
-/// ([`LearnFilter`]), never per packet, and the change is logged after the lock.
+/// (`ReturnAddrs::learn`). The table is locked only when a stream's source IP changed and held for
+/// `LEARN_CONFIRM_PACKETS` packets ([`LearnFilter`]), never per packet, and the change is logged
+/// after the lock.
 fn spawn_vban_receive(rx: VbanReceive) {
     let VbanReceive {
         vban_socket,
@@ -408,8 +409,8 @@ fn spawn_vban_receive(rx: VbanReceive) {
                         if learn_filter.is_new(id, from.ip()) {
                             let change = return_addrs
                                 .lock()
-                                .ok()
-                                .and_then(|mut t| t.learn(id, from.ip()));
+                                .unwrap_or_else(|e| e.into_inner())
+                                .learn(id, from.ip());
                             if let Some(change) = change {
                                 tracing::info!("{}", change.log_line());
                             }
@@ -496,13 +497,13 @@ fn spawn_output_resolve_refresh(return_addrs: Arc<Mutex<ReturnAddrs>>, hosts: Ve
             })
             .await;
             let Ok(fresh) = fresh else { continue };
-            let changes: Vec<_> = match return_addrs.lock() {
-                Ok(mut table) => fresh
+            let changes: Vec<_> = {
+                let mut table = return_addrs.lock().unwrap_or_else(|e| e.into_inner());
+                fresh
                     .into_iter()
                     .enumerate()
                     .filter_map(|(slot, a)| a.and_then(|addr| table.set_configured(slot, addr)))
-                    .collect(),
-                Err(_) => continue,
+                    .collect()
             };
             for change in changes {
                 tracing::info!("{} (start-up address re-resolved)", change.log_line());
@@ -677,10 +678,11 @@ fn run_block_loop(bl: BlockLoop) {
 
             // Send each cambox its mixed stereo stream — to the CACHED resolved address only,
             // through the slot's own non-blocking socket.
+            // A poisoned lock still holds a valid table (no method panics halfway): keep sending.
             let addrs: Vec<Option<SocketAddr>> = return_addrs
                 .lock()
-                .map(|t| t.currents())
-                .unwrap_or_default();
+                .unwrap_or_else(|e| e.into_inner())
+                .currents();
             for (slot, ((id, stream, host), sender)) in outputs.iter().zip(&senders).enumerate() {
                 let Some(addr) = addrs.get(slot).copied().flatten() else {
                     if cycle.is_multiple_of(status_every as u64) {
@@ -747,7 +749,10 @@ fn run_block_loop(bl: BlockLoop) {
                 let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
                 // Each VBAN leg's current return address (issue 1431); the states are copied out
                 // of the lock and attached after it.
-                let return_states = return_addrs.lock().map(|t| t.states()).unwrap_or_default();
+                let return_states = return_addrs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .states();
                 snapshot.attach_return_addrs(return_states);
                 // The run's late ticks (issue 1401): a caught-up one is no loss, a lost one is a
                 // block lost on every output.
