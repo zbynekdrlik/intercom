@@ -27,6 +27,9 @@ use crate::matrix::Matrix;
 /// The port a cambox listens on for its return mix (the VBAN port, never the packet's source port).
 pub const RETURN_PORT: u16 = intercom_vban::VBAN_PORT;
 
+/// Packets in a row from one new source before a leg learns it.
+pub const LEARN_CONFIRM_PACKETS: u32 = 1;
+
 /// Where a leg's current return address comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,8 +45,8 @@ pub enum ReturnSource {
 /// One leg's return address as `/api/state` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReturnAddrState {
-    /// `ip:6980`, null while unresolved.
-    pub addr: Option<String>,
+    /// `ip:6980` (serde writes a `SocketAddr` as that string), null while unresolved.
+    pub addr: Option<SocketAddr>,
     pub source: ReturnSource,
 }
 
@@ -175,7 +178,7 @@ impl ReturnAddrs {
                 (
                     l.participant,
                     ReturnAddrState {
-                        addr: l.current().map(|a| a.to_string()),
+                        addr: l.current(),
                         source,
                     },
                 )

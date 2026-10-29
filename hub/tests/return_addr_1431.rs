@@ -3,12 +3,13 @@
 //! `host` is only the start-up address used before the first packet; a participant still exists
 //! only when its leg is configured; both venue TOMLs list cam1-7 so either hub serves every camera.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use intercom_hub::matrix::Matrix;
 use intercom_hub::return_addr::{
-    LearnFilter, ReturnAddrState, ReturnAddrs, ReturnChange, ReturnSource, RETURN_PORT,
+    LearnFilter, ReturnAddrState, ReturnAddrs, ReturnChange, ReturnSource, LEARN_CONFIRM_PACKETS,
+    RETURN_PORT,
 };
 use intercom_hub::state::{HubState, RuntimeStats};
 
@@ -46,7 +47,7 @@ fn before_the_first_packet_a_leg_uses_its_configured_start_up_address() {
             (
                 0,
                 ReturnAddrState {
-                    addr: Some("10.77.9.61:6980".into()),
+                    addr: Some(sa(61)),
                     source: ReturnSource::Configured
                 }
             ),
@@ -129,17 +130,72 @@ fn a_dns_refresh_never_overrides_a_learned_address() {
     assert_eq!(t.set_configured(1, sa(71)), None, "the same address again");
 }
 
+/// Feed `n` packets of one source; true when the filter asked to learn on any of them.
+fn feed(f: &mut LearnFilter, id: usize, from: IpAddr, n: u32) -> u32 {
+    (0..n).filter(|_| f.is_new(id, from)).count() as u32
+}
+
 #[test]
-fn the_learn_filter_locks_the_table_only_on_a_new_source() {
+fn the_learn_filter_locks_the_table_only_on_a_new_steady_source() {
     let mut f = LearnFilter::new(3);
-    assert!(f.is_new(0, ip(61)));
-    assert!(!f.is_new(0, ip(61)));
-    assert!(f.is_new(0, ip(62)));
-    assert!(f.is_new(2, ip(61)), "per participant");
-    assert!(
-        !f.is_new(9, ip(61)),
+    // A new source is taken only after LEARN_CONFIRM_PACKETS packets in a row from it.
+    assert_eq!(feed(&mut f, 0, ip(61), LEARN_CONFIRM_PACKETS - 1), 0);
+    assert!(f.is_new(0, ip(61)), "confirmed on its Nth packet");
+    assert_eq!(
+        feed(&mut f, 0, ip(61), 1000),
+        0,
+        "the same source again is never new"
+    );
+    assert_eq!(
+        feed(&mut f, 0, ip(62), LEARN_CONFIRM_PACKETS),
+        1,
+        "a moved camera"
+    );
+    assert_eq!(
+        feed(&mut f, 2, ip(61), LEARN_CONFIRM_PACKETS),
+        1,
+        "per participant"
+    );
+    assert_eq!(
+        feed(&mut f, 9, ip(61), 100),
+        0,
         "an id outside the matrix is never new"
     );
+}
+
+/// Review round 1: two senders using one stream name (a stray tool, a duplicated box) must not
+/// flip the leg, lock the table or log on every packet.
+#[test]
+fn two_alternating_sources_never_flip_the_leg() {
+    let mut f = LearnFilter::new(1);
+    let mut asks = 0;
+    for _ in 0..10_000 {
+        asks += u32::from(f.is_new(0, ip(61)));
+        asks += u32::from(f.is_new(0, ip(62)));
+    }
+    assert_eq!(asks, 0, "no source is ever steady");
+    // A burst from one of them (a few packets out of order) still does not move the leg.
+    assert_eq!(feed(&mut f, 0, ip(61), LEARN_CONFIRM_PACKETS - 1), 0);
+    assert!(!f.is_new(0, ip(62)));
+}
+
+/// Review round 1: a dual-stack bind reports an IPv4 sender as `::ffff:a.b.c.d`; the senders are
+/// IPv4 sockets, so the leg learns the plain IPv4 address, and a real IPv6 source is never taken.
+#[test]
+fn an_ipv4_mapped_source_is_learned_as_ipv4_and_ipv6_is_ignored() {
+    let mut t = table();
+    let mapped = IpAddr::V6(Ipv4Addr::new(10, 77, 9, 62).to_ipv6_mapped());
+    let c = t.learn(0, mapped).expect("moved to the mapped camera");
+    assert_eq!(c.new, sa(62));
+    assert_eq!(t.learn(2, IpAddr::V6(Ipv6Addr::LOCALHOST)), None);
+    assert_eq!(
+        t.current(1),
+        None,
+        "an IPv6 source never becomes a return address"
+    );
+    let mut f = LearnFilter::new(1);
+    assert_eq!(feed(&mut f, 0, mapped, LEARN_CONFIRM_PACKETS - 1), 0);
+    assert!(f.is_new(0, ip(62)), "mapped and plain are one source");
 }
 
 #[test]
@@ -162,6 +218,16 @@ fn api_state_shows_each_legs_return_address() {
         by("cam3"),
         serde_json::json!({"addr": "10.77.9.163:6980", "source": "learned"})
     );
+    let cam2 = m.id_of("cam2").unwrap();
+    let mut no_host = ReturnAddrs::new(m.participants.len(), vec![(cam2, "cam2".into(), None)]);
+    let mut hs2 = HubState::snapshot(&m, "test", &stats);
+    hs2.attach_return_addrs(no_host.states());
+    let v2 = serde_json::to_value(&hs2).unwrap();
+    assert_eq!(
+        v2["participants"][cam2]["return_addr"],
+        serde_json::json!({"addr": null, "source": "unresolved"})
+    );
+    assert!(no_host.learn(cam2, ip(62)).is_some());
     assert_eq!(
         by("cam1"),
         serde_json::json!({"addr": "10.77.9.61:6980", "source": "configured"})
@@ -240,18 +306,38 @@ fn the_pp_hub_meshes_all_seven_cameras() {
 fn main_learns_in_the_receive_task_and_sends_from_the_table() {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     let src = std::fs::read_to_string(&p).expect("read main.rs");
-    let recv = &src[src.find("fn spawn_vban_receive(").unwrap()..];
-    let recv = &recv[..recv.find("\n}\n").unwrap()];
+    let body = |name: &str| -> &str {
+        let from = &src[src.find(name).unwrap()..];
+        &from[..from[1..].find("\nfn ").map_or(from.len(), |i| i + 1)]
+    };
+    let recv = body("fn spawn_vban_receive(");
+    let audio = recv
+        .find("RoutedPacket::Audio {")
+        .expect("the decoded-audio arm");
+    let filter = recv
+        .find("learn_filter.is_new(id, from.ip())")
+        .expect("the filter");
+    let converter = recv
+        .find("converters.get_mut(id)")
+        .expect("the rate converter");
     assert!(
-        recv.contains("learn_filter.is_new(id, from.ip())"),
-        "{recv}"
+        audio < filter && filter < converter,
+        "learning sits in the decoded-audio arm, before the converter"
     );
-    assert!(recv.contains(".learn(id, from.ip())"));
-    assert!(recv.contains("change.log_line()"));
-    let lp = &src[src.find("fn run_block_loop(").unwrap()..];
+    assert!(recv[filter..converter].contains(".learn(id, from.ip())"));
+    assert!(recv[filter..converter].contains("change.log_line()"));
+    assert!(
+        !recv[..audio].contains(".learn("),
+        "never before the packet decoded"
+    );
+    let lp = body("fn run_block_loop(");
     assert!(lp.contains(".currents()"));
     assert!(lp.contains("attach_return_addrs("));
-    let refresh = &src[src.find("fn spawn_output_resolve_refresh(").unwrap()..];
+    assert!(
+        !lp.contains("unwrap_or_default"),
+        "a poisoned table lock never silences every leg"
+    );
+    let refresh = body("fn spawn_output_resolve_refresh(");
     assert!(refresh.contains(".set_configured("));
     assert!(
         !src.contains("out_addrs"),
