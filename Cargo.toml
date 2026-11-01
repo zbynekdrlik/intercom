@@ -1,0 +1,20 @@
+# The intercom workspace: the shared VBAN codec (`vban`, crate `intercom-vban`) and the mix-minus
+# hub (`hub`, crate `intercom-hub`). Split from zbynekdrlik/camera-box on 2026-11-01 (airuleset#1280).
+#
+# ONE version for the whole repository. Every dev->main merge tags `vX.Y.Z` from this line, and that
+# one tag pins both camera-box's `intercom-vban` git dependency and the hub release artifact
+# (`intercom-hub-linux-amd64.tar.gz`). The release job refuses to publish a binary whose `--version`
+# differs from the tag. 1.9.0 continues past the 1.8.x hubs camera-box deployed, so no box ever
+# sees its hub version go down.
+[workspace]
+members = ["vban", "hub"]
+resolver = "2"
+
+[workspace.package]
+version = "1.9.0"
+
+# The same release profile the hub was built with inside the camera-box workspace.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -178,7 +178,7 @@ fn a_finite_memlock_limit_never_takes_the_future_lock() {
 
 #[test]
 fn the_unit_grants_the_lock_and_keeps_the_hub_out_of_the_oom_killers_way() {
-    let unit = read("../../systemd/intercom-hub.service");
+    let unit = read("../systemd/intercom-hub.service");
     let service = service_section(&unit);
     assert!(
         service.lines().any(|l| l.trim() == "LimitMEMLOCK=infinity"),

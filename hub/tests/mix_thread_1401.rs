@@ -134,7 +134,7 @@ fn the_clock_sleeps_to_an_absolute_deadline() {
 #[test]
 fn the_unit_grants_exactly_the_mix_threads_priority() {
     let unit_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../systemd/intercom-hub.service");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../systemd/intercom-hub.service");
     let unit = std::fs::read_to_string(&unit_path).expect("read the intercom-hub unit");
     let service = unit
         .split("[Service]")
