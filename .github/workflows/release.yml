@@ -112,10 +112,17 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          names="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          # Only "release not found" means no release; any other gh error (API, auth, rate limit) fails
+          # the step, so an unreadable release is never mistaken for an empty one and overwritten.
+          if ! names="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>&1)"; then
+            if [ "$names" != "release not found" ]; then
+              echo "::error::cannot read release ${TAG}: ${names}"; exit 1
+            fi
+            names=""
+          fi
           n=0
           for a in intercom-hub-linux-amd64.tar.gz intercom-hub-linux-amd64.tar.gz.sha256; do
-            if printf '%s\n' "$names" | grep -qxF "$a"; then n=$((n + 1)); fi
+            if grep -qxF -- "$a" <<<"$names"; then n=$((n + 1)); fi
           done
           case "$n" in
             2) echo "${TAG} already carries both assets: left unchanged"; echo "publish=no" >> "$GITHUB_OUTPUT" ;;
@@ -129,6 +136,8 @@ jobs:
         with:
           tag_name: ${{ inputs.tag }}
           make_latest: true
+          # Backstop to the check above: never replace an asset that is already there.
+          overwrite_files: false
           files: |
             artifacts/intercom-hub-linux-amd64.tar.gz
             artifacts/intercom-hub-linux-amd64.tar.gz.sha256
