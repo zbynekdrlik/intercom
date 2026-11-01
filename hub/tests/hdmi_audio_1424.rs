@@ -1,6 +1,6 @@
 //! issue 1424 part 3: the hub's own HDMI audio leg (the strih-pp vestibule TV behind the HDMI-to-SDI
 //! converter on HDMI-1). The hub resolves a NAMED connector to its ALSA hw PCM with the part-1 matcher
-//! (`src/drm_output_audio_match.rs`, shared into the hub crate) and plays the participant's N-1 bus
+//! (`hub/src/drm_output_audio_match.rs`, the hub's copy) and plays the participant's N-1 bus
 //! straight into it through `aplay`, fed by the same pipe fill controller the pw-cat legs use.
 //!
 //! The fixtures under `fixtures/alsa_hdmi_1424/` are read verbatim from strih-pp (10.76.8.202) on

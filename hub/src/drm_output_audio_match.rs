@@ -4,6 +4,9 @@
 //! no PipeWire, no monitoring device and no per-box setting; no match = no audio and one named log
 //! line).
 //!
+//! The hub's copy (intercom#1). The C twin, its parity test and the fixtures named below live in
+//! camera-box, which keeps the appliance copy: a change to the rule lands in both repositories.
+//!
 //! Every function mirrors its C twin line for line; `tests/drm_output_audio_1424.rs` compiles the C
 //! header and requires both to print the same answer for every vector (the strih-pp fixtures in
 //! `tests/fixtures/drm_output_audio_1424.tsv` plus the shapes that must fail).

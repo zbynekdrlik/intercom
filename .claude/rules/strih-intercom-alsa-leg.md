@@ -7,7 +7,6 @@ paths:
   - "hub/tests/check_config_1438.rs"
   - "hub/tests/fixtures/alsa_card_1438/**"
   - "intercom.strih-pp.toml"
-  - "scripts/lib/strih-intercom-hub-unit.sh"
 ---
 
 # The hub's card leg: the cutters' USB card through ALSA, no PipeWire (issue 1438)

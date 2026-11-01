@@ -8,8 +8,8 @@
 //!
 //! The matrix names the connector (`hdmi_connector = "HDMI-1"`, the X RandR output name), never a
 //! card/device number: HDA numbers its PCMs by codec pin, and they move with the GPU/driver. The
-//! match is the part-1 matcher ([`crate::drm_output_audio_match`], `src/drm_output_audio_match.rs`
-//! shared by path): the connector's EDID vendor bytes against every HDMI/DP PCM's ELD. The inputs
+//! match is the part-1 matcher ([`crate::drm_output_audio_match`], `hub/src/drm_output_audio_match.rs`,
+//! the hub's copy of camera-box's matcher): the connector's EDID vendor bytes against every HDMI/DP PCM's ELD. The inputs
 //! come from the tools on the box, read bounded (`timeout`), so a hung X server never hangs the leg:
 //!
 //! - the EDID from `xrandr --current --props` (NVIDIA publishes no connector EDID in

@@ -1,11 +1,20 @@
 ---
 paths:
-  - "intercom/**"
+  - "hub/**"
+  - "vban/**"
+  - "web/**"
+  - "tests/**"
+  - "intercom.*.toml"
   - "scripts/vbmatrix_to_intercom_toml.py"
   - "systemd/intercom-hub.service"
 ---
 
 # strih-snv intercom hub (issue 1345)
+
+> **Split note (intercom#1):** `scripts/setup-strih.sh`, `scripts/verify-strih.sh` and every
+> `scripts/lib/strih-*.sh` / `scripts/nginx/*` / `scripts/janus_turn_rest_cfg.py` named below, with
+> their tests, live in **camera-box**, which provisions the boxes. This repository ships the hub,
+> its unit, the TOMLs and the PWA; change the provisioning side through camera-box.
 
 The strih intercom is migrating off the Windows **VB-Audio Matrix** (a GUI-only static N-1 grid) +
 **VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`hub`), with Janus
