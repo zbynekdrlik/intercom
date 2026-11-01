@@ -2,3 +2,7 @@ target/
 node_modules/
 targets.md
 TARGETS.md
+__pycache__/
+.pytest_cache/
+test-results/
+playwright-report/

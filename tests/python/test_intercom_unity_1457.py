@@ -15,9 +15,9 @@ import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
-PP_TOMLS = [REPO / "intercom" / "intercom.strih-pp.toml", REPO / "intercom" / "intercom.stream-pp.toml"]
+PP_TOMLS = [REPO / "intercom.strih-pp.toml", REPO / "intercom.stream-pp.toml"]
 # owner 21.10.2026: "a vsetko ma byt rovnako aj v pp aj snv lebo ronvaky je setup"
-ALL_TOMLS = PP_TOMLS + [REPO / "intercom" / "intercom.strih-snv.toml"]
+ALL_TOMLS = PP_TOMLS + [REPO / "intercom.strih-snv.toml"]
 
 
 # --- the routing files ---------------------------------------------------------------------------------

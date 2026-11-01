@@ -1,13 +1,13 @@
 ---
 paths:
-  - "intercom/hub/src/hdmi_audio.rs"
-  - "intercom/hub/src/hdmi_leg.rs"
-  - "intercom/hub/src/pipe_fill.rs"
-  - "intercom/hub/tests/hdmi_*_1424.rs"
-  - "intercom/hub/tests/fixtures/alsa_hdmi_1424/**"
-  - "intercom/intercom.strih-pp.toml"
+  - "hub/src/hdmi_audio.rs"
+  - "hub/src/hdmi_leg.rs"
+  - "hub/src/pipe_fill.rs"
+  - "hub/tests/hdmi_*_1424.rs"
+  - "hub/tests/fixtures/alsa_hdmi_1424/**"
+  - "intercom.strih-pp.toml"
   - "scripts/lib/strih-intercom-hub-unit.sh"
-  - "src/drm_output_audio_match.rs"
+  - "hub/src/drm_output_audio_match.rs"
 ---
 
 # The intercom hub's own HDMI audio leg: `alsa_hdmi` (issue 1424 part 3)
@@ -29,9 +29,9 @@ Design: issue 1424 comment 6151522810 (Approach 1).
 - **Resolve (`hdmi_audio.rs`):** the connector EDID from `xrandr --current --props` (NVIDIA puts no
   EDID in `/sys/class/drm`; `--current` never makes X re-probe every output), every HDMI PCM's ELD
   from `amixer -c N controls` + `cget iface=PCM,name=ELD,device=D`, each call under `timeout 5`. The
-  match is the part-1 matcher `src/drm_output_audio_match.rs`, mounted into the hub crate by
-  `#[path = "../../../src/drm_output_audio_match.rs"]` in `intercom/hub/src/lib.rs` (one rule for the
-  OBS module and the hub; the file must stay std-only with no `crate::`). No match / ambiguous / no
+  match is the part-1 matcher `hub/src/drm_output_audio_match.rs`: the hub's own copy since the
+  split (intercom#1). camera-box keeps the appliance copy and the C-twin parity test against the OBS
+  module; a change to the rule lands in both repositories (std-only, no `crate::`). No match / ambiguous / no
   EDID = silent with one named log line per change (an X failure names the tool + its first stderr
   line). The resolved PCM's `IEC958 Playback Switch` is turned on by its rank (part-1 rule; an
   ambiguous switch count is left untouched).
@@ -66,7 +66,7 @@ Design: issue 1424 comment 6151522810 (Approach 1).
   echo: `intercom.strih-pp.toml` carries NO `hdmi_delay_ms`, and an A/V gap there is fixed on the
   PICTURE side (the HDMI-1 output measured 171 ms render -> cam1 capture with a QR burn, issue 1424).
   The knob stays dormant for a future output that is not room-adjacent. Tests:
-  `intercom/hub/tests/hdmi_delay_1424.rs` (std-only) + the matrix case in `hdmi_matrix_1424.rs`.
+  `hub/tests/hdmi_delay_1424.rs` (std-only) + the matrix case in `hdmi_matrix_1424.rs`.
 - **Delay budget:** program-feed jitter target (32-64 ms) + pipe ~13 ms + ALSA buffer 21 ms + the
   held period 5 ms. `/api/state` carries `alsa_buffer_frames` / `alsa_period_frames` next to
   `local_audio.pipe_depth_frames`, so the sum is readable.
@@ -85,7 +85,7 @@ Design: issue 1424 comment 6151522810 (Approach 1).
 - Xorg listens on the abstract `@/tmp/.X11-unix/X0`, so xrandr works under the hub unit's
   `PrivateTmp=true`; `XAUTHORITY` falls back to `~/.Xauthority` (HOME set for `User=newlevel`,
   `ProtectHome=read-only`).
-- The fixtures under `intercom/hub/tests/fixtures/alsa_hdmi_1424/` are those captures; committing the
+- The fixtures under `hub/tests/fixtures/alsa_hdmi_1424/` are those captures; committing the
   EDID hex trips the secret-staging hook (32-hex lines): `# airuleset:secret-ok <reason>` on the
   `git commit`.
 

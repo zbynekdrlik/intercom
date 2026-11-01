@@ -1,6 +1,6 @@
 # strih-snv intercom hub routing — GENERATED from the VB-Matrix XML (issue 1345 M1).
 # DO NOT EDIT BY HAND. Regenerate:
-#   python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-snv.toml
+#   python3 scripts/vbmatrix_to_intercom_toml.py tests/fixtures/vbmatrix-coconut-today.xml > intercom.strih-snv.toml
 # The byte-for-byte parity is pinned by tests/python/test_vbmatrix_to_intercom_toml_1345.py.
 
 [hub]

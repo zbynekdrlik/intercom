@@ -5,7 +5,7 @@ Windows hub's static N-1 grid) into the strih-snv intercom hub's declarative `in
 core assertions:
 
 * PARITY — regenerating from the checked-in fixture XML reproduces the checked-in
-  `intercom/intercom.strih-snv.toml` BYTE-FOR-BYTE (so the matrix can never silently drift from what
+  `intercom.strih-snv.toml` BYTE-FOR-BYTE (so the matrix can never silently drift from what
   the converter produces).
 * the 10 VBAN inputs + 7 active VBAN outputs are all mapped;
 * the mix-minus (N-1) invariant holds structurally — no `src == dst` point (a cambox never hears
@@ -29,8 +29,8 @@ if str(_SCRIPTS) not in sys.path:
 
 import vbmatrix_to_intercom_toml as conv  # noqa: E402
 
-_FIXTURE = _ROOT / "intercom" / "tests" / "fixtures" / "vbmatrix-coconut-today.xml"
-_CHECKED_IN = _ROOT / "intercom" / "intercom.strih-snv.toml"
+_FIXTURE = _ROOT / "tests" / "fixtures" / "vbmatrix-coconut-today.xml"
+_CHECKED_IN = _ROOT / "intercom.strih-snv.toml"
 _CAMS = {f"cam{i}" for i in range(1, 8)}
 
 
@@ -47,7 +47,7 @@ def test_parity_regenerates_checked_in_toml_byte_for_byte():
     assert generated == _CHECKED_IN.read_text(), (
         "the converter output drifted from the checked-in intercom.strih-snv.toml — "
         "regenerate: python3 scripts/vbmatrix_to_intercom_toml.py "
-        "intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-snv.toml"
+        "tests/fixtures/vbmatrix-coconut-today.xml > intercom.strih-snv.toml"
     )
 
 

@@ -2,7 +2,7 @@
 # The Linux stream box takes the program audio as the VBAN stream `stream` from lv1 (owner
 # ROZHODNUTE 11.10.2026, replacing the earlier resolume-pp + resampler plan); the hub writes it to
 # the `strih-program` PipeWire sink, which OBS captures as its program audio input (`Zvuk z mixu`).
-# Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
+# Loaded through the daemon's own Matrix::from_toml by hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
 bind = "0.0.0.0:8790"

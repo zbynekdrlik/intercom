@@ -1,0 +1,204 @@
+name: CI
+
+# One run per commit: push to dev and main, no pull_request trigger (the dev->main PR's push to dev
+# already ran it). Every main run tags vX.Y.Z from the workspace version and publishes the release
+# camera-box pins (intercom#1).
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A dev run is cancelled by the next push to dev. A main run is never cancelled: it pushes a tag and
+# publishes a release, so each main run gets its own group (the run id appended).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: Version is above main
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # On dev the workspace version must be strictly above main's, so the merge tags a new vX.Y.Z.
+      # On main the version is the one being released; its tag is checked by release-tag.
+      - name: Compare the workspace version with main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          ver() { sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1; }
+          have="$(ver < Cargo.toml)"
+          main="$(git show origin/main:Cargo.toml 2>/dev/null | ver || true)"
+          echo "dev ${have}, main ${main:-<none>}"
+          [ -n "$have" ] || { echo "::error::no workspace version in Cargo.toml"; exit 1; }
+          if [ -n "$main" ]; then
+            top="$(printf '%s\n%s\n' "$main" "$have" | sort -V | tail -n 1)"
+            if [ "$have" = "$main" ] || [ "$top" != "$have" ]; then
+              echo "::error::dev version ${have} must be above main ${main}: bump [workspace.package] version"
+              exit 1
+            fi
+          fi
+
+  rust:
+    name: Rust (fmt, clippy, test, release build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The `opus` crate builds its bundled libopus with cmake and links it statically.
+      - name: Ensure cmake (bundled libopus build)
+        run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Default features = the `ndi` picture path (libndi loaded at run time, so no SDK here).
+      - name: Clippy (intercom members)
+        run: cargo clippy -p intercom-vban -p intercom-hub --all-targets --locked -- -D warnings
+
+      - name: Clippy (intercom-hub, --no-default-features — stub picture path)
+        run: cargo clippy -p intercom-hub --no-default-features --all-targets --locked -- -D warnings
+
+      - name: Test (intercom members)
+        run: cargo test -p intercom-vban -p intercom-hub --locked
+
+      - name: Test (intercom-hub, --no-default-features — stub picture path)
+        run: cargo test -p intercom-hub --no-default-features --locked
+
+      - name: Build deployable binary (intercom-hub)
+        run: cargo build --release --bins -p intercom-hub --locked
+
+      # The binary and the routing TOMLs ship as one pair: every TOML must load in this binary.
+      - name: Every routing TOML loads in the release binary
+        run: |
+          set -euo pipefail
+          for t in intercom.*.toml; do
+            target/release/intercom-hub --check-config --config "$t"
+          done
+
+      - name: Upload intercom-hub binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: intercom-hub-linux-amd64
+          if-no-files-found: error
+          path: target/release/intercom-hub
+
+  coverage:
+    name: Coverage (cargo llvm-cov)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Ensure cmake (bundled libopus build)
+        run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
+
+      - name: Install coverage tools (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      # The gate: line coverage of both members must not fall under the threshold (ratchets up only).
+      - name: Coverage
+        run: cargo llvm-cov nextest --workspace --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
+
+  python:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pytest
+        run: python3 -m pip install --user pytest==8.4.2
+      - name: pytest
+        run: python3 -m pytest -q tests/python
+
+  web-e2e:
+    name: Phone PWA E2E (Playwright)
+    # The real web/ client served by the stdlib stub hub (tests/e2e/stub_hub.py) with a Janus test
+    # double. Chromium at a phone viewport, and WebKit (the iPhone engine) for the service-worker
+    # picture specs (issue 1379). Every test asserts an empty browser console.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium + webkit
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium webkit
+      - name: Playwright
+        working-directory: tests/e2e
+        run: npx playwright test
+
+  release-tag:
+    name: Tag vX.Y.Z
+    if: github.ref == 'refs/heads/main'
+    needs: [version-check, rust, coverage, python, web-e2e]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A tag already on this commit is a re-run (accepted). A tag on another commit means the
+      # version was not bumped: refuse, never move a published tag.
+      - name: Push the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          tag="v${v}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            at="$(git rev-list -n 1 "${tag}")"
+            if [ "$at" != "$GITHUB_SHA" ]; then
+              echo "::error::${tag} already tags ${at}, not ${GITHUB_SHA}: bump the version"
+              exit 1
+            fi
+            echo "${tag} EXISTS on this commit (a re-run)"
+          else
+            git tag "${tag}" "$GITHUB_SHA"
+            git push origin "refs/tags/${tag}"
+            echo "${tag} pushed on ${GITHUB_SHA}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish the release
+    needs: release-tag
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-tag.outputs.tag }}

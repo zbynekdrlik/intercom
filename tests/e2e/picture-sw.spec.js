@@ -2,7 +2,7 @@
 // The interkom picture with the PWA service worker REGISTERED and CONTROLLING the page (issue 1379).
 //
 // phone.spec.js neutralises the service-worker registration so its tests stay about the audio UX.
-// That hid the bug this file guards: `intercom/web/sw.js` answered every fetch with
+// That hid the bug this file guards: `web/sw.js` answered every fetch with
 // `event.respondWith(fetch(event.request))`, including the endless `multipart/x-mixed-replace`
 // picture stream `/interkom.mjpeg`, and WebKit (iPhone Safari) does not hand that never-ending
 // response to the page's <img> through a worker. The iPhone kept its installed worker across hub

@@ -1,19 +1,19 @@
 ---
 paths:
-  - "intercom/hub/src/block_clock.rs"
-  - "intercom/hub/src/mix_thread.rs"
-  - "intercom/hub/src/asrc.rs"
-  - "intercom/hub/src/main.rs"
-  - "intercom/hub/src/vban_io.rs"
-  - "intercom/hub/src/inputs.rs"
-  - "intercom/hub/src/state.rs"
-  - "intercom/hub/src/vban_jitter.rs"
-  - "intercom/hub/src/pipe_fill.rs"
-  - "intercom/hub/tests/vban_jitter_state_1401.rs"
-  - "intercom/hub/tests/hub_catchup_1401.rs"
-  - "intercom/hub/tests/mix_thread_1401.rs"
-  - "intercom/hub/tests/asrc_1461.rs"
-  - "intercom/hub/tests/memory_lock_1401.rs"
+  - "hub/src/block_clock.rs"
+  - "hub/src/mix_thread.rs"
+  - "hub/src/asrc.rs"
+  - "hub/src/main.rs"
+  - "hub/src/vban_io.rs"
+  - "hub/src/inputs.rs"
+  - "hub/src/state.rs"
+  - "hub/src/vban_jitter.rs"
+  - "hub/src/pipe_fill.rs"
+  - "hub/tests/vban_jitter_state_1401.rs"
+  - "hub/tests/hub_catchup_1401.rs"
+  - "hub/tests/mix_thread_1401.rs"
+  - "hub/tests/asrc_1461.rs"
+  - "hub/tests/memory_lock_1401.rs"
   - "tests/python/test_strih_hub_memlock_1401.py"
   - "systemd/intercom-hub.service"
 ---
@@ -43,7 +43,7 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   threads.
   - The unit grants it: `LimitRTPRIO=10` in `systemd/intercom-hub.service` `[Service]`; the
     setup-strih step-12 drop-in leaves it alone. Pinned by `tests/intercom_hub_provisioning.rs` and
-    by `intercom/hub/tests/mix_thread_1401.rs` against `MIX_RT_PRIORITY`.
+    by `hub/tests/mix_thread_1401.rs` against `MIX_RT_PRIORITY`.
   - Refused: ONE warning (`SCHED_FIFO 10 refused ... the unit needs LimitRTPRIO=10`) and the thread
     runs SCHED_OTHER; the hub never fails to start over it.
   - The thread reads its own class at start and publishes it as `mix_thread_sched` on
@@ -89,7 +89,7 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
     The call shares the credential grade's line (verify-strih stays at 1000).
   - The unit change applies at the next hub restart: setup-strih step 13 reinstalls the unit but
     never restarts a running hub, so a box reads `memory_locked: false` until it is restarted.
-  - Tests: `intercom/hub/tests/memory_lock_1401.rs` (std + the crate; the decision, the pre-fault,
+  - Tests: `hub/tests/memory_lock_1401.rs` (std + the crate; the decision, the pre-fault,
     the main.rs order and the unit pins), the `/api/state` field in `vban_jitter_state_1401.rs`,
     `tests/python/test_strih_hub_memlock_1401.py`.
 - **Absolute deadlines.** `MonoClock::sleep_until` = `clock_nanosleep(CLOCK_MONOTONIC,

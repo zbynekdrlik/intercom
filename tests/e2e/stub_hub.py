@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stub intercom hub for the phone-PWA Playwright E2E (issue 1345, the 25.9.2026 phone UX rework).
 
-Serves the REAL embedded client (`intercom/web/*`) exactly the way the hub's `http.rs` does
+Serves the REAL embedded client (`web/*`) exactly the way the hub's `http.rs` does
 (`{{VERSION}}` substituted in `/`), plus stub answers for the hub API the page reads:
 
 - `/api/version` -> {"version": "<--version>"}

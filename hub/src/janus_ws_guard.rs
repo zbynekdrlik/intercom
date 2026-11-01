@@ -50,7 +50,7 @@ pub const ALLOWED_JANUS_REQUESTS: [&str; 9] = [
     "info",
 ];
 
-/// The keys of an audiobridge `join` the phone page sends (`intercom/web/app.js`).
+/// The keys of an audiobridge `join` the phone page sends (`web/app.js`).
 pub const JOIN_KEYS: [&str; 4] = ["request", "room", "display", "muted"];
 /// The keys of an audiobridge `configure` the phone page sends (mic on / off, a name change; the
 /// renegotiation's SDP rides in the frame's `jsep`, outside the body).
