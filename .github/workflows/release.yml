@@ -73,12 +73,13 @@ jobs:
           cp intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml dist/
           tar -czvf intercom-hub-linux-amd64.tar.gz -C dist .
           # The member list camera-box installs from: exactly these, flat, the binary executable.
-          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml)"
+          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml | sort)"
           got="$(tar -tzf intercom-hub-linux-amd64.tar.gz | grep -v '^\./$' | sort)"
           if [ "$got" != "$want" ]; then
             echo "::error::tarball members differ"; diff <(echo "$want") <(echo "$got") || true; exit 1
           fi
-          tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-hub | grep -q '^-rwx' || { echo "::error::intercom-hub is not executable in the tarball"; exit 1; }
+          tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-hub > hub-entry.txt
+          grep -q '^-rwx' hub-entry.txt || { echo "::error::intercom-hub is not executable in the tarball"; exit 1; }
           sha256sum intercom-hub-linux-amd64.tar.gz > intercom-hub-linux-amd64.tar.gz.sha256
           cat intercom-hub-linux-amd64.tar.gz.sha256
 
