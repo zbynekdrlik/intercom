@@ -6,7 +6,6 @@ paths:
   - "hub/tests/hdmi_*_1424.rs"
   - "hub/tests/fixtures/alsa_hdmi_1424/**"
   - "intercom.strih-pp.toml"
-  - "scripts/lib/strih-intercom-hub-unit.sh"
   - "hub/src/drm_output_audio_match.rs"
 ---
 

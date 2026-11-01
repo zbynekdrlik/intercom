@@ -14,11 +14,15 @@ paths:
   - "hub/tests/mix_thread_1401.rs"
   - "hub/tests/asrc_1461.rs"
   - "hub/tests/memory_lock_1401.rs"
-  - "tests/python/test_strih_hub_memlock_1401.py"
   - "systemd/intercom-hub.service"
 ---
 
 # The intercom hub's real-time block loop and its legs' fixed targets (issues 1401 + 1461)
+
+> **Split note (intercom#1):** `scripts/setup-strih.sh`, `scripts/verify-strih.sh` and every
+> `scripts/lib/strih-*.sh` / `scripts/nginx/*` / `scripts/janus_turn_rest_cfg.py` named below, with
+> their tests, live in **camera-box**, which provisions the boxes. This repository ships the hub,
+> its unit, the TOMLs and the PWA; change the provisioning side through camera-box.
 
 Design 5980775411 (findings 5980766825): after the egress fixes the hub still lost blocks on every
 output when its block loop woke more than a period late, and the FOH sender's gaps grew past the

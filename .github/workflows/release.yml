@@ -5,15 +5,15 @@ name: Release
 #   intercom-hub-linux-amd64.tar.gz.sha256  `sha256sum` of the tarball
 # camera-box fetches these by exact tag, never "latest" (issue 1467: a stale hub dropped the FOH).
 #
-# Two ways in:
-#   * workflow_call from ci.yml after release-tag pushed the tag on a main commit (a tag pushed with
-#     GITHUB_TOKEN starts no workflow). The tarball carries the EXACT binary that run built and tested.
-#   * a person pushing a v* tag: the binary is built from the tag.
-# Either way the binary must report the tag's version and load every TOML it ships with.
+# One way in: workflow_call from ci.yml after release-tag pushed the tag on a main commit that passed
+# every CI gate (a tag pushed with GITHUB_TOKEN starts no workflow). The tarball carries the EXACT
+# binary that run built and tested; it must report the tag's version and load every TOML it ships.
+# There is no tag-push trigger: a release never skips the gates and never comes from off main.
+#
+# Published assets never change. A release that already carries both assets is left alone, so a
+# later "re-run all jobs" (a new rustc, a new binary) cannot replace what a box already installed
+# (issue 1467). Only a release missing both assets is (re)published.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_call:
     inputs:
       tag:
@@ -24,6 +24,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build the tarball
@@ -31,26 +34,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
 
       - name: Download the caller run's intercom-hub build
-        if: github.ref_type != 'tag'
         uses: actions/download-artifact@v4
         with:
           name: intercom-hub-linux-amd64
           path: target/release
 
-      - name: Install Rust
-        if: github.ref_type == 'tag'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release
-        if: github.ref_type == 'tag'
-        run: cargo build --release --bins -p intercom-hub --locked
-
       - name: The binary reports the tag's version and loads every TOML
         env:
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           chmod +x target/release/intercom-hub
@@ -60,7 +54,11 @@ jobs:
             echo "::error::the binary for ${TAG} reports ${got} -- refusing to publish it"
             exit 1
           fi
-          for t in intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml; do
+          # The shipped list is fixed (camera-box installs exactly these); a new TOML must be added here.
+          shipped="intercom.stream-pp.toml intercom.stream-snv.toml intercom.strih-pp.toml intercom.strih-snv.toml"
+          [ "$(ls intercom.*.toml | sort | tr '\n' ' ')" = "${shipped} " ] || {
+            echo "::error::the repo's intercom.*.toml differ from the shipped list: ${shipped}"; exit 1; }
+          for t in ${shipped}; do
             target/release/intercom-hub --check-config --config "$t"
           done
 
@@ -105,12 +103,41 @@ jobs:
           name: release-tarball
           path: ./artifacts
 
-      # A re-run on an existing release replaces its assets, so a failed publish is finished by a re-run.
+      # Never replace a published asset: both present = done (a re-run), one present = a broken
+      # release a person must look at, none = publish.
+      - name: Published assets never change
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Only "release not found" means no release; any other gh error (API, auth, rate limit) fails
+          # the step, so an unreadable release is never mistaken for an empty one and overwritten.
+          if ! names="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>&1)"; then
+            if [ "$names" != "release not found" ]; then
+              echo "::error::cannot read release ${TAG}: ${names}"; exit 1
+            fi
+            names=""
+          fi
+          n=0
+          for a in intercom-hub-linux-amd64.tar.gz intercom-hub-linux-amd64.tar.gz.sha256; do
+            if grep -qxF -- "$a" <<<"$names"; then n=$((n + 1)); fi
+          done
+          case "$n" in
+            2) echo "${TAG} already carries both assets: left unchanged"; echo "publish=no" >> "$GITHUB_OUTPUT" ;;
+            0) echo "publish=yes" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::${TAG} carries only one of its two assets: fix it by hand, never overwrite"; exit 1 ;;
+          esac
+
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        if: steps.existing.outputs.publish == 'yes'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          make_latest: ${{ github.ref_type != 'tag' }}
+          tag_name: ${{ inputs.tag }}
+          make_latest: true
+          # Backstop to the check above: never replace an asset that is already there.
+          overwrite_files: false
           files: |
             artifacts/intercom-hub-linux-amd64.tar.gz
             artifacts/intercom-hub-linux-amd64.tar.gz.sha256

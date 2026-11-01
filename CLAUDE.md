@@ -7,6 +7,9 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 ## Release contract with camera-box
 
 - One workspace version (`Cargo.toml` `[workspace.package]`); every dev->main merge tags `vX.Y.Z`.
+  After every merge the FIRST dev commit bumps it (CI's version gate fails otherwise).
+- A published release never changes: a re-run leaves existing assets alone, and there is no
+  tag-push trigger. CI pins the compiler (`toolchain:` in `ci.yml`).
 - That tag pins camera-box's `intercom-vban` git dependency and the hub release
   `intercom-hub-linux-amd64.tar.gz` (+ `.sha256`): binary, `intercom-hub.service`, the four TOMLs.
 - camera-box provisions the boxes (`setup-strih`, `verify-strih` and their `scripts/lib` glue).
