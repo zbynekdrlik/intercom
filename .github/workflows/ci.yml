@@ -124,9 +124,10 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
-      # The gate: line coverage of both members must not fall under the threshold (ratchets up only).
+      # The gate: line coverage of both members (69.48 % on 2026-11-01, gate 67 = measured - 2) must not
+      # fall under the threshold. It ratchets up only.
       - name: Coverage
-        run: cargo llvm-cov nextest --workspace --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
+        run: cargo llvm-cov nextest --workspace --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '67' }}
 
   python:
     name: Python tests
