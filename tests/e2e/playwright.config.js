@@ -1,6 +1,6 @@
 // @ts-check
 // Playwright config for the phone interkom PWA E2E (issue 1345, the 25.9.2026 phone UX rework).
-// One webServer: the stdlib stub hub (stub_hub.py) that serves the REAL intercom/web client plus a
+// One webServer: the stdlib stub hub (stub_hub.py) that serves the REAL web client plus a
 // stubbed hub API and the fake Janus. One worker. The `phone` project is Chromium at a phone-sized
 // viewport with the Chromium fake-media flags, so both level meters have a real (fake-device) audio
 // signal; it runs every spec but the WebKit-only upgrade spec. The `iphone-webkit` project (issue

@@ -1,6 +1,6 @@
 [Unit]
 Description=strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
-Documentation=https://github.com/zbynekdrlik/camera-box
+Documentation=https://github.com/zbynekdrlik/intercom
 # Ordered after the network is up so the VBAN receive socket (:6980) binds cleanly.
 After=network-online.target
 Wants=network-online.target
@@ -29,7 +29,7 @@ NoNewPrivileges=true
 # issue 1401 (design 5980775411): the hub's block loop runs on ONE thread, "hub-mix", at SCHED_FIFO
 # priority 10, so contention on the box no longer makes it miss ticks (a lost block on every
 # output). This grant lets that thread ask for it (sched_setscheduler on itself only; every other
-# hub thread stays SCHED_OTHER). Kept in sync with intercom/hub/src/mix_thread.rs MIX_RT_PRIORITY
+# hub thread stays SCHED_OTHER). Kept in sync with hub/src/mix_thread.rs MIX_RT_PRIORITY
 # (a hub test pins it). Without the grant the thread logs one warning and runs SCHED_OTHER. The
 # OBS boxes' "rtprio stays OFF" rule (issue 1357) is about OBS's render tick, not this daemon.
 LimitRTPRIO=10

@@ -36,7 +36,7 @@ with `pipewire_source = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"`, `pi
 "AUX0,AUX1,AUX2,AUX3"` (the hub keeps the pipewire adapter).
 
 Usage:
-    python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-snv.toml
+    python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom.strih-snv.toml
 """
 
 import sys
@@ -312,7 +312,7 @@ def render(model):
     out.append("# DO NOT EDIT BY HAND. Regenerate:")
     out.append(
         "#   python3 scripts/vbmatrix_to_intercom_toml.py "
-        "intercom/tests/fixtures/vbmatrix-coconut-today.xml > intercom/intercom.strih-snv.toml"
+        "tests/fixtures/vbmatrix-coconut-today.xml > intercom.strih-snv.toml"
     )
     out.append("# The byte-for-byte parity is pinned by tests/python/test_vbmatrix_to_intercom_toml_1345.py.")
     out.append("")

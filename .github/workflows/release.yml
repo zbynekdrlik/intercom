@@ -1,0 +1,117 @@
+name: Release
+
+# Publishes the GitHub Release vX.Y.Z that camera-box pins (intercom#1):
+#   intercom-hub-linux-amd64.tar.gz         the hub binary, its systemd unit and the routing TOMLs
+#   intercom-hub-linux-amd64.tar.gz.sha256  `sha256sum` of the tarball
+# camera-box fetches these by exact tag, never "latest" (issue 1467: a stale hub dropped the FOH).
+#
+# Two ways in:
+#   * workflow_call from ci.yml after release-tag pushed the tag on a main commit (a tag pushed with
+#     GITHUB_TOKEN starts no workflow). The tarball carries the EXACT binary that run built and tested.
+#   * a person pushing a v* tag: the binary is built from the tag.
+# Either way the binary must report the tag's version and load every TOML it ships with.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release tag to publish (vX.Y.Z), already pushed"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build the tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download the caller run's intercom-hub build
+        if: github.ref_type != 'tag'
+        uses: actions/download-artifact@v4
+        with:
+          name: intercom-hub-linux-amd64
+          path: target/release
+
+      - name: Install Rust
+        if: github.ref_type == 'tag'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        if: github.ref_type == 'tag'
+        run: cargo build --release --bins -p intercom-hub --locked
+
+      - name: The binary reports the tag's version and loads every TOML
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          chmod +x target/release/intercom-hub
+          got="$(target/release/intercom-hub --version | awk '{print $NF}')"
+          echo "tag ${TAG}, intercom-hub --version ${got}"
+          if [ "v${got}" != "${TAG}" ]; then
+            echo "::error::the binary for ${TAG} reports ${got} -- refusing to publish it"
+            exit 1
+          fi
+          for t in intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml; do
+            target/release/intercom-hub --check-config --config "$t"
+          done
+
+      - name: Create the tarball and its sha256
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/intercom-hub dist/
+          cp systemd/intercom-hub.service dist/
+          cp intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml dist/
+          tar -czvf intercom-hub-linux-amd64.tar.gz -C dist .
+          # The member list camera-box installs from: exactly these, flat, the binary executable.
+          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml | sort)"
+          got="$(tar -tzf intercom-hub-linux-amd64.tar.gz | grep -v '^\./$' | sort)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::tarball members differ"; diff <(echo "$want") <(echo "$got") || true; exit 1
+          fi
+          tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-hub > hub-entry.txt
+          grep -q '^-rwx' hub-entry.txt || { echo "::error::intercom-hub is not executable in the tarball"; exit 1; }
+          sha256sum intercom-hub-linux-amd64.tar.gz > intercom-hub-linux-amd64.tar.gz.sha256
+          cat intercom-hub-linux-amd64.tar.gz.sha256
+
+      - name: Upload the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          if-no-files-found: error
+          path: |
+            intercom-hub-linux-amd64.tar.gz
+            intercom-hub-linux-amd64.tar.gz.sha256
+
+  publish:
+    name: Create the GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download the tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarball
+          path: ./artifacts
+
+      # A re-run on an existing release replaces its assets, so a failed publish is finished by a re-run.
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          make_latest: ${{ github.ref_type != 'tag' }}
+          files: |
+            artifacts/intercom-hub-linux-amd64.tar.gz
+            artifacts/intercom-hub-linux-amd64.tar.gz.sha256
+          generate_release_notes: true

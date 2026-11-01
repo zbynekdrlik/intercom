@@ -1,7 +1,7 @@
 //! The phone's Janus WebSocket through the REAL hub router (issue 1453): a FAKE Janus (an axum
 //! WebSocket server speaking `janus-protocol`, the `janus_session.rs` pattern) records every frame it
 //! receives and answers each with a fixed oddly-formatted text. Proven here:
-//! - every frame shape the phone page sends (`intercom/tests/fixtures/janus-ws-pwa-frames.json`,
+//! - every frame shape the phone page sends (`tests/fixtures/janus-ws-pwa-frames.json`,
 //!   checked against the page by phone.spec.js) reaches Janus byte-identically, in order, and Janus's
 //!   answer reaches the phone byte-identically;
 //! - a plain-RTP join (the UDP reflection the owner's ROZHODNUTÉ 18.10.2026 refuses), an attach to

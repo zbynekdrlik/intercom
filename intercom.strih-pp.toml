@@ -2,7 +2,7 @@
 # 11.10.2026: program only -- lv1 sends the program mix as the VBAN stream `strih`, the hub writes it to the
 # `strih-program` PipeWire sink OBS captures (the strih-snv program path, issue 1344).
 # 13.10.2026 (owner ROZHODNUTE: "prehod to"): the Poprad camera intercom moves here from VDO.Ninja, the
-# SNV shape (intercom/intercom.strih-snv.toml) for the PP cameras cam1/4/6/7 + the phones (Janus) + the
+# SNV shape (intercom.strih-snv.toml) for the PP cameras cam1/4/6/7 + the phones (Janus) + the
 # cutters. The PP router has no camN.lan names, so the cameras are their venue IPs (each cambox sends to
 # strih.lan, which the PP router resolves to this box). The cutters' sound card is the Yamaha MG-XU USB
 # card (2 in / 2 out, connected 13.10.2026), not the SNV MiniFuse 4: one stereo pair, so out 1/2 only.
@@ -30,7 +30,7 @@
 # 29.10.2026 (issue 1431, a joint event): every camera cam1-7, so the strih behind strih.lan serves
 # the SNV cameras too. A camera sits at the same 10.77.9.6N at both venues; that address is only the
 # start-up return address, the hub sends each camN its mix to wherever camN's own stream comes from.
-# Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
+# Loaded through the daemon's own Matrix::from_toml by hub/tests/deployed_matrix_pp_1412.rs.
 
 [hub]
 bind = "0.0.0.0:8790"

@@ -8,20 +8,20 @@ paths:
 # strih-snv intercom hub (issue 1345)
 
 The strih intercom is migrating off the Windows **VB-Audio Matrix** (a GUI-only static N-1 grid) +
-**VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`intercom/hub`), with Janus
+**VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`hub`), with Janus
 as the only WebRTC code and our own phone PWA. This rule covers the M1 core (the VBAN leg + engine +
 converter). Design: issue 1345 comment "Design (main, 19.9.2026)"; the VB-Matrix read-out: issue
 1344 comment "VB-Matrix setup READ".
 
 ## The workspace crates
 
-- **`intercom/vban` (`intercom-vban`)** — the shared VBAN codec, MOVED out of `src/vban.rs` (which
+- **`vban` (`intercom-vban`)** — the shared VBAN codec, MOVED out of `src/vban.rs` (which
   is now `pub use intercom_vban::*;`). It is the ONE source of truth for the wire format: the
   appliance (`src/intercom.rs`) and the hub both use it, so the 7 camboxes need NO change. Pure
   (only `anyhow`) — it is a path dependency of the appliance, so the root build compiles it, but its
   tests run only in the `intercom-hub` CI job (`cargo test -p intercom-vban`), never the root
   `cargo test`.
-- **`intercom/hub` (`intercom-hub`, bin `intercom-hub`)** — the tokio + axum daemon (the bkshading
+- **`hub` (`intercom-hub`, bin `intercom-hub`)** — the tokio + axum daemon (the bkshading
   service skeleton): `matrix` (declarative `Matrix::from_toml`), `engine` (the N-1 mixer), `vban_io`
   (recv/jitter/demux/send), `state` + `http` (`/api/state` + `/ws` + `/api/version`). Its own heavier
   deps (tokio/axum/toml) live only in its manifest, NOT the appliance tree.
@@ -44,7 +44,7 @@ cameras on the SNV strih). The hub therefore sends each `camN` return leg to the
 `camN`'s own incoming stream, port 6980 (the cambox sends from an ephemeral port and listens on
 6980, `src/intercom.rs`), learned per packet. Design: issue 1431 comment 6486486003.
 
-- **`intercom/hub/src/return_addr.rs` (pure).** `ReturnAddrs` = one entry per declared VBAN leg
+- **`hub/src/return_addr.rs` (pure).** `ReturnAddrs` = one entry per declared VBAN leg
   (`Matrix::vban_outputs`, slot order = the senders'). Current address = the learned one, else the
   resolved TOML host (the START-UP address, used before the first packet). `learn` (a decoded
   packet of the participant's own `in_stream`), `set_configured` (the 60 s DNS refresh: it never
@@ -80,7 +80,7 @@ cameras on the SNV strih). The hub therefore sends each `camN` return leg to the
   and sends only while unmuted), so a leg learns its address only after the cameraman's first
   unmute. Until then the start-up address is used, which is right as long as the camera keeps its
   fixed `10.77.9.6N` at both venues.
-- Tests: `intercom/hub/tests/return_addr_1431.rs` (the table, the filter, `/api/state`, both TOMLs'
+- Tests: `hub/tests/return_addr_1431.rs` (the table, the filter, `/api/state`, both TOMLs'
   legs, the PP mesh, the `main.rs` wiring anchor); the PP counts in `deployed_matrix_pp_1412.rs` and
   `tests/python/test_strih_pp_box_1412.py` (11 participants / 164 points).
 
@@ -94,7 +94,7 @@ adding/regenerating the matrix, never hand-add a self-route — it will fail to 
 
 ## The converter + the fixture-parity rule
 
-`scripts/vbmatrix_to_intercom_toml.py` parses the VB-Matrix XML into `intercom/intercom.strih-snv.toml`
+`scripts/vbmatrix_to_intercom_toml.py` parses the VB-Matrix XML into `intercom.strih-snv.toml`
 (the checked-in live matrix). Slot roles are DERIVED from the XML's own attributes, not hard-coded:
 an active `VBANStreamOut` (`status=1`) makes a slot a `cambox` (cam1..7), else a `program_ref`
 (fohabl/lv1/mbc = the stream name minus `-strih`); `AMDevice` type 256/4/1 → cutters/speakers/line34;
@@ -108,13 +108,13 @@ PipeWire; `.claude/rules/strih-intercom-alsa-leg.md`; issue 1344 had it on `pipe
 `speakers`/`line34` stay `adapter = "none"`.
 
 **PARITY IS PINNED:** `tests/python/test_vbmatrix_to_intercom_toml_1345.py` regenerates from the
-fixture (`intercom/tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
+fixture (`tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
 checked-in TOML BYTE-FOR-BYTE. So whenever the VB-Matrix XML changes (re-read from the Windows
 strih), regenerate + re-commit BOTH the fixture and the TOML together:
 
 ```
-python3 scripts/vbmatrix_to_intercom_toml.py intercom/tests/fixtures/vbmatrix-coconut-today.xml \
-  > intercom/intercom.strih-snv.toml
+python3 scripts/vbmatrix_to_intercom_toml.py tests/fixtures/vbmatrix-coconut-today.xml \
+  > intercom.strih-snv.toml
 python3 -m pytest -q tests/python/test_vbmatrix_to_intercom_toml_1345.py
 ```
 
@@ -134,8 +134,8 @@ cut-over. So:
   item 16 FAILs an inactive hub on the strih role and only reports it on the stream role. (The
   enable-only rule below was the parallel-run contract.)
 - **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
-  `scripts/strih-boxes/<box>.env` (strih-snv: `intercom/intercom.strih-snv.toml`). A second strih
-  (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-snv
+  `scripts/strih-boxes/<box>.env` (strih-snv: `intercom.strih-snv.toml`). A second strih
+  (Poprad) gets its own `intercom.<box>.toml` + fact line — never an edit of the strih-snv
   file. The fact is shape-checked at load; the file's existence is checked by step 13 itself.
 - Never run `intercom-hub` from a dev lane. M1b (the supervisor) does the first live test by
   repointing ONLY dev cambox cam1 at strih-snv via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
@@ -178,7 +178,7 @@ strih, and a second hub sending VBAN back to them is double talkback.
 - **Never start the enabled `intercom-hub.service` with the full checked-in matrix while the Windows
   strih is the live hub** — the hub SENDS `camN` to every `vban` participant with `out_channels > 0`,
   i.e. cam1–7. Run the test hub as a TRANSIENT unit on a cam1-only matrix instead: filter
-  `intercom/intercom.strih-snv.toml` down to participants `{cam1, cutters}` + the points between them
+  `intercom.strih-snv.toml` down to participants `{cam1, cutters}` + the points between them
   (a 20-line `tomllib` script), install it as `/etc/intercom-hub/intercom.m1b-cam1.toml`, then
   `systemd-run --unit intercom-hub-m1b --property=DynamicUser=yes --property=Restart=no
   /usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.m1b-cam1.toml`; `systemctl stop
@@ -263,7 +263,7 @@ scene item in EVERY declared operator scene (`ensure_program_audio_in_every_scen
 owning scene is active, so a single-scene seed silences program audio on every camera cut (the
 original migrated collection had it in all 7 program scenes).
 
-### The two directions (`intercom/hub/src/local_audio.rs`)
+### The two directions (`hub/src/local_audio.rs`)
 
 - **EGRESS — `program_out` (a `pipewire` participant, role `program_out`):** declares
   `pipewire_target = "strih-program"` + `source_streams` (the VBAN streams routed into it —
@@ -720,7 +720,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   FOH console sent `fohabl-strih` as 24-bit PCM to a hub built before the PCM24 arm: the old
   `route_packet` decoded BEFORE the name lookup, turned the error into `None`, and the cutters lost
   FOH for ~90 min with no counter and no log.
-  - `classify_packet` (`intercom/hub/src/vban_classify.rs`, re-exported from `vban_io`) reads the
+  - `classify_packet` (`hub/src/vban_classify.rs`, re-exported from `vban_io`) reads the
     stream name from the raw header (`vban_stream_name`: magic + the 16-byte name, any sub-protocol),
     looks it up, and only then decodes: `Audio` / `Undecodable { id, stream, reason }` / `Foreign`
     (unknown name or not VBAN, silent). `route_packet` stays the audio-only wrapper.
@@ -739,7 +739,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   - `/api/state`: `decode_rejects` on every VBAN participant; the status line appends
     `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
     count (`strih_intercom_hub_version_grade`, below).
-  - Tests: `intercom/hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
+  - Tests: `hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
     half).
   - Open (review round 1, design-accepted): verify item 16 NOTEs a hub older than the checkout on
     nearly every run, because the workspace version moves on every PR while an installed hub is
@@ -759,7 +759,7 @@ crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clo
   version: OLDER = a NOTE with the reinstall line (`sudo mv` the binary to `.pre-<version>`, re-run
   setup-strih, restart the hub), the same or newer = PASS, nothing readable = NOTE. Tests:
   `tests/python/test_strih_hub_artifact_1467.py`.
-- **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
+- **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `hub/src/fir.rs`;
   the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
   bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
   new crate.
@@ -790,9 +790,9 @@ allowlist relay behind the box's own nginx (`.claude/rules/strih-https.md`).
 
 - **`join`** with `body.rtp = {ip, port, payload_type: 0}` (our `[janus].rtp_bind`). Janus answers
   with its OWN `rtp.ip`/`rtp.port` in the `joined` reply — that is where we send our PCMU AND where
-  the room mix comes back. The pure builders/parsers live in `intercom/hub/src/janus_rtp.rs`
+  the room mix comes back. The pure builders/parsers live in `hub/src/janus_rtp.rs`
   (`build_create/attach/join/configure/keepalive/leave`, `parse_success_id/joined/error`), pinned
-  in `intercom/hub/tests/janus_rtp.rs` against the documented shapes.
+  in `hub/tests/janus_rtp.rs` against the documented shapes.
 - **RTP PCMU:** 12-byte header, PT 0, 160 samples / 20 ms, a fixed SSRC per run, seq + timestamp
   continuity, the marker bit only on the first packet after start-up/silence (`RtpPacketizer`).
 - **Session lifecycle:** `create → attach(audiobridge) → join(rtp) → configure(muted:false)`,
@@ -868,20 +868,20 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   VB-Matrix routes fohabl + lv1 as program refs but not mbc, and the parity test pins that fidelity.
   If mbc should carry program audio, re-capture the VB-Matrix XML when it is active, then regenerate.
 - **The deployed matrix is load-tested through the REAL `Matrix::from_toml`** (not just tomllib) by
-  `intercom/hub/tests/deployed_matrix.rs` (`include_str!("../../intercom.strih-snv.toml")`) — so a
+  `hub/tests/deployed_matrix.rs` (`include_str!("../../intercom.strih-snv.toml")`) — so a
   future converter/XML change that produces a byte-parity-passing but daemon-REJECTED TOML fails at
   CI, not at rig startup. Keep that test's expected shape (15 participants / 216 points) in sync.
 
 ## Verification
 
 - **A routing-TOML change runs through the REAL `Matrix::from_toml`** (issue 1439):
-  `cargo run -p intercom-hub -- --check-config --config intercom/intercom.<box>.toml` prints `loads (N
+  `cargo run -p intercom-hub -- --check-config --config intercom.<box>.toml` prints `loads (N
   participants, M points)` or the refusal. Pin the counts the hub prints in the deployed-matrix tests.
 - **Also:** the converter pytest, `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`,
   `bash -n`/`shellcheck -S warning` on the scripts, the doc-lazy grep on touched `.rs`.
 - **CI:** the `intercom-hub` job runs the Rust unit tests (matrix/engine/vban_io/state/http, incl.
   the random-port VBAN loopback) + the moved codec tests; the appliance `test` job runs
-  `tests/intercom_hub_provisioning.rs` (the static anchors).
+  `hub/tests/hub_unit_provisioning_1345.rs` (the unit anchors; the setup-strih / verify-strih anchors are in camera-box).
 - **What the first compile actually caught (19.9.2026, three CI rounds):** (1) `chunks_exact(N)`
   with a constant N → the Rust 1.98 deny lint `chunks_exact_to_as_chunks` (use `as_chunks::<N>().0.iter()` + `from_le_bytes(*c)`; bkshading.md
   lists the same trap); (2) an axum handler returning `Json<Arc<T>>` fails the `Handler` bound
@@ -995,14 +995,14 @@ dev1 nginx TLS site that fronts it so a phone gets a full PWA install + a secure
 setup-strih) — those are the sibling lane's files. Design: issue 1345 comment "Design (main,
 19.9.2026)", Prístup 1.
 
-### The embedded phone PWA — `intercom/web/` served by `intercom/hub/src/http.rs`
+### The embedded phone PWA — `web/` served by `hub/src/http.rs`
 
 - **Embedded, self-contained** (the bkshading model): the hub serves every asset via
-  `include_str!`/`include_bytes!` from `../../web/…` (relative to `intercom/hub/src/` →
-  `intercom/web/`), so the binary is self-contained on strih-snv with no runtime file/CDN
+  `include_str!`/`include_bytes!` from `../../web/…` (relative to `hub/src/` →
+  `web/`), so the binary is self-contained on strih-snv with no runtime file/CDN
   dependency. The M1 plain-text `/` index is REPLACED by the PWA index; `/api/version`,
   `/api/state`, `/ws` stay byte-identical. Each asset has a pure `*_asset()` fn + a
-  `*_CONTENT_TYPE` const so the route tests (`intercom/hub/tests/webui_assets_1345.rs`) pin the
+  `*_CONTENT_TYPE` const so the route tests (`hub/tests/webui_assets_1345.rs`) pin the
   payload + type without a server. `/sw.js` carries `Service-Worker-Allowed: /`. NO new crate.
 - **The page contract — the phone UX rework (owner ruling 25.9.2026, design comment 5828494404).**
   Opening the link CONNECTS: there is NO connect button. At boot `startSession()` joins room 1000
@@ -1078,11 +1078,11 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   fire a reliable per-frame `load` event, so M3b only distinguishes streaming vs not-available
   ("Obraz: beží" vs the placeholder); a precise "frozen picture" chip needs M3c's real stream
   semantics and is an M3c refinement.
-- **Vendored janus.js** — `intercom/web/janus.js` is the official MIT `janus.js` from
+- **Vendored janus.js** — `web/janus.js` is the official MIT `janus.js` from
   meetecho/janus-gateway at tag **v1.1.2** (matching the `janus` 1.1.2 package Ubuntu 26.04 ships),
-  byte-for-byte, MIT header kept; the tag is recorded in `intercom/web/VENDORED.md`. Keep the
+  byte-for-byte, MIT header kept; the tag is recorded in `web/VENDORED.md`. Keep the
   vendored tag in lock-step with the deployed Janus version.
-- **The icons** are generated by `intercom/web/gen-icons.py` (stdlib zlib+struct PNG writer, no
+- **The icons** are generated by `web/gen-icons.py` (stdlib zlib+struct PNG writer, no
   dependency — the bkshading `gen-icons.py` pattern) as deterministic maskable-safe RGBA PNGs +
   `favicon.svg`; committed as small binaries the hub embeds.
 
@@ -1132,8 +1132,8 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `shellcheck -S warning` on the two scripts; `node --check` on `app.js`/`sw.js`/`janus.js`; the
   doc-lazy grep on the touched `.rs`.
 - **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
-  committed lockfile): `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
-  `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
+  committed lockfile): `tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
+  `web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
   `/api/state` / `/api/version` / a real endless multipart JPEG stream at `/interkom.mjpeg` since
   issue 1379; `picture-sw.spec.js` also runs on WebKit, see "The service worker must never proxy the
   picture stream" below). Only the external Janus SERVER is
@@ -1149,7 +1149,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   a COMPLETELY empty console. The spec neutralises the SW registration and wraps `getUserMedia` to
   count the PAGE's prompts (the double's room audio uses the unwrapped `window.__realGUM`).
 - **Local run (no npm install needed):** borrow an existing `@playwright/test`
-  (`NODE_PATH=<repo>/e2e/node_modules`, run its `cli.js test` from `intercom/tests/e2e`) and point
+  (`NODE_PATH=<repo>/e2e/node_modules`, run its `cli.js test` from `tests/e2e`) and point
   `INTERKOM_E2E_CHROMIUM` at an installed Chromium when the revisions differ. Run it from a script
   FILE (`bash /abs/run.sh`); the worktree guard refuses the inline shape.
 - **Gotcha — automated Chromium NEVER blocks autoplay.** Probed 25.9.2026: under Playwright a plain
@@ -1184,7 +1184,7 @@ Prístup 1 ("Video: MJPEG, not WebRTC video").
 
 ### The pipe: NDI low-bandwidth → decimate → JPEG → multipart
 
-`intercom/hub/src/ndi_video.rs` (+ its `ndi_video/` submodules) is a feature-`ndi` (DEFAULT ON)
+`hub/src/ndi_video.rs` (+ its `ndi_video/` submodules) is a feature-`ndi` (DEFAULT ON)
 picture leg, mirroring the bkshading service preview VERBATIM (`bkshading/service/src/preview/*.rs`,
 copied WITH a `keep in sync` header — the hub does NOT depend on the bkshading crate). One dedicated
 OS thread (`worker.rs`, NOT tokio — the NDI recv is a blocking FFI call) connects the
@@ -1206,7 +1206,7 @@ fail-loud, non-crashing, never a stub image (the `--features ndi` default). The 
 build swaps the real receiver for the stub test-pattern source so the libndi-free path can't bit-rot
 (CI runs the `--no-default-features` clippy/test step pair, exactly like the bkshading job).
 
-### The routes (`intercom/hub/src/http.rs`)
+### The routes (`hub/src/http.rs`)
 
 - `GET /interkom.mjpeg` → `multipart/x-mixed-replace; boundary=frame`, `Cache-Control: no-store`.
   A background pump polls the slot at ~`fps × 2` (never a busy-loop) and streams a
@@ -1218,7 +1218,7 @@ build swaps the real receiver for the stub test-pattern source so the libndi-fre
 - `GET /interkom.jpg` → the latest single JPEG (200), or 503 + a short text body when there is no
   frame yet / video is disabled. A curl-able liveness check.
 - Pure helpers `mjpeg_part(&[u8]) -> Vec<u8>` (the framing) + `frame_is_stale(updated, now, max_age)`
-  are unit-tested WITHOUT a server (`intercom/hub/tests/ndi_video_1345.rs`).
+  are unit-tested WITHOUT a server (`hub/tests/ndi_video_1345.rs`).
 - `/api/state` gains a HUB-LEVEL additive `video` facet (`slot::VideoStats`:
   `{source, connected, fps_actual, last_frame_age_ms, frames, last_error}`), present only when a
   `[video]` config is declared (`#[serde(skip_serializing_if = "Option::is_none")]`) — the M3a janus
@@ -1249,7 +1249,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 
 ## The service worker must never proxy the picture stream (issue 1379, 27.9.2026)
 
-- **What broke.** `intercom/web/sw.js` answered every fetch with `respondWith(fetch(event.request))`,
+- **What broke.** `web/sw.js` answered every fetch with `respondWith(fetch(event.request))`,
   including the endless `multipart/x-mixed-replace` `/interkom.mjpeg`. WebKit (iPhone Safari) never
   hands that never-ending response to the page's `<img>` through a worker.
   - The `load` event never fires, so the `<img>` stays `hidden` and the 5 s retry loops forever.
@@ -1277,7 +1277,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   - `bkshading/service/web/sw.js` has the same proxy-everything shape. Its preview is a polled
     single JPEG (`preview.jpg?t=`), a finite response, so it is not affected. If it ever moves to a
     multipart stream, give it the same exclusion.
-- **The regression tests** (`intercom/tests/e2e/`, shared helpers in `picture-helpers.js`) never
+- **The regression tests** (`tests/e2e/`, shared helpers in `picture-helpers.js`) never
   neutralise the worker.
   - `picture-sw.spec.js` waits for `navigator.serviceWorker.ready`, reloads so the worker controls
     the page, and asserts `controller` is set. The picture must decode at 320x180, and its centre
@@ -1324,7 +1324,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   (probed 27.9.2026). So verify the native player through its mirror canvas and the video's
   `readyState` / `videoWidth`, never through a video pixel. The mirror is `nativeCanvas`, a
   top-level `let` of the classic `app.js`, reachable by name from `page.evaluate`.
-- **Local run on dev1.** `npm ci` in `intercom/tests/e2e`. Playwright 1.49.1's WebKit (revision
+- **Local run on dev1.** `npm ci` in `tests/e2e`. Playwright 1.49.1's WebKit (revision
   2104, WebKit 18.2) is already in `~/.cache/ms-playwright`. Run the script-file wrapper with
   `--project=iphone-webkit`.
 - **After merge (supervisor).** The web assets are embedded, so the new `sw.js` ships with the hub
@@ -1372,7 +1372,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 - **Gotchas hit wiring the credential + jcfg (this lane, for the M4 cut-over / an Opus-leg swap):**
   (1) a NEW test/source file with `secret` in its FILENAME is blocked by `block-sensitive-staging.sh`
   at `git add` — name intercom secret-handling files `*_cred_*` (this lane's test is
-  `intercom/hub/tests/janus_cred_path_1345.rs`), the CONTENT may say "secret" freely. (2) A `git
+  `hub/tests/janus_cred_path_1345.rs`), the CONTENT may say "secret" freely. (2) A `git
   commit -m` / heredoc / `Write` whose PROSE puts "secret" next to a path (`room_secret_file`, "secret
   path") trips `block-vault-store-read.sh` — pass the commit message via `git commit -F <file>` and
   write scratch files with the `Write` tool (not a Bash heredoc). (3) Janus 1.1.x jcfg bind keys

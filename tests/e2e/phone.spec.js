@@ -1,6 +1,6 @@
 // @ts-check
 // Real-browser E2E for the interkom phone PWA (issue 1345, owner ruling 25.9.2026 — the phone UX
-// rework). The page is the REAL intercom/web client AND the real vendored janus.js, served by
+// rework). The page is the REAL web client AND the real vendored janus.js, served by
 // stub_hub.py; only the external Janus SERVER is a test double (fake-janus-server.js: a WebSocket
 // double with a real in-page RTCPeerConnection), so SDP directions, renegotiation and audio really
 // flow through WebRTC. Chromium's fake media device gives both level meters a real signal. Every
@@ -12,10 +12,10 @@ const { test, expect } = require("@playwright/test");
 const SCREENSHOT_DIR = process.env.INTERKOM_E2E_SCREENSHOT_DIR || "";
 
 // issue 1453: the hub relays the phone's Janus WebSocket through a frame allowlist
-// (intercom/hub/src/janus_ws_guard.rs). janus-ws-pwa-frames.json holds the raw text of one frame of
+// (hub/src/janus_ws_guard.rs). janus-ws-pwa-frames.json holds the raw text of one frame of
 // every shape the page sends (captured from this suite; keepalive / hangup / detach / info, which
 // these short tests never reach, built from janus.js 1.1.2's own request literals). The hub's test
-// (intercom/hub/tests/janus_relay_1453.rs) forwards each of them byte-identically through the real
+// (hub/tests/janus_relay_1453.rs) forwards each of them byte-identically through the real
 // relay, and every test here checks that the page sent no frame of another shape. A new frame shape
 // in app.js (or a janus.js update) fails here until a real sample is added, which then makes the
 // Rust test prove the allowlist forwards it.
@@ -75,7 +75,7 @@ test.afterEach(async () => {
   expect(
     outside,
     `the page sent a frame the hub's /janus allowlist would refuse (shapes allowed: ${[...ALLOWED_SHAPES].join(" | ")}); ` +
-      "add a real sample to intercom/tests/fixtures/janus-ws-pwa-frames.json and let janus_ws_guard.rs allow it (issue 1453)"
+      "add a real sample to tests/fixtures/janus-ws-pwa-frames.json and let janus_ws_guard.rs allow it (issue 1453)"
   ).toEqual([]);
 });
 

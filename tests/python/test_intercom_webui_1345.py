@@ -25,7 +25,7 @@ They pin the PWA CONTRACT so the embedded assets can't silently regress:
  - NO `localhost` / `127.0.0.1` appears anywhere in the served assets.
 
 A python static test CANNOT catch a JS/CSS runtime bug — the real browser check is the Playwright
-spec `intercom/web/tests/e2e/phone.spec.js` (stub hub + a fake Janus, Chromium fake media).
+spec `tests/e2e/phone.spec.js` (stub hub + a fake Janus, Chromium fake media).
 Runnable directly (`python3 tests/python/test_intercom_webui_1345.py`) or under pytest.
 """
 import json
@@ -34,7 +34,7 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
-WEB = os.path.join(REPO, "intercom", "web")
+WEB = os.path.join(REPO, "web")
 
 INDEX = os.path.join(WEB, "index.html")
 APP_JS = os.path.join(WEB, "app.js")
@@ -90,7 +90,7 @@ def test_service_worker_is_passthrough_no_cache():
 
 
 def test_service_worker_leaves_the_picture_stream_to_the_browser_1379():
-    # The behavioural guard is the WebKit E2E (intercom/tests/e2e/picture-sw.spec.js); this static
+    # The behavioural guard is the WebKit E2E (tests/e2e/picture-sw.spec.js); this static
     # check also catches a removed path or a removed/moved bypass in a Chromium-only or Python-only
     # run: the fetch listener must return BEFORE its respondWith for the bypassed requests.
     sw = _read(SW)

@@ -1,12 +1,12 @@
 ---
 paths:
-  - "intercom/hub/src/alsa_card.rs"
-  - "intercom/hub/src/alsa_leg.rs"
-  - "intercom/hub/src/alsa_spec.rs"
-  - "intercom/hub/tests/alsa_*_1438.rs"
-  - "intercom/hub/tests/check_config_1438.rs"
-  - "intercom/hub/tests/fixtures/alsa_card_1438/**"
-  - "intercom/intercom.strih-pp.toml"
+  - "hub/src/alsa_card.rs"
+  - "hub/src/alsa_leg.rs"
+  - "hub/src/alsa_spec.rs"
+  - "hub/tests/alsa_*_1438.rs"
+  - "hub/tests/check_config_1438.rs"
+  - "hub/tests/fixtures/alsa_card_1438/**"
+  - "intercom.strih-pp.toml"
   - "scripts/lib/strih-intercom-hub-unit.sh"
 ---
 
