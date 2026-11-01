@@ -1,7 +1,7 @@
 //! Static-anchor tests for the hub's systemd unit and the CI release job (issue 1345 M1). Moved
-//! from camera-box's `tests/intercom_hub_provisioning.rs` by intercom#1. The anchors on the provisioning that installs the unit (`setup-strih.sh`,
-//! `verify-strih.sh`, the `scripts/lib/strih-*.sh` drop-in renderers) stay in camera-box, next to
-//! those files. Std-only.
+//! from camera-box's `tests/intercom_hub_provisioning.rs` by intercom#1. The anchors on the
+//! provisioning that installs the unit (`setup-strih.sh`, `verify-strih.sh`, the
+//! `scripts/lib/strih-*.sh` drop-in renderers) stay in camera-box, next to those files. Std-only.
 
 use std::path::PathBuf;
 

@@ -42,8 +42,8 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   calling thread). Above every SCHED_OTHER task, below dantesync (50) and PipeWire's own real-time
   threads.
   - The unit grants it: `LimitRTPRIO=10` in `systemd/intercom-hub.service` `[Service]`; the
-    setup-strih step-12 drop-in leaves it alone. Pinned by `tests/intercom_hub_provisioning.rs` and
-    by `hub/tests/mix_thread_1401.rs` against `MIX_RT_PRIORITY`.
+    setup-strih step-12 drop-in leaves it alone. Pinned by `hub/tests/hub_unit_provisioning_1345.rs`
+    (the unit), camera-box (the drop-in) and `hub/tests/mix_thread_1401.rs` (`MIX_RT_PRIORITY`).
   - Refused: ONE warning (`SCHED_FIFO 10 refused ... the unit needs LimitRTPRIO=10`) and the thread
     runs SCHED_OTHER; the hub never fails to start over it.
   - The thread reads its own class at start and publishes it as `mix_thread_sched` on
@@ -72,7 +72,7 @@ bursts. The loop was a tokio task on SCHED_OTHER workers on the busy E-cores, an
   - hub-mix touches `MIX_STACK_PREFAULT_BYTES` (256 KiB, whole pages) of its own stack right after
     its SCHED_FIFO request and before the block loop (`prefault_stack`).
   - The unit: `LimitMEMLOCK=infinity` + `OOMScoreAdjust=-900` in `[Service]`; no provisioning
-    drop-in may set either (`tests/intercom_hub_provisioning.rs` scans every `scripts/lib/*.sh` for a
+    drop-in may set either (camera-box's provisioning test scans its `scripts/lib/*.sh` for a
     line-leading directive).
   - Locked = resident whole: every thread stack (tokio workers, the blocking pool, the NDI and pw-cat
     threads) is faulted in at its full size, so RSS is tens of MB, not the ~1.5-17 MB the hub showed

@@ -4,9 +4,7 @@
 
 Split from `zbynekdrlik/camera-box` on 2026-11-01 with history (ticket airuleset#1280). Inventory: camera-box#1487 section B. The split covers `intercom/` at the repository root, the hub service, Janus and routing scripts, four `strih-intercom*` rules and the hub and PWA tests.
 
-The tree does not build yet. The root `Cargo.toml` workspace stayed in camera-box, and the crates use `version.workspace = true`. First work: add a workspace, CI and a release that publishes a hub binary with its TOML files.
-
-camera-box needs two things from you before it can drop `intercom/`: a version tag for `intercom-vban`, and a published hub release artifact with its TOML files. Until both exist, its copy stays frozen. Keep the wire format and the `/api/state` fields stable.
+Since intercom#1 the tree builds as a root workspace (`vban`, `hub`) with CI, and every dev->main merge tags `vX.Y.Z` and publishes `intercom-hub-linux-amd64.tar.gz` + `.sha256` (binary, unit, the four TOMLs). camera-box pins that tag for `intercom-vban` and the hub. The `setup-strih` / `verify-strih` glue (`scripts/lib/strih-intercom-hub-unit.sh`, `strih-interkom-public.sh`, `janus_turn_rest_cfg.py`, the nginx conf) stayed with camera-box: it sources camera-box libs. Keep the wire format and the `/api/state` fields stable.
 
 ## Machines
 
@@ -21,7 +19,7 @@ camera-box needs two things from you before it can drop `intercom/`: a version t
 
 ## How to run a test
 
-`cargo test` in the crates after the workspace exists. Hub provisioning test: `tests/intercom_hub_provisioning.rs`. Browser tests: `tests/e2e`, Playwright 1.49.1, chromium. Python tests: `tests/python`.
+`cargo test --workspace`. Hub unit anchors: `hub/tests/hub_unit_provisioning_1345.rs`. Browser tests: `tests/e2e`, Playwright 1.49.1, chromium. Python tests: `tests/python`.
 
 ## Site facts
 
@@ -38,7 +36,7 @@ Owner-requested:
 - Handle the intercom as a separate process and project (2026-11-01).
 - The hub owns its Dante device (camera-box#1485).
 
-Must decide with camera-box (camera-box#1487): `src/drm_output_audio_match.rs`, compiled by the hub from the appliance tree, and the installer in `scripts/lib/strih-intercom-hub-unit.sh`.
+Decided with camera-box (intercom#1): the hub carries its own `hub/src/drm_output_audio_match.rs`; the unit installer stays in camera-box.
 
 Proposed by a session, not yet asked for by the owner: nothing.
 

@@ -39,7 +39,8 @@ jobs:
           have="$(ver < Cargo.toml)"
           main="$(git show origin/main:Cargo.toml 2>/dev/null | ver || true)"
           echo "dev ${have}, main ${main:-<none>}"
-          [ -n "$have" ] || { echo "::error::no workspace version in Cargo.toml"; exit 1; }
+          # Plain X.Y.Z only: a pre-release suffix would sort above its release and tag a non-vX.Y.Z.
+          echo "$have" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::workspace version '${have}' is not X.Y.Z"; exit 1; }
           if [ -n "$main" ]; then
             top="$(printf '%s\n%s\n' "$main" "$have" | sort -V | tail -n 1)"
             if [ "$have" = "$main" ] || [ "$top" != "$have" ]; then
@@ -134,8 +135,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Install pytest
-        run: python3 -m pip install --user pytest==8.4.2
+        run: python3 -m pip install pytest==8.4.2
       - name: pytest
         run: python3 -m pytest -q tests/python
 

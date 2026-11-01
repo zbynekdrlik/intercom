@@ -6,7 +6,7 @@
 //! This crate is the ONE source of truth for the VBAN wire format across the repo: the
 //! camera-box appliance re-exports it verbatim (`src/vban.rs` is now `pub use intercom_vban::*;`,
 //! so `src/intercom.rs` and its tests are behaviourally untouched) and the strih-snv intercom hub
-//! (`intercom/hub`) speaks the identical bytes to the 7 camboxes. Moved out of `src/vban.rs`
+//! (`hub`) speaks the identical bytes to the 7 camboxes. Moved out of `src/vban.rs`
 //! unchanged (the codec + its unit tests), so the cambox contract stays byte-identical.
 
 use anyhow::{anyhow, Result};

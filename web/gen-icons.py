@@ -9,7 +9,7 @@ installed phone web app has a recognisable icon on the home screen. Emits:
                                     icons are safe as a maskable icon (the crop keeps the glyph).
   * favicon.svg                  — the same glyph as scalable SVG.
 
-Run from anywhere: it writes next to itself (intercom/web/). Committed as small binaries so the
+Run from anywhere: it writes next to itself (web/). Committed as small binaries so the
 hub embeds them via include_bytes! (self-contained, no runtime file dependency). Re-run after
 changing the palette/glyph; the output is deterministic (fixed geometry + zlib level 9).
 

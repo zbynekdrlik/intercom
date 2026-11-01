@@ -34,18 +34,18 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Download the caller run's intercom-hub build
-        if: inputs.tag != ''
+        if: github.ref_type != 'tag'
         uses: actions/download-artifact@v4
         with:
           name: intercom-hub-linux-amd64
           path: target/release
 
       - name: Install Rust
-        if: inputs.tag == ''
+        if: github.ref_type == 'tag'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release
-        if: inputs.tag == ''
+        if: github.ref_type == 'tag'
         run: cargo build --release --bins -p intercom-hub --locked
 
       - name: The binary reports the tag's version and loads every TOML
@@ -72,6 +72,13 @@ jobs:
           cp systemd/intercom-hub.service dist/
           cp intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml dist/
           tar -czvf intercom-hub-linux-amd64.tar.gz -C dist .
+          # The member list camera-box installs from: exactly these, flat, the binary executable.
+          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml)"
+          got="$(tar -tzf intercom-hub-linux-amd64.tar.gz | grep -v '^\./$' | sort)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::tarball members differ"; diff <(echo "$want") <(echo "$got") || true; exit 1
+          fi
+          tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-hub | grep -q '^-rwx' || { echo "::error::intercom-hub is not executable in the tarball"; exit 1; }
           sha256sum intercom-hub-linux-amd64.tar.gz > intercom-hub-linux-amd64.tar.gz.sha256
           cat intercom-hub-linux-amd64.tar.gz.sha256
 
@@ -102,7 +109,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          make_latest: ${{ inputs.tag != '' }}
+          make_latest: ${{ github.ref_type != 'tag' }}
           files: |
             artifacts/intercom-hub-linux-amd64.tar.gz
             artifacts/intercom-hub-linux-amd64.tar.gz.sha256

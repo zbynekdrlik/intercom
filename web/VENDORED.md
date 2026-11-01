@@ -1,4 +1,4 @@
-# Vendored third-party assets — `intercom/web/`
+# Vendored third-party assets — `web/`
 
 ## `janus.js`
 

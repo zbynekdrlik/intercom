@@ -1,6 +1,6 @@
 // @ts-check
 // Real-browser E2E for the interkom phone PWA (issue 1345, owner ruling 25.9.2026 — the phone UX
-// rework). The page is the REAL intercom/web client AND the real vendored janus.js, served by
+// rework). The page is the REAL web client AND the real vendored janus.js, served by
 // stub_hub.py; only the external Janus SERVER is a test double (fake-janus-server.js: a WebSocket
 // double with a real in-page RTCPeerConnection), so SDP directions, renegotiation and audio really
 // flow through WebRTC. Chromium's fake media device gives both level meters a real signal. Every

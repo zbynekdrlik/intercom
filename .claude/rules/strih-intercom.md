@@ -8,20 +8,20 @@ paths:
 # strih-snv intercom hub (issue 1345)
 
 The strih intercom is migrating off the Windows **VB-Audio Matrix** (a GUI-only static N-1 grid) +
-**VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`intercom/hub`), with Janus
+**VDO.Ninja** onto a Rust mix-minus hub on the strih-snv Linux notebook (`hub`), with Janus
 as the only WebRTC code and our own phone PWA. This rule covers the M1 core (the VBAN leg + engine +
 converter). Design: issue 1345 comment "Design (main, 19.9.2026)"; the VB-Matrix read-out: issue
 1344 comment "VB-Matrix setup READ".
 
 ## The workspace crates
 
-- **`intercom/vban` (`intercom-vban`)** — the shared VBAN codec, MOVED out of `src/vban.rs` (which
+- **`vban` (`intercom-vban`)** — the shared VBAN codec, MOVED out of `src/vban.rs` (which
   is now `pub use intercom_vban::*;`). It is the ONE source of truth for the wire format: the
   appliance (`src/intercom.rs`) and the hub both use it, so the 7 camboxes need NO change. Pure
   (only `anyhow`) — it is a path dependency of the appliance, so the root build compiles it, but its
   tests run only in the `intercom-hub` CI job (`cargo test -p intercom-vban`), never the root
   `cargo test`.
-- **`intercom/hub` (`intercom-hub`, bin `intercom-hub`)** — the tokio + axum daemon (the bkshading
+- **`hub` (`intercom-hub`, bin `intercom-hub`)** — the tokio + axum daemon (the bkshading
   service skeleton): `matrix` (declarative `Matrix::from_toml`), `engine` (the N-1 mixer), `vban_io`
   (recv/jitter/demux/send), `state` + `http` (`/api/state` + `/ws` + `/api/version`). Its own heavier
   deps (tokio/axum/toml) live only in its manifest, NOT the appliance tree.
@@ -881,7 +881,7 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   `bash -n`/`shellcheck -S warning` on the scripts, the doc-lazy grep on touched `.rs`.
 - **CI:** the `intercom-hub` job runs the Rust unit tests (matrix/engine/vban_io/state/http, incl.
   the random-port VBAN loopback) + the moved codec tests; the appliance `test` job runs
-  `tests/intercom_hub_provisioning.rs` (the static anchors).
+  `hub/tests/hub_unit_provisioning_1345.rs` (the unit anchors; the setup-strih / verify-strih anchors are in camera-box).
 - **What the first compile actually caught (19.9.2026, three CI rounds):** (1) `chunks_exact(N)`
   with a constant N → the Rust 1.98 deny lint `chunks_exact_to_as_chunks` (use `as_chunks::<N>().0.iter()` + `from_le_bytes(*c)`; bkshading.md
   lists the same trap); (2) an axum handler returning `Json<Arc<T>>` fails the `Handler` bound
@@ -1133,7 +1133,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   doc-lazy grep on the touched `.rs`.
 - **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
   committed lockfile): `tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
-  `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
+  `web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
   `/api/state` / `/api/version` / a real endless multipart JPEG stream at `/interkom.mjpeg` since
   issue 1379; `picture-sw.spec.js` also runs on WebKit, see "The service worker must never proxy the
   picture stream" below). Only the external Janus SERVER is

@@ -1,7 +1,7 @@
 // @ts-check
 // The phone page fetches the hub's TURN servers before it opens the Janus session (issue 1453): a
 // phone on mobile data needs a media relay, and Janus has only LAN host candidates. Same harness as
-// phone.spec.js: the REAL intercom/web client + the REAL vendored janus.js served by stub_hub.py,
+// phone.spec.js: the REAL web client + the REAL vendored janus.js served by stub_hub.py,
 // only the Janus SERVER faked (fake-janus-server.js). The stub's `/api/ice` mode is switched per
 // test (`/__test/ice/<mode>`). A wrapper around RTCPeerConnection records the configuration janus.js
 // builds, so the test sees exactly which ICE servers the page's PeerConnection got. Most tests
