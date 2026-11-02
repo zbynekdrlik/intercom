@@ -44,6 +44,11 @@ on `Clock::System` hearing its own test TX tone through `RxProcessor` (dstack's 
 shape; one device per test file, the timing profile is process-global). The test needs `dstack`
 as a dev-dependency at the SAME tag as `dlink` (one dstack in the lockfile).
 
+## License
+
+`intercom-hub` is GPL-3.0-or-later since intercom#5 (owner 2.11.2026): it links dstack's GPL-3.0
+`dlink`. `intercom-vban` stays MIT; camera-box links only that crate, never the hub.
+
 ## Moving the dstack version
 
 Both `dlink` and the `dstack` dev-dependency move together in `hub/Cargo.toml`; then

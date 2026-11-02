@@ -4,7 +4,9 @@ version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
-license = "MIT"
+# GPL-3.0-or-later since intercom#5 (owner 2.11.2026): the hub links dstack's GPL-3.0 `dlink`.
+# `intercom-vban` stays MIT; camera-box links only that crate.
+license = "GPL-3.0-or-later"
 repository = "https://github.com/zbynekdrlik/intercom"
 
 [lib]
