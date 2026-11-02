@@ -25,7 +25,12 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
   its NAME in `rx`; the hub turns it into dstack's 1-based number), `tx_channel`, `tx_device`
   (Dante's names). An unknown or repeated `rx` fails the load. At start an RX channel the
   state_file holds no subscription for takes the declared one; one Dante Controller sets is saved
-  and wins; declared ones are never written to the file. Which source feeds Master/Click is the
+  and wins. v0.5.11 also saves the declared ones with the next save (a Controller change), so a
+  later TOML edit stops reaching that channel (reported to dstack).
+- **Growing `rx` over a saved state:** dstack keeps the saved names for the old channels and adds
+  the config's for the new, compared case-insensitively; a new name equal to an old one refuses the
+  state and the device never starts (1.9.3's `Click` vs `CLICK`). Pinned by
+  `strih_snv_s_device_loads_over_the_phase_1_state_file`. Which source feeds Master/Click is the
   owner's call, and the TX names belong to that device: dstack never picks them.
 - **Two devices on one address** (the hub + OBS's strih-obs) need distinct ARC/CMC/flows ports and
   process ids; the info port 8700 is shared by dstack itself. camera-box's nft names the RX range.

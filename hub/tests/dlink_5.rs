@@ -488,8 +488,15 @@ fn a_subscription_names_a_known_rx_channel_once() {
     );
     assert!(refusal(&format!("{HEAD}{twice}{}", participant(3, 0)))
         .contains("rx 'Click' is declared twice"));
-    let typo = format!("{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\nchannel = \"01\"\n");
-    assert!(!refusal(&format!("{HEAD}{typo}{}", participant(3, 0))).is_empty());
+    let typo = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\nchannel = \"01\"\ntx_channel = \"01\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{typo}{}", participant(3, 0))).contains("unknown field"));
+    let empty = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\ntx_channel = \"\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{empty}{}", participant(3, 0)))
+        .contains("subscribe: rx 3: a valid Dante channel and device name"));
 }
 
 // --- the ring across threads (review round 1) ---------------------------------------------------

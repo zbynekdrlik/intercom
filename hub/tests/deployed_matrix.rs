@@ -26,6 +26,32 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         "expected the 216-point VB-Matrix grid minus VASIO8's 4"
     );
 
+    // intercom#5: the declared Yamaha-card subscriptions reach dstack's device config.
+    let dev = m
+        .dlink
+        .as_ref()
+        .expect("strih-snv carries the Dante device")
+        .link_config(48_000)
+        .device()
+        .expect("dstack accepts the deployed [dlink]");
+    let subs: Vec<_> = dev
+        .subscribe
+        .iter()
+        .map(|s| (s.rx, s.tx_channel.as_str()))
+        .collect();
+    assert_eq!(
+        subs,
+        vec![
+            (1, "REPRO 0dB L 07"),
+            (2, "REPRO 0dB R 08"),
+            (4, "GUIDE track 32")
+        ]
+    );
+    assert!(dev
+        .subscribe
+        .iter()
+        .all(|s| s.tx_device == "foh-abl-yamaha-accelerator"));
+
     // 10 VBAN inputs (cam1..7 + fohabl/lv1/mbc), 7 active VBAN outputs (cam1..7).
     let vban_in = m
         .participants
