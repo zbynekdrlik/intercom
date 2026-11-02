@@ -43,6 +43,11 @@ tx_channel = "REPRO 0dB R 08"
 tx_device = "foh-abl-yamaha-accelerator"
 
 [[dlink.subscribe]]
+rx = "CLICK 3doba"
+tx_channel = "09"
+tx_device = "foh-abl-yamaha-accelerator"
+
+[[dlink.subscribe]]
 rx = "GUIDE"
 tx_channel = "GUIDE track 32"
 tx_device = "foh-abl-yamaha-accelerator"

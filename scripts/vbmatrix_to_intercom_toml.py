@@ -95,11 +95,12 @@ DLINK = {
     "flows_port": 4456,
     "process_id": 1,
     "rx_port_base": 47100,
-    # The Yamaha card's TX names (dasio 2.11.2026). CLICK is not declared: the band's "CLICK 3doba"
-    # is not on the card ("CLICK track 31" carries "Click 2 iem"); the owner decides.
+    # The Yamaha card's TX names (dasio 2.11.2026). CLICK 3doba goes to the card's TX ch 9, default
+    # name "09" (owner 2.11.2026; dasio routes it in VB-Matrix): a rename of ch 9 must follow here.
     "subscribe": [
         ("REPRO L", "REPRO 0dB L 07", "foh-abl-yamaha-accelerator"),
         ("REPRO R", "REPRO 0dB R 08", "foh-abl-yamaha-accelerator"),
+        ("CLICK 3doba", "09", "foh-abl-yamaha-accelerator"),
         ("GUIDE", "GUIDE track 32", "foh-abl-yamaha-accelerator"),
     ],
 }

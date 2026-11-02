@@ -443,7 +443,7 @@ fn the_three_control_ports_come_together_and_the_rx_range_clears_them() {
     assert!(refusal(&format!("{HEAD}{overlap}{}", participant(1, 0))).contains("rx_port_base"));
 }
 
-// --- declared subscriptions (dlink v0.5.11) -----------------------------------------------------
+// --- declared subscriptions (dlink v0.5.12) -----------------------------------------------------
 
 #[test]
 fn declared_subscriptions_reach_dstack_by_rx_number() {

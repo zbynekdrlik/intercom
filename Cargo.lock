@@ -344,8 +344,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.5.11"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.11#5cf50ecd3789f3a6598d28576d93349b2b9d569c"
+version = "0.5.12"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.12#7a388ae06cca881b1aa747427a998270e18188a4"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -354,8 +354,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.5.11"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.11#5cf50ecd3789f3a6598d28576d93349b2b9d569c"
+version = "0.5.12"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.12#7a388ae06cca881b1aa747427a998270e18188a4"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -377,13 +377,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.5.11"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.11#5cf50ecd3789f3a6598d28576d93349b2b9d569c"
+version = "0.5.12"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.12#7a388ae06cca881b1aa747427a998270e18188a4"
 
 [[package]]
 name = "dsync-ptp"
-version = "1.24.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.24.0#cf97662026f7d14b640c664b454ba6ef7ffa621b"
+version = "1.26.0"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.26.0#f40d77a7890a1f888eccb9f3e0c399a6add15bd1"
 dependencies = [
  "anyhow",
  "byteorder",

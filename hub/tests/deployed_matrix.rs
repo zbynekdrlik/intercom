@@ -26,7 +26,7 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         "expected the 216-point VB-Matrix grid minus VASIO8's 4"
     );
 
-    // intercom#5: the declared Yamaha-card subscriptions reach dstack's device config.
+    // intercom#5: the four declared Yamaha-card subscriptions reach dstack's device config.
     let dev = m
         .dlink
         .as_ref()
@@ -44,6 +44,7 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         vec![
             (1, "REPRO 0dB L 07"),
             (2, "REPRO 0dB R 08"),
+            (3, "09"),
             (4, "GUIDE track 32")
         ]
     );

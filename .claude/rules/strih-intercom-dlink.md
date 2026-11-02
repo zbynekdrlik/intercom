@@ -21,12 +21,15 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
   none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
   participant iff the table; input only, `in_channels` 1..=rx.len().
-- **Declared subscriptions** (dlink v0.5.11): `[[dlink.subscribe]]` with `rx` (our RX channel by
+- **Declared subscriptions** (dlink v0.5.12): `[[dlink.subscribe]]` with `rx` (our RX channel by
   its NAME in `rx`; the hub turns it into dstack's 1-based number), `tx_channel`, `tx_device`
   (Dante's names). An unknown or repeated `rx` fails the load. At start an RX channel the
   state_file holds no subscription for takes the declared one; one Dante Controller sets is saved
-  and wins. v0.5.11 also saves the declared ones with the next save (a Controller change), so a
-  later TOML edit stops reaching that channel (reported to dstack).
+  and wins. Declared ones are never saved (v0.5.12; v0.5.11 saved them with the next save, so a
+  TOML edit stopped reaching the channel); a Controller change of the channel clears the mark.
+- **strih-snv's mapping** (owner + dasio 2.11.2026): `foh-abl-yamaha-accelerator` TX
+  `REPRO 0dB L 07`, `REPRO 0dB R 08`, `09` (CLICK 3doba, routed by dasio in FOH VB-Matrix), `GUIDE
+  track 32`. A rename of card ch 9 must follow in the converter's `DLINK`.
 - **Growing `rx` over a saved state:** dstack keeps the saved names for the old channels and adds
   the config's for the new, compared case-insensitively; a new name equal to an old one refuses the
   state and the device never starts (1.9.3's `Click` vs `CLICK`). The old channels also keep their

@@ -237,12 +237,12 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     assert d["iface"] == "enp7s0.70"
     # fohabl-strih's four channels in order (dasio's 30.10 FOH analysis, intercom#5).
     assert d["rx"] == ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"]
-    # Declared on the Yamaha card's TX (dasio 2.11.2026). CLICK waits on the owner: the card's
-    # "CLICK track 31" carries a different click.
+    # Declared on the Yamaha card's TX (dasio 2.11.2026); CLICK 3doba on card ch 9 (owner 2.11.2026).
     yamaha = "foh-abl-yamaha-accelerator"
     assert d["subscribe"] == [
         {"rx": "REPRO L", "tx_channel": "REPRO 0dB L 07", "tx_device": yamaha},
         {"rx": "REPRO R", "tx_channel": "REPRO 0dB R 08", "tx_device": yamaha},
+        {"rx": "CLICK 3doba", "tx_channel": "09", "tx_device": yamaha},
         {"rx": "GUIDE", "tx_channel": "GUIDE track 32", "tx_device": yamaha},
     ]
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.

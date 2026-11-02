@@ -77,10 +77,10 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
-    /// Declared subscriptions (dlink v0.5.11): an RX channel the state file holds no subscription
+    /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
     /// for takes its declared one at start; one Dante Controller sets is saved there and wins.
-    /// dlink v0.5.11 also saves the declared ones with the next state save (a Controller change),
-    /// after which a TOML edit no longer reaches that channel (reported to dstack, intercom#5).
+    /// Declared ones are never saved (dlink v0.5.12, the fix of intercom#5's report), so a TOML
+    /// edit reaches its channel until Dante Controller changes that channel.
     #[serde(default)]
     pub subscribe: Vec<DlinkSubscribe>,
 }
