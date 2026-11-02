@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use intercom_hub::inputs::input_buffers;
-use intercom_hub::matrix::{Matrix, ADAPTER_JANUS, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
+use intercom_hub::matrix::{Matrix, ADAPTER_DLINK, ADAPTER_JANUS, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 use intercom_hub::state::{HubState, JitterFacet, RuntimeStats};
 use intercom_hub::vban_io::BufferKind;
 use intercom_hub::vban_jitter::NetworkFillStats;
@@ -311,7 +311,8 @@ fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
             BufferKind::VbanLeg
         } else if p.adapter == ADAPTER_JANUS {
             BufferKind::JanusCapture
-        } else if local_inputs.contains(&id) {
+        } else if local_inputs.contains(&id) || p.adapter == ADAPTER_DLINK {
+            // intercom#5: the hub's own Dante device is a foreign clock like the card's crystal.
             BufferKind::CardCapture
         } else {
             BufferKind::Plain
