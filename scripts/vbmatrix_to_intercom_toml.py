@@ -39,6 +39,7 @@ Usage:
     python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom.strih-snv.toml
 """
 
+import json
 import sys
 import xml.etree.ElementTree as ET
 
@@ -78,19 +79,30 @@ VIDEO = {
 
 # The hub's own Dante device (intercom#5): dstack's dlink in the hub, emitted as the `[dlink]` table
 # and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
-# band click/guide on its Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
+# band click/guide on the Yamaha card's Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
 # /api/state, routed to NO output. Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
 # Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
 # what camera-box's nft opens on enp7s0.70.
 DLINK = {
     "name": "strih-snv-intercom",
     "iface": "enp7s0.70",
-    "rx": ["Master", "Click"],
+    # fohabl-strih's four channels, in its order (dasio's 30.10 FOH VB-Matrix analysis). No name may
+    # equal 1.9.3's "Master"/"Click" up to case: dstack keeps a saved file's names for the old
+    # channels and refuses a duplicate (hence "CLICK 3doba", the source's own name).
+    "rx": ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"],
     "arc_port": 4441,
     "cmc_port": 8801,
     "flows_port": 4456,
     "process_id": 1,
     "rx_port_base": 47100,
+    # The Yamaha card's TX names (dasio 2.11.2026). CLICK 3doba goes to the card's TX ch 9, default
+    # name "09" (owner 2.11.2026; dasio routes it in VB-Matrix): a rename of ch 9 must follow here.
+    "subscribe": [
+        ("REPRO L", "REPRO 0dB L 07", "foh-abl-yamaha-accelerator"),
+        ("REPRO R", "REPRO 0dB R 08", "foh-abl-yamaha-accelerator"),
+        ("CLICK 3doba", "09", "foh-abl-yamaha-accelerator"),
+        ("GUIDE", "GUIDE track 32", "foh-abl-yamaha-accelerator"),
+    ],
 }
 DLINK_PARTICIPANT = {
     "name": "foh_dante",
@@ -374,6 +386,15 @@ def render(model):
     for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base"):
         out.append(f"{key} = {DLINK[key]}")
     out.append("")
+    for rx, tx_channel, tx_device in DLINK["subscribe"]:
+        if rx not in DLINK["rx"]:
+            raise ValueError(f"dlink subscribe: rx {rx!r} is not one of {DLINK['rx']}")
+        out.append("[[dlink.subscribe]]")
+        # json.dumps is a valid TOML basic string (a Dante name may hold '"' or '\\').
+        out.append(f"rx = {json.dumps(rx, ensure_ascii=False)}")
+        out.append(f"tx_channel = {json.dumps(tx_channel, ensure_ascii=False)}")
+        out.append(f"tx_device = {json.dumps(tx_device, ensure_ascii=False)}")
+        out.append("")
 
     for p in list(participants) + [DLINK_PARTICIPANT]:
         out.append("[[participant]]")

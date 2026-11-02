@@ -3,7 +3,8 @@
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
 //! device of its own, beside the `fohabl-strih` VBAN leg, which stays (owner 2.11.2026). dstack owns
 //! the protocol, the subscriptions (kept in `state_file`), the 10 ms latency at normal priority and
-//! dantesync as the media clock (dstack#20, dstack#68). The hub writes none of that.
+//! dantesync as the media clock (dstack#20, dstack#68). The hub only declares its wanted
+//! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
 //!
 //! The crossing into the hub:
 //!
@@ -76,6 +77,22 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
+    /// for takes its declared one at start; one Dante Controller sets is saved there and wins.
+    /// Declared ones are never saved (dlink v0.5.12, the fix of intercom#5's report), so a TOML
+    /// edit reaches its channel until Dante Controller changes that channel.
+    #[serde(default)]
+    pub subscribe: Vec<DlinkSubscribe>,
+}
+
+/// One `[[dlink.subscribe]]`: our RX channel `rx` (by its name in `rx`) hears `tx_channel` on the
+/// Dante device `tx_device` (both Dante's names).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DlinkSubscribe {
+    pub rx: String,
+    pub tx_channel: String,
+    pub tx_device: String,
 }
 
 fn default_latency_ms() -> u32 {
@@ -103,6 +120,12 @@ impl DlinkConfig {
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);
         }
+        for sub in &self.subscribe {
+            // An unknown name is listed by `problems`, so a loaded table never reaches here with one.
+            if let Some(i) = self.rx.iter().position(|r| *r == sub.rx) {
+                c = c.subscribe(i + 1, sub.tx_channel.clone(), sub.tx_device.clone());
+            }
+        }
         c
     }
 
@@ -125,6 +148,17 @@ impl DlinkConfig {
                 "state_file: an absolute path, got '{}'",
                 self.state_file.display()
             ));
+        }
+        for (n, sub) in self.subscribe.iter().enumerate() {
+            if !self.rx.contains(&sub.rx) {
+                out.push(format!(
+                    "subscribe: rx '{}' is not one of the RX channels {:?}",
+                    sub.rx, self.rx
+                ));
+            }
+            if self.subscribe[..n].iter().any(|o| o.rx == sub.rx) {
+                out.push(format!("subscribe: rx '{}' is declared twice", sub.rx));
+            }
         }
         if let Err(p) = self.link_config(sample_rate).device() {
             out.extend(p);

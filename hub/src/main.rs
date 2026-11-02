@@ -244,6 +244,7 @@ async fn main() -> Result<()> {
             flows_port = ?d.flows_port,
             process_id = ?d.process_id,
             rx_port_base = ?d.rx_port_base,
+            subscribe = ?d.subscribe,
             participant = pid,
             "dlink: the hub's Dante device enabled"
         );

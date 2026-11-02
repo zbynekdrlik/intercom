@@ -337,11 +337,12 @@ impl Process for HubPlusTone {
 }
 
 #[test]
-fn a_real_dlink_device_carries_dante_audio_into_the_hub_s_leg() {
+fn a_real_dlink_device_hears_its_declared_subscription_in_the_hub_s_leg() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("dlink.toml");
     let table = format!(
-        "{HEAD}[dlink]\nname = \"intercom-test\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\nstate_file = \"{}\"\n{}",
+        "{HEAD}[dlink]\nname = \"intercom-test\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\nstate_file = \"{}\"\n\
+         [[dlink.subscribe]]\nrx = \"In 1\"\ntx_channel = \"Tone\"\ntx_device = \"intercom-test\"\n{}",
         state.display(),
         participant(2, 0)
     );
@@ -349,14 +350,8 @@ fn a_real_dlink_device_carries_dante_audio_into_the_hub_s_leg() {
     let (d, pid) = m.dlink_participant().unwrap();
     // The hub's config, plus one TX channel for the tone.
     let config = d.link_config(48_000).tx(["Tone"]);
-    let dev = config.device().unwrap();
-    let mut saved = dstack::device::DeviceState::from_config(&dev);
-    saved.subscriptions = vec![None; dev.rx.len()];
-    saved.subscriptions[0] = Some(dstack::device::Subscription {
-        tx_channel: dev.tx[0].clone(),
-        tx_device: dev.name.clone(),
-    });
-    saved.save(&state).unwrap();
+    // RX 1's subscription comes only from the TOML's `[[dlink.subscribe]]`: no state file yet.
+    assert!(!state.exists());
 
     let ring = Arc::new(SampleRing::new(4096, 2));
     let link = dlink::Link::start_on(
@@ -446,6 +441,62 @@ fn the_three_control_ports_come_together_and_the_rx_range_clears_them() {
     // base 4430 covers 4430..=4461, which holds the ARC port 4440: dstack refuses it.
     let overlap = format!("{DLINK}rx_port_base = 4430\n");
     assert!(refusal(&format!("{HEAD}{overlap}{}", participant(1, 0))).contains("rx_port_base"));
+}
+
+// --- declared subscriptions (dlink v0.5.12) -----------------------------------------------------
+
+#[test]
+fn declared_subscriptions_reach_dstack_by_rx_number() {
+    let table = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\ntx_channel = \"02\"\ntx_device = \"dasio\"\n\
+         [[dlink.subscribe]]\nrx = \"FOH L\"\ntx_channel = \"01\"\ntx_device = \"dasio\"\n"
+    );
+    let m = load(&format!("{HEAD}{table}{}", participant(3, 0))).unwrap();
+    let dev = m.dlink.unwrap().link_config(48_000).device().unwrap();
+    let got: Vec<_> = dev
+        .subscribe
+        .iter()
+        .map(|s| (s.rx, s.tx_channel.as_str(), s.tx_device.as_str()))
+        .collect();
+    // rx is the 1-based position of the name in `rx = ["FOH L", "FOH R", "Click"]`.
+    assert_eq!(got, vec![(3, "02", "dasio"), (1, "01", "dasio")]);
+}
+
+#[test]
+fn no_declared_subscription_leaves_dstack_s_list_empty() {
+    let m = load(&format!("{HEAD}{DLINK}{}", participant(3, 0))).unwrap();
+    assert!(m
+        .dlink
+        .unwrap()
+        .link_config(48_000)
+        .device()
+        .unwrap()
+        .subscribe
+        .is_empty());
+}
+
+#[test]
+fn a_subscription_names_a_known_rx_channel_once() {
+    let unknown = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Talkback\"\ntx_channel = \"01\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{unknown}{}", participant(3, 0)))
+        .contains("rx 'Talkback' is not one of the RX channels"));
+    let twice = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\ntx_channel = \"01\"\ntx_device = \"dasio\"\n\
+         [[dlink.subscribe]]\nrx = \"Click\"\ntx_channel = \"02\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{twice}{}", participant(3, 0)))
+        .contains("rx 'Click' is declared twice"));
+    let typo = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\nchannel = \"01\"\ntx_channel = \"01\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{typo}{}", participant(3, 0))).contains("unknown field"));
+    let empty = format!(
+        "{DLINK}[[dlink.subscribe]]\nrx = \"Click\"\ntx_channel = \"\"\ntx_device = \"dasio\"\n"
+    );
+    assert!(refusal(&format!("{HEAD}{empty}{}", participant(3, 0)))
+        .contains("subscribe: rx 3: a valid Dante channel and device name"));
 }
 
 // --- the ring across threads (review round 1) ---------------------------------------------------
@@ -583,4 +634,34 @@ fn more_rx_channels_than_the_hub_reads_are_refused() {
     );
     let e = refusal(&format!("{HEAD}{table}{}", participant(1, 0)));
     assert!(e.contains("the hub reads at most 16"), "{e}");
+}
+
+// --- the deployed device over a phase-1 state file (review of the subscriptions) -----------------
+
+#[test]
+fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
+    // 1.9.3 ran with rx = ["Master", "Click"]. dstack keeps a saved file's channel names and adds the
+    // config's for the new channels, compared case-insensitively: a new name equal to an old one
+    // up to case would refuse the state and the device would never start.
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
+    let mut d = m.dlink.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    d.state_file = dir.path().join("dlink.toml");
+    let mut phase1 = d.clone();
+    phase1.rx = vec!["Master".into(), "Click".into()];
+    phase1.subscribe.clear();
+    let old = phase1.link_config(48_000).device().unwrap();
+    dstack::device::DeviceState::from_config(&old)
+        .save(&d.state_file)
+        .unwrap();
+
+    let dev = d.link_config(48_000).device().unwrap();
+    let state = dstack::device::DeviceState::load_or_default(&dev)
+        .expect("the 1.9.4 device state loads over 1.9.3's file");
+    // The saved names hold for the old channels (dstack keeps a Controller rename), the config's
+    // for the new: Dante Controller lists "Master"/"Click" on RX 1/2 until someone renames them.
+    // Routing is by number, so REPRO L/R still arrive there.
+    assert_eq!(state.rx, ["Master", "Click", "CLICK 3doba", "GUIDE"]);
+    // The declared ones hold on the channels nobody subscribed in Dante Controller.
+    assert!(state.subscriptions[0].is_some() && state.subscriptions[1].is_some());
 }
