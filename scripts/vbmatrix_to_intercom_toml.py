@@ -76,6 +76,30 @@ VIDEO = {
     "enabled": True,
 }
 
+# The hub's own Dante device (intercom#5): dstack's dlink in the hub, emitted as the `[dlink]` table
+# and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
+# band click/guide on its Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
+# /api/state, routed to NO output. Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
+# Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
+# what camera-box's nft opens on enp7s0.70.
+DLINK = {
+    "name": "strih-snv-intercom",
+    "iface": "enp7s0.70",
+    "rx": ["Master", "Click"],
+    "arc_port": 4441,
+    "cmc_port": 8801,
+    "flows_port": 4456,
+    "process_id": 1,
+    "rx_port_base": 47100,
+}
+DLINK_PARTICIPANT = {
+    "name": "foh_dante",
+    "role": "program_ref",
+    "adapter": "dlink",
+    "in_channels": len(DLINK["rx"]),
+    "out_channels": 0,
+}
+
 # Participant emit order: camboxes, then the program references, then the interface participants.
 _ROLE_ORDER = {
     "cambox": 0,
@@ -341,7 +365,17 @@ def render(model):
     out.append(f'enabled = {"true" if VIDEO["enabled"] else "false"}')
     out.append("")
 
-    for p in participants:
+    # The hub's own Dante device (intercom#5), beside the VBAN legs.
+    out.append("[dlink]")
+    out.append(f'name = "{DLINK["name"]}"')
+    out.append(f'iface = "{DLINK["iface"]}"')
+    joined = ", ".join(f'"{c}"' for c in DLINK["rx"])
+    out.append(f"rx = [{joined}]")
+    for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base"):
+        out.append(f"{key} = {DLINK[key]}")
+    out.append("")
+
+    for p in list(participants) + [DLINK_PARTICIPANT]:
         out.append("[[participant]]")
         out.append(f'name = "{p["name"]}"')
         out.append(f'role = "{p["role"]}"')

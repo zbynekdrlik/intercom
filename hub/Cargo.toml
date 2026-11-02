@@ -4,7 +4,9 @@ version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
-license = "MIT"
+# GPL-3.0-or-later since intercom#5 (owner 2.11.2026): the hub links dstack's GPL-3.0 `dlink`.
+# `intercom-vban` stays MIT; camera-box links only that crate.
+license = "GPL-3.0-or-later"
 repository = "https://github.com/zbynekdrlik/intercom"
 
 [lib]
@@ -70,7 +72,14 @@ libc = "0.2"
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
+# The hub's own Dante device (intercom#5): dstack's `dlink`, the owner-ruled embedding for apps
+# (dstack#20, dstack#68): 10 ms latency, normal priority, dantesync as the media clock. Pinned by tag.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.2" }
+
 [dev-dependencies]
 # Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,
 # never a pid+timestamp path. The same version the appliance crate tests with.
 tempfile = "3.9"
+# intercom#5's one real device in a test: its saved subscription (DeviceState) is dstack's type.
+# The same tag as dlink, so the lockfile carries one dstack.
+dstack = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.2" }

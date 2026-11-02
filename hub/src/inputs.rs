@@ -55,6 +55,8 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
                 .filter(|c| c.in_channels > 0)
                 .map(|c| c.participant),
         )
+        // The hub's own Dante device (intercom#5): a foreign clock like a card's crystal.
+        .chain(matrix.dlink_participant().map(|(_, id)| id))
         .collect();
     matrix
         .participants

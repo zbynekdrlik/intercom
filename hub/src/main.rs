@@ -22,6 +22,7 @@ use std::sync::mpsc::SyncSender;
 use intercom_hub::alsa_card::AlsaLegStats;
 use intercom_hub::alsa_leg::{spawn_alsa_capture, spawn_alsa_playback, AlsaCaptureConfig};
 use intercom_hub::block_clock::{run_batch, BlockGrid};
+use intercom_hub::dlink_leg::{spawn_dlink, DlinkLegConfig, DlinkStats};
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::hdmi_audio::HdmiLegStats;
 use intercom_hub::hdmi_leg::{spawn_alsa_hdmi_sink, AlsaHdmiSinkConfig};
@@ -226,7 +227,39 @@ async fn main() -> Result<()> {
 
     // --- Local PipeWire audio (issues 1344 + 1345): the program sink, the talkback capture and the
     // talkback playback — see `wire_local_audio`.
-    let local_audio = wire_local_audio(&matrix, &jitter);
+    let mut local_audio = wire_local_audio(&matrix, &jitter);
+
+    // --- The hub's own Dante device (intercom#5): dstack's dlink in this process, its RX pushed into
+    // the `dlink` participant's resampler leg. Absent `[dlink]` (strih-pp) = no device.
+    let dlink_leg = matrix.dlink_participant().map(|(d, pid)| {
+        let stats = Arc::new(DlinkStats::default());
+        tracing::info!(
+            device = %d.name,
+            iface = %d.iface,
+            rx = ?d.rx,
+            latency_ms = d.latency_ms,
+            state_file = %d.state_file.display(),
+            arc_port = ?d.arc_port,
+            cmc_port = ?d.cmc_port,
+            flows_port = ?d.flows_port,
+            process_id = ?d.process_id,
+            rx_port_base = ?d.rx_port_base,
+            participant = pid,
+            "dlink: the hub's Dante device enabled"
+        );
+        local_audio.dlink_report = Some((pid, stats.clone()));
+        spawn_dlink(
+            DlinkLegConfig {
+                config: d.clone(),
+                participant: pid,
+                name: matrix.participants[pid].name.clone(),
+                sample_rate: matrix.hub.sample_rate,
+                block_frames: matrix.hub.block_frames,
+            },
+            jitter.clone(),
+            stats,
+        )
+    });
 
     // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
     // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
@@ -357,9 +390,15 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;
-    axum::serve(listener, router(state))
+    let served = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    // The Dante device says goodbye before the process ends, also when the server failed (its own
+    // wait is dlink::STOP_WAIT).
+    if let Some(leg) = dlink_leg {
+        tokio::task::spawn_blocking(move || leg.stop()).await?;
+    }
+    served?;
     Ok(())
 }
 
@@ -567,6 +606,7 @@ fn run_block_loop(bl: BlockLoop) {
         local_sinks,
         hdmi_reports,
         alsa_reports,
+        dlink_report,
     } = local_audio;
     let n = matrix.participants.len();
     let sample_rate = matrix.hub.sample_rate;
@@ -746,6 +786,12 @@ fn run_block_loop(bl: BlockLoop) {
                         s.alsa = Some(astats.snapshot());
                     }
                 }
+                // The hub's own Dante device (intercom#5).
+                if let Some((pid, dstats)) = &dlink_report {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.dlink = Some(dstats.snapshot());
+                    }
+                }
                 let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
                 // Each VBAN leg's current return address (issue 1431); the states are copied out
                 // of the lock and attached after it.
@@ -791,6 +837,8 @@ struct LocalAudioWiring {
     hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)>,
     /// Every card leg's per-side counters (issue 1438), by participant.
     alsa_reports: Vec<(usize, Arc<AlsaLegStats>)>,
+    /// The hub's own Dante device's counters (intercom#5), set by `main` when `[dlink]` is declared.
+    dlink_report: Option<(usize, Arc<DlinkStats>)>,
 }
 
 /// Spawn every local PipeWire bridge the matrix declares (issues 1344 + 1345). None of them ever
@@ -967,6 +1015,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         local_sinks,
         hdmi_reports,
         alsa_reports,
+        dlink_report: None,
     }
 }
 

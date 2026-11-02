@@ -208,6 +208,32 @@ pub struct RuntimeStats {
     pub hdmi: Option<HdmiLegFacet>,
     /// The card leg facet (issue 1438), `None` for every non-`alsa` participant.
     pub alsa: Option<AlsaLegFacet>,
+    /// The hub's own Dante device (intercom#5), `None` for every non-`dlink` participant.
+    pub dlink: Option<crate::dlink_leg::DlinkFacet>,
+}
+
+/// The `dlink` facet on `/api/state` (intercom#5): the device's config and its counters.
+#[derive(Debug, Clone, Serialize)]
+pub struct DlinkState {
+    /// The device name Dante Controller lists.
+    pub device: String,
+    pub iface: String,
+    pub latency_ms: u32,
+    pub rx_channels: usize,
+    #[serde(flatten)]
+    pub facet: crate::dlink_leg::DlinkFacet,
+}
+
+impl DlinkState {
+    fn new(d: &crate::dlink_leg::DlinkConfig, facet: crate::dlink_leg::DlinkFacet) -> Self {
+        DlinkState {
+            device: d.name.clone(),
+            iface: d.iface.clone(),
+            latency_ms: d.latency_ms,
+            rx_channels: d.rx.len(),
+            facet,
+        }
+    }
 }
 
 /// One participant's serialized state.
@@ -259,6 +285,10 @@ pub struct ParticipantState {
     /// The card leg (issue 1438), present only for an `alsa` participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alsa: Option<AlsaLegState>,
+    /// The hub's own Dante device (intercom#5): running, starts, ends, blocks, ring depth and
+    /// drops. Present only for the `dlink` participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dlink: Option<DlinkState>,
     /// The VBAN return leg's current address (issue 1431), present only for a participant the hub
     /// sends a VBAN stream to. Set by the daemon after the snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,6 +366,10 @@ impl HubState {
                     alsa: matrix
                         .alsa_spec(id)
                         .map(|spec| AlsaLegState::new(spec, s.alsa.unwrap_or_default())),
+                    dlink: (p.adapter == crate::matrix::ADAPTER_DLINK)
+                        .then_some(matrix.dlink.as_ref())
+                        .flatten()
+                        .map(|d| DlinkState::new(d, s.dlink.unwrap_or_default())),
                     return_addr: None,
                 }
             })
@@ -588,6 +622,7 @@ out_channels = 4
                 jitter: None,
                 hdmi: None,
                 alsa: None,
+                dlink: None,
             },
             RuntimeStats::default(),
         ];

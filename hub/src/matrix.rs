@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::alsa_card::AlsaCardSpec;
 use crate::alsa_spec::check_alsa;
+use crate::dlink_leg::DlinkConfig;
 use crate::janus_rtp::JanusCodec;
 
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
@@ -38,6 +39,10 @@ pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
 /// PipeWire node, and a missing card is the leg down, never a fallback (the cutters' MiniFuse 4 /
 /// MG-XU).
 pub const ADAPTER_ALSA: &str = "alsa";
+/// The hub's own Dante device (intercom#5): the participant's inputs are the `[dlink]` device's RX
+/// channels, in order, received by dstack's `dlink` in this process. An input only; at most one, and
+/// only with a `[dlink]` table.
+pub const ADAPTER_DLINK: &str = "dlink";
 
 /// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
 /// could ever need; a bigger value is a typo.
@@ -300,6 +305,8 @@ struct MatrixToml {
     janus: Option<JanusConfig>,
     #[serde(default)]
     video: Option<VideoConfig>,
+    #[serde(default)]
+    dlink: Option<DlinkConfig>,
     #[serde(default, rename = "participant")]
     participants: Vec<Participant>,
     #[serde(default, rename = "point")]
@@ -313,6 +320,8 @@ pub struct Matrix {
     pub hub: HubConfig,
     pub janus: Option<JanusConfig>,
     pub video: Option<VideoConfig>,
+    /// The hub's own Dante device (intercom#5), absent on a box without one (strih-pp).
+    pub dlink: Option<DlinkConfig>,
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
@@ -358,6 +367,56 @@ impl Matrix {
             }
         }
 
+        // The hub's own Dante device (intercom#5): dstack's own device checks run here, so a bad
+        // `[dlink]` fails the load, never the rig start. One `dlink` participant iff the table.
+        if let Some(d) = &raw.dlink {
+            let problems = d.problems(raw.hub.sample_rate);
+            if !problems.is_empty() {
+                bail!("dlink: {}", problems.join("; "));
+            }
+        }
+        let dlink_participants: Vec<&Participant> = raw
+            .participants
+            .iter()
+            .filter(|p| p.adapter == ADAPTER_DLINK)
+            .collect();
+        match (&raw.dlink, dlink_participants.as_slice()) {
+            (None, []) => {}
+            (None, [p, ..]) => bail!(
+                "participant '{}': adapter 'dlink' needs a [dlink] table (the hub's Dante device)",
+                p.name
+            ),
+            (Some(_), []) => bail!("[dlink] declares a Dante device but no participant has adapter 'dlink'"),
+            (Some(d), [p]) => {
+                if p.out_channels != 0 {
+                    bail!(
+                        "participant '{}': adapter 'dlink' is an input only (out_channels must be 0, got {})",
+                        p.name,
+                        p.out_channels
+                    );
+                }
+                if p.in_channels == 0 || p.in_channels > d.rx.len() {
+                    bail!(
+                        "participant '{}': adapter 'dlink' needs 1..={} in_channels (the [dlink] rx channels), got {}",
+                        p.name,
+                        d.rx.len(),
+                        p.in_channels
+                    );
+                }
+                if d.rx.len() > crate::dlink_leg::MAX_RX_CHANNELS {
+                    bail!(
+                        "dlink: rx has {} channels, the hub reads at most {}",
+                        d.rx.len(),
+                        crate::dlink_leg::MAX_RX_CHANNELS
+                    );
+                }
+            }
+            (Some(_), [_, second, ..]) => bail!(
+                "participant '{}': only one participant may have adapter 'dlink' (one Dante device)",
+                second.name
+            ),
+        }
+
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
         let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -372,6 +431,7 @@ impl Matrix {
                 && p.adapter != ADAPTER_PIPEWIRE
                 && p.adapter != ADAPTER_ALSA_HDMI
                 && p.adapter != ADAPTER_ALSA
+                && p.adapter != ADAPTER_DLINK
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
@@ -436,6 +496,7 @@ impl Matrix {
             // output-only participant.
             if let Some(ms) = p.target_ms {
                 let capture = (p.adapter == ADAPTER_ALSA
+                    || p.adapter == ADAPTER_DLINK
                     || p.adapter == ADAPTER_PIPEWIRE
                     || p.adapter == ADAPTER_JANUS)
                     && p.in_channels > 0
@@ -656,6 +717,7 @@ impl Matrix {
             hub: raw.hub,
             janus: raw.janus,
             video: raw.video,
+            dlink: raw.dlink,
             participants: raw.participants,
             index,
             points,
@@ -770,6 +832,17 @@ impl Matrix {
     /// N-1 output bus (playback) and feeding its own input buffer (capture).
     pub fn alsa_cards(&self) -> Vec<AlsaCardSpec> {
         self.alsa_specs.clone()
+    }
+
+    /// The hub's own Dante device (intercom#5): its `[dlink]` table and the id of its `dlink`
+    /// participant, or `None` on a box without one.
+    pub fn dlink_participant(&self) -> Option<(&DlinkConfig, usize)> {
+        let d = self.dlink.as_ref()?;
+        let id = self
+            .participants
+            .iter()
+            .position(|p| p.adapter == ADAPTER_DLINK)?;
+        Some((d, id))
     }
 
     /// The card leg spec of participant `id`, if it is on the `alsa` adapter.

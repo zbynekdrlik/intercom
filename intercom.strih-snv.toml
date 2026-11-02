@@ -22,6 +22,16 @@ fps = 10
 jpeg_quality = 70
 enabled = true
 
+[dlink]
+name = "strih-snv-intercom"
+iface = "enp7s0.70"
+rx = ["Master", "Click"]
+arc_port = 4441
+cmc_port = 8801
+flows_port = 4456
+process_id = 1
+rx_port_base = 47100
+
 [[participant]]
 name = "cam1"
 role = "cambox"
@@ -163,6 +173,13 @@ name = "line34"
 role = "line34"
 adapter = "none"
 in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "foh_dante"
+role = "program_ref"
+adapter = "dlink"
+in_channels = 2
 out_channels = 0
 
 [[point]]
