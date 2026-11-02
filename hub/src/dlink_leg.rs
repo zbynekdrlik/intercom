@@ -184,9 +184,14 @@ impl SampleRing {
 
     /// Whole frames waiting for the consumer.
     pub fn frames_queued(&self) -> usize {
-        let w = self.written.load(Ordering::Acquire);
+        // `read` first: `written` never trails `read`, so a `written` loaded after it cannot wrap
+        // below it. Loaded the other way round, a third thread (the block loop's snapshot) saw the
+        // consumer pass a stale `written` and read ~usize::MAX (review round 1). Both can still
+        // move between the two loads, so a third thread's reading is clamped to the capacity; the
+        // producer and the consumer each load their own counter and read it exactly.
         let r = self.read.load(Ordering::Acquire);
-        w.wrapping_sub(r) / self.channels
+        let w = self.written.load(Ordering::Acquire);
+        (w.wrapping_sub(r) / self.channels).min(self.cells.len() / self.channels)
     }
 
     /// Frames dropped on a full ring since the start.
