@@ -19,9 +19,9 @@ directly (the #1199/#1203 python-mirror precedent).
 
 import pathlib
 import sys
-import tomllib
 
 import pytest
+import tomllib
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
