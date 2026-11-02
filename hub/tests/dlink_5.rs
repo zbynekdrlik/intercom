@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use dlink::Process;
 use intercom_hub::dlink_leg::{
-    drain_blocks, to_i16, DlinkFacet, RxProcessor, SampleRing, DEFAULT_LATENCY_MS,
-    DEFAULT_STATE_FILE,
+    drain_blocks, spawn_dlink, to_i16, DlinkFacet, DlinkLegConfig, DlinkStats, RxProcessor,
+    SampleRing, DEFAULT_LATENCY_MS, DEFAULT_STATE_FILE,
 };
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_DLINK};
@@ -385,7 +385,8 @@ fn a_real_dlink_device_carries_dante_audio_into_the_hub_s_leg() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    ring.push_frames(256, |_, _| 0);
+    // The pump keeps delivering: whatever it wrote since goes through the drain into the leg.
+    std::thread::sleep(Duration::from_millis(50));
     let pushed = drain_blocks(&ring, 256, "foh_dante", pid, &jitter);
     assert_eq!(link.ended(), None);
     let stopped = link.stop();
@@ -520,4 +521,57 @@ fn two_threads_move_every_sample_in_order_and_untorn() {
         }
     }
     producer.join().unwrap();
+}
+
+// --- the supervisor (review round 1) -------------------------------------------------------------
+
+#[test]
+fn a_device_that_cannot_start_is_counted_down_and_the_leg_stops_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let table = format!(
+        "{HEAD}[dlink]\nname = \"intercom-test2\"\niface = \"no-such-nic0\"\nrx = [\"In 1\"]\nstate_file = \"{}\"\n{}",
+        dir.path().join("dlink.toml").display(),
+        participant(1, 0)
+    );
+    let m = load(&table).unwrap();
+    let (d, pid) = m.dlink_participant().unwrap();
+    let stats = Arc::new(DlinkStats::default());
+    let leg = spawn_dlink(
+        DlinkLegConfig {
+            config: d.clone(),
+            participant: pid,
+            name: "foh_dante".into(),
+            sample_rate: 48_000,
+            block_frames: 256,
+        },
+        Arc::new(Mutex::new(input_buffers(&m))),
+        stats.clone(),
+    );
+    // The first attempt runs at once (backoff 0), the second after 1 s.
+    let end = Instant::now() + Duration::from_secs(5);
+    while stats.snapshot().ends < 2 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let f = stats.snapshot();
+    assert!(f.ends >= 2, "each failed start is counted: {f:?}");
+    assert_eq!((f.starts, f.running, f.blocks), (0, false, 0), "{f:?}");
+    // The stop lands inside a backoff sleep and returns within a watch step or two.
+    let t = Instant::now();
+    leg.stop();
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "stop took {:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn more_rx_channels_than_the_hub_reads_are_refused() {
+    let names: Vec<String> = (1..=17).map(|n| format!("\"In {n}\"")).collect();
+    let table = DLINK.replace(
+        r#"["FOH L", "FOH R", "Click"]"#,
+        &format!("[{}]", names.join(", ")),
+    );
+    let e = refusal(&format!("{HEAD}{table}{}", participant(1, 0)));
+    assert!(e.contains("the hub reads at most 16"), "{e}");
 }

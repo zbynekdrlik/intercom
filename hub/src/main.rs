@@ -390,13 +390,15 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;
-    axum::serve(listener, router(state))
+    let served = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    // The Dante device says goodbye before the process ends (its own wait is dlink::STOP_WAIT).
+        .await;
+    // The Dante device says goodbye before the process ends, also when the server failed (its own
+    // wait is dlink::STOP_WAIT).
     if let Some(leg) = dlink_leg {
         tokio::task::spawn_blocking(move || leg.stop()).await?;
     }
+    served?;
     Ok(())
 }
 
