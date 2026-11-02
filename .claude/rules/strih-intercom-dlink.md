@@ -21,6 +21,12 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
   none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
   participant iff the table; input only, `in_channels` 1..=rx.len().
+- **Declared subscriptions** (dlink v0.5.11): `[[dlink.subscribe]]` with `rx` (our RX channel by
+  its NAME in `rx`; the hub turns it into dstack's 1-based number), `tx_channel`, `tx_device`
+  (Dante's names). An unknown or repeated `rx` fails the load. At start an RX channel the
+  state_file holds no subscription for takes the declared one; one Dante Controller sets is saved
+  and wins; declared ones are never written to the file. Which source feeds Master/Click is the
+  owner's call, and the TX names belong to that device: dstack never picks them.
 - **Two devices on one address** (the hub + OBS's strih-obs) need distinct ARC/CMC/flows ports and
   process ids; the info port 8700 is shared by dstack itself. camera-box's nft names the RX range.
 - **The crossing:** dlink's pump calls `RxProcessor::process` every 32 frames (dstack rule I7: no
@@ -40,7 +46,8 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
 
 `hub/tests/dlink_5.rs`: the ring (order, wrap, drops), `to_i16`, the processor, the drain, every
 matrix refusal, the ports reaching `DeviceConfig`, the facet, the unit, and one REAL dlink device
-on `Clock::System` hearing its own test TX tone through `RxProcessor` (dstack's own dlink test
+on `Clock::System` hearing its own test TX tone through `RxProcessor`, subscribed only by the
+TOML's `[[dlink.subscribe]]` (no seeded state file; dstack's own dlink test
 shape; one device per test file, the timing profile is process-global). The test needs `dstack`
 as a dev-dependency at the SAME tag as `dlink` (one dstack in the lockfile).
 

@@ -74,7 +74,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 
 # The hub's own Dante device (intercom#5): dstack's `dlink`, the owner-ruled embedding for apps
 # (dstack#20, dstack#68): 10 ms latency, normal priority, dantesync as the media clock. Pinned by tag.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.2" }
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.11" }
 
 [dev-dependencies]
 # Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,
@@ -82,4 +82,4 @@ dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.2" }
 tempfile = "3.9"
 # intercom#5's one real device in a test: its saved subscription (DeviceState) is dstack's type.
 # The same tag as dlink, so the lockfile carries one dstack.
-dstack = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.2" }
+dstack = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.11" }
