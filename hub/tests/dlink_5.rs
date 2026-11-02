@@ -628,3 +628,30 @@ fn more_rx_channels_than_the_hub_reads_are_refused() {
     let e = refusal(&format!("{HEAD}{table}{}", participant(1, 0)));
     assert!(e.contains("the hub reads at most 16"), "{e}");
 }
+
+// --- the deployed device over a phase-1 state file (review of the subscriptions) -----------------
+
+#[test]
+fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
+    // 1.9.3 ran with rx = ["Master", "Click"]. dstack keeps a saved file's channel names and adds the
+    // config's for the new channels, compared case-insensitively: a new name equal to an old one
+    // up to case would refuse the state and the device would never start.
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
+    let mut d = m.dlink.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    d.state_file = dir.path().join("dlink.toml");
+    let mut phase1 = d.clone();
+    phase1.rx = vec!["Master".into(), "Click".into()];
+    phase1.subscribe.clear();
+    let old = phase1.link_config(48_000).device().unwrap();
+    dstack::device::DeviceState::from_config(&old)
+        .save(&d.state_file)
+        .unwrap();
+
+    let dev = d.link_config(48_000).device().unwrap();
+    let state = dstack::device::DeviceState::load_or_default(&dev)
+        .expect("the 1.9.4 device state loads over 1.9.3's file");
+    assert_eq!(state.rx.len(), d.rx.len());
+    // The declared ones hold on the channels nobody subscribed in Dante Controller.
+    assert!(state.subscriptions[0].is_some() && state.subscriptions[1].is_some());
+}
