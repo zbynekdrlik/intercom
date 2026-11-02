@@ -234,13 +234,22 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     d = data["dlink"]
     assert d["name"] == "strih-snv-intercom"
     assert d["iface"] == "enp7s0.70"
-    assert d["rx"] == ["Master", "Click"]
+    # fohabl-strih's four channels in order (dasio's 30.10 FOH analysis, intercom#5).
+    assert d["rx"] == ["REPRO L", "REPRO R", "CLICK", "GUIDE"]
+    # Declared on the Yamaha card's TX (dasio 2.11.2026). CLICK waits on the owner: the card's
+    # "CLICK track 31" carries a different click.
+    yamaha = "foh-abl-yamaha-accelerator"
+    assert d["subscribe"] == [
+        {"rx": "REPRO L", "tx_channel": "REPRO 0dB L 07", "tx_device": yamaha},
+        {"rx": "REPRO R", "tx_channel": "REPRO 0dB R 08", "tx_device": yamaha},
+        {"rx": "GUIDE", "tx_channel": "GUIDE track 32", "tx_device": yamaha},
+    ]
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
     assert d["rx_port_base"] == 47100
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
     assert dl == [
-        {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 2, "out_channels": 0}
+        {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 4, "out_channels": 0}
     ]
     # Phase 1 (owner 2.11.2026: VBAN stays): no point reads or writes the device yet.
     assert not [pt for pt in data["point"] if "foh_dante" in (pt["src"], pt["dst"])]

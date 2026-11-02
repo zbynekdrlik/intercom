@@ -25,12 +25,27 @@ enabled = true
 [dlink]
 name = "strih-snv-intercom"
 iface = "enp7s0.70"
-rx = ["Master", "Click"]
+rx = ["REPRO L", "REPRO R", "CLICK", "GUIDE"]
 arc_port = 4441
 cmc_port = 8801
 flows_port = 4456
 process_id = 1
 rx_port_base = 47100
+
+[[dlink.subscribe]]
+rx = "REPRO L"
+tx_channel = "REPRO 0dB L 07"
+tx_device = "foh-abl-yamaha-accelerator"
+
+[[dlink.subscribe]]
+rx = "REPRO R"
+tx_channel = "REPRO 0dB R 08"
+tx_device = "foh-abl-yamaha-accelerator"
+
+[[dlink.subscribe]]
+rx = "GUIDE"
+tx_channel = "GUIDE track 32"
+tx_device = "foh-abl-yamaha-accelerator"
 
 [[participant]]
 name = "cam1"
@@ -179,7 +194,7 @@ out_channels = 0
 name = "foh_dante"
 role = "program_ref"
 adapter = "dlink"
-in_channels = 2
+in_channels = 4
 out_channels = 0
 
 [[point]]

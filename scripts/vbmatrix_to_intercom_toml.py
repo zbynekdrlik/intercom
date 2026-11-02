@@ -78,19 +78,27 @@ VIDEO = {
 
 # The hub's own Dante device (intercom#5): dstack's dlink in the hub, emitted as the `[dlink]` table
 # and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
-# band click/guide on its Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
+# band click/guide on the Yamaha card's Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
 # /api/state, routed to NO output. Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
 # Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
 # what camera-box's nft opens on enp7s0.70.
 DLINK = {
     "name": "strih-snv-intercom",
     "iface": "enp7s0.70",
-    "rx": ["Master", "Click"],
+    # fohabl-strih's four channels, in its order (dasio's 30.10 FOH VB-Matrix analysis).
+    "rx": ["REPRO L", "REPRO R", "CLICK", "GUIDE"],
     "arc_port": 4441,
     "cmc_port": 8801,
     "flows_port": 4456,
     "process_id": 1,
     "rx_port_base": 47100,
+    # The Yamaha card's TX names (dasio 2.11.2026). CLICK is not declared: the band's "CLICK 3doba"
+    # is not on the card ("CLICK track 31" carries "Click 2 iem"); the owner decides.
+    "subscribe": [
+        ("REPRO L", "REPRO 0dB L 07", "foh-abl-yamaha-accelerator"),
+        ("REPRO R", "REPRO 0dB R 08", "foh-abl-yamaha-accelerator"),
+        ("GUIDE", "GUIDE track 32", "foh-abl-yamaha-accelerator"),
+    ],
 }
 DLINK_PARTICIPANT = {
     "name": "foh_dante",
@@ -374,6 +382,12 @@ def render(model):
     for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base"):
         out.append(f"{key} = {DLINK[key]}")
     out.append("")
+    for rx, tx_channel, tx_device in DLINK["subscribe"]:
+        out.append("[[dlink.subscribe]]")
+        out.append(f'rx = "{rx}"')
+        out.append(f'tx_channel = "{tx_channel}"')
+        out.append(f'tx_device = "{tx_device}"')
+        out.append("")
 
     for p in list(participants) + [DLINK_PARTICIPANT]:
         out.append("[[participant]]")
