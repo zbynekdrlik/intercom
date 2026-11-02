@@ -25,7 +25,7 @@ enabled = true
 [dlink]
 name = "strih-snv-intercom"
 iface = "enp7s0.70"
-rx = ["REPRO L", "REPRO R", "CLICK", "GUIDE"]
+rx = ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"]
 arc_port = 4441
 cmc_port = 8801
 flows_port = 4456

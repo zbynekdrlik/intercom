@@ -39,6 +39,7 @@ Usage:
     python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom.strih-snv.toml
 """
 
+import json
 import sys
 import xml.etree.ElementTree as ET
 
@@ -85,8 +86,10 @@ VIDEO = {
 DLINK = {
     "name": "strih-snv-intercom",
     "iface": "enp7s0.70",
-    # fohabl-strih's four channels, in its order (dasio's 30.10 FOH VB-Matrix analysis).
-    "rx": ["REPRO L", "REPRO R", "CLICK", "GUIDE"],
+    # fohabl-strih's four channels, in its order (dasio's 30.10 FOH VB-Matrix analysis). No name may
+    # equal 1.9.3's "Master"/"Click" up to case: dstack keeps a saved file's names for the old
+    # channels and refuses a duplicate (hence "CLICK 3doba", the source's own name).
+    "rx": ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"],
     "arc_port": 4441,
     "cmc_port": 8801,
     "flows_port": 4456,
@@ -383,10 +386,13 @@ def render(model):
         out.append(f"{key} = {DLINK[key]}")
     out.append("")
     for rx, tx_channel, tx_device in DLINK["subscribe"]:
+        if rx not in DLINK["rx"]:
+            raise ValueError(f"dlink subscribe: rx {rx!r} is not one of {DLINK['rx']}")
         out.append("[[dlink.subscribe]]")
-        out.append(f'rx = "{rx}"')
-        out.append(f'tx_channel = "{tx_channel}"')
-        out.append(f'tx_device = "{tx_device}"')
+        # json.dumps is a valid TOML basic string (a Dante name may hold '"' or '\\').
+        out.append(f"rx = {json.dumps(rx)}")
+        out.append(f"tx_channel = {json.dumps(tx_channel)}")
+        out.append(f"tx_device = {json.dumps(tx_device)}")
         out.append("")
 
     for p in list(participants) + [DLINK_PARTICIPANT]:

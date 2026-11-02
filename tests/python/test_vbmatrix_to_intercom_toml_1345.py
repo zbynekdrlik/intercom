@@ -235,7 +235,7 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     assert d["name"] == "strih-snv-intercom"
     assert d["iface"] == "enp7s0.70"
     # fohabl-strih's four channels in order (dasio's 30.10 FOH analysis, intercom#5).
-    assert d["rx"] == ["REPRO L", "REPRO R", "CLICK", "GUIDE"]
+    assert d["rx"] == ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"]
     # Declared on the Yamaha card's TX (dasio 2.11.2026). CLICK waits on the owner: the card's
     # "CLICK track 31" carries a different click.
     yamaha = "foh-abl-yamaha-accelerator"
