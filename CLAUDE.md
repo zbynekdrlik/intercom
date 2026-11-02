@@ -20,3 +20,4 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 - hub mix / VBAN / Janus / egress -> `.claude/rules/strih-intercom.md`, `strih-intercom-hub-mix.md`
 - HDMI audio leg -> `.claude/rules/strih-intercom-hdmi-leg.md`
 - card (ALSA) leg -> `.claude/rules/strih-intercom-alsa-leg.md`
+- the hub's Dante device (dstack dlink) -> `.claude/rules/strih-intercom-dlink.md`
