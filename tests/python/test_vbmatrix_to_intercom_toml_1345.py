@@ -19,7 +19,6 @@ directly (the #1199/#1203 python-mirror precedent).
 
 import pathlib
 import sys
-
 import tomllib
 
 import pytest
