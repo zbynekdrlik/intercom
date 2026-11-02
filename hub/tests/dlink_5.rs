@@ -385,7 +385,9 @@ fn a_real_dlink_device_carries_dante_audio_into_the_hub_s_leg() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    // The pump keeps delivering: whatever it wrote since goes through the drain into the leg.
+    // Empty the ring, then let the pump deliver more: only frames it wrote after this point can
+    // reach the drain, so `pushed` proves the pump is still running.
+    while ring.pop_planar(1).is_some() {}
     std::thread::sleep(Duration::from_millis(50));
     let pushed = drain_blocks(&ring, 256, "foh_dante", pid, &jitter);
     assert_eq!(link.ended(), None);
@@ -473,9 +475,10 @@ fn a_third_thread_never_reads_more_frames_queued_than_the_ring_holds() {
         })
     };
     let end = Instant::now() + Duration::from_secs(3);
-    let mut worst = 0usize;
+    let (mut worst, mut worst_raw) = (0usize, 0usize);
     while Instant::now() < end {
         worst = worst.max(ring.frames_queued());
+        worst_raw = worst_raw.max(ring.queued_samples_unclamped());
     }
     stop.store(true, Ordering::Relaxed);
     producer.join().unwrap();
@@ -483,6 +486,12 @@ fn a_third_thread_never_reads_more_frames_queued_than_the_ring_holds() {
     assert!(
         worst <= 64,
         "frames_queued read {worst} from a 64-frame ring"
+    );
+    // The load order itself (the clamp alone would hide a wrap as a full ring): both counters
+    // move between the loads, so the raw reading may overshoot a little, but never wraps.
+    assert!(
+        worst_raw < 1 << 32,
+        "the raw reading wrapped: {worst_raw} samples (written loaded before read?)"
     );
 }
 

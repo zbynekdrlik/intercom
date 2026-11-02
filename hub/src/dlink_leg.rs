@@ -189,9 +189,16 @@ impl SampleRing {
         // consumer pass a stale `written` and read ~usize::MAX (review round 1). Both can still
         // move between the two loads, so a third thread's reading is clamped to the capacity; the
         // producer and the consumer each load their own counter and read it exactly.
+        (self.queued_samples_unclamped() / self.channels).min(self.cells.len() / self.channels)
+    }
+
+    /// The samples between the two counters before the capacity clamp, `read` loaded first (see
+    /// [`SampleRing::frames_queued`]). From a third thread it may overshoot the capacity a little,
+    /// but it never wraps; public so a test can pin the load order the clamp would hide.
+    pub fn queued_samples_unclamped(&self) -> usize {
         let r = self.read.load(Ordering::Acquire);
         let w = self.written.load(Ordering::Acquire);
-        (w.wrapping_sub(r) / self.channels).min(self.cells.len() / self.channels)
+        w.wrapping_sub(r)
     }
 
     /// Frames dropped on a full ring since the start.
@@ -229,6 +236,12 @@ impl SampleRing {
         }
         let len = self.cells.len();
         let mut at = self.read.load(Ordering::Relaxed);
+        // One producer, one consumer: the consumer never sees more than the ring holds (a second
+        // live pump after a bad restart would break this, and the clamp would hide it).
+        debug_assert!(
+            self.written.load(Ordering::Acquire).wrapping_sub(at) <= len,
+            "SampleRing: more queued than the ring holds"
+        );
         let mut out = vec![Vec::with_capacity(frames); self.channels];
         for _ in 0..frames {
             for ch_out in out.iter_mut() {
