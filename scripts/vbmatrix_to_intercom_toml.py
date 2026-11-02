@@ -390,9 +390,9 @@ def render(model):
             raise ValueError(f"dlink subscribe: rx {rx!r} is not one of {DLINK['rx']}")
         out.append("[[dlink.subscribe]]")
         # json.dumps is a valid TOML basic string (a Dante name may hold '"' or '\\').
-        out.append(f"rx = {json.dumps(rx)}")
-        out.append(f"tx_channel = {json.dumps(tx_channel)}")
-        out.append(f"tx_device = {json.dumps(tx_device)}")
+        out.append(f"rx = {json.dumps(rx, ensure_ascii=False)}")
+        out.append(f"tx_channel = {json.dumps(tx_channel, ensure_ascii=False)}")
+        out.append(f"tx_device = {json.dumps(tx_device, ensure_ascii=False)}")
         out.append("")
 
     for p in list(participants) + [DLINK_PARTICIPANT]:

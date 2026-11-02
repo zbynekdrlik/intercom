@@ -22,6 +22,8 @@ import sys
 
 import tomllib
 
+import pytest
+
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -253,3 +255,18 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     ]
     # Phase 1 (owner 2.11.2026: VBAN stays): no point reads or writes the device yet.
     assert not [pt for pt in data["point"] if "foh_dante" in (pt["src"], pt["dst"])]
+
+
+def test_a_dlink_subscription_must_name_one_of_the_device_s_rx_channels(monkeypatch):
+    bad = dict(conv.DLINK, subscribe=[("Talkback", "01", "foh-abl-yamaha-accelerator")])
+    monkeypatch.setattr(conv, "DLINK", bad)
+    with pytest.raises(ValueError, match="'Talkback' is not one of"):
+        conv.convert(_xml())
+
+
+def test_dlink_names_with_quotes_and_backslashes_stay_valid_toml(monkeypatch):
+    odd = 'A "q" \\ b'
+    sub = dict(conv.DLINK, subscribe=[("GUIDE", odd, "caf\u00e9-dev")])
+    monkeypatch.setattr(conv, "DLINK", sub)
+    data = tomllib.loads(conv.convert(_xml()))
+    assert data["dlink"]["subscribe"] == [{"rx": "GUIDE", "tx_channel": odd, "tx_device": "caf\u00e9-dev"}]

@@ -29,7 +29,8 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
   later TOML edit stops reaching that channel (reported to dstack).
 - **Growing `rx` over a saved state:** dstack keeps the saved names for the old channels and adds
   the config's for the new, compared case-insensitively; a new name equal to an old one refuses the
-  state and the device never starts (1.9.3's `Click` vs `CLICK`). Pinned by
+  state and the device never starts (1.9.3's `Click` vs `CLICK`). The old channels also keep their
+  saved NAMES (Controller shows them until renamed); routing is by number, so audio is unaffected. Pinned by
   `strih_snv_s_device_loads_over_the_phase_1_state_file`. Which source feeds Master/Click is the
   owner's call, and the TX names belong to that device: dstack never picks them.
 - **Two devices on one address** (the hub + OBS's strih-obs) need distinct ARC/CMC/flows ports and

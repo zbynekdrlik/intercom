@@ -658,7 +658,10 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
     let dev = d.link_config(48_000).device().unwrap();
     let state = dstack::device::DeviceState::load_or_default(&dev)
         .expect("the 1.9.4 device state loads over 1.9.3's file");
-    assert_eq!(state.rx.len(), d.rx.len());
+    // The saved names hold for the old channels (dstack keeps a Controller rename), the config's
+    // for the new: Dante Controller lists "Master"/"Click" on RX 1/2 until someone renames them.
+    // Routing is by number, so REPRO L/R still arrive there.
+    assert_eq!(state.rx, ["Master", "Click", "CLICK 3doba", "GUIDE"]);
     // The declared ones hold on the channels nobody subscribed in Dante Controller.
     assert!(state.subscriptions[0].is_some() && state.subscriptions[1].is_some());
 }
