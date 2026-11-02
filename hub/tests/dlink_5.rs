@@ -444,3 +444,80 @@ fn the_three_control_ports_come_together_and_the_rx_range_clears_them() {
     let overlap = format!("{DLINK}rx_port_base = 4430\n");
     assert!(refusal(&format!("{HEAD}{overlap}{}", participant(1, 0))).contains("rx_port_base"));
 }
+
+// --- the ring across threads (review round 1) ---------------------------------------------------
+
+#[test]
+fn a_third_thread_never_reads_more_frames_queued_than_the_ring_holds() {
+    // The pump pushes, dlink-rx pops, and the block loop's snapshot reads `frames_queued` from a
+    // third thread. A snapshot that loaded `written` before `read` could see the consumer pass its
+    // stale `written` and wrap to ~usize::MAX.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ring = Arc::new(SampleRing::new(64, 2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let producer = {
+        let (ring, stop) = (ring.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                ring.push_frames(1, |_, _| 1);
+            }
+        })
+    };
+    let consumer = {
+        let (ring, stop) = (ring.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = ring.pop_planar(1);
+            }
+        })
+    };
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut worst = 0usize;
+    while Instant::now() < end {
+        worst = worst.max(ring.frames_queued());
+    }
+    stop.store(true, Ordering::Relaxed);
+    producer.join().unwrap();
+    consumer.join().unwrap();
+    assert!(
+        worst <= 64,
+        "frames_queued read {worst} from a 64-frame ring"
+    );
+}
+
+#[test]
+fn two_threads_move_every_sample_in_order_and_untorn() {
+    let ring = Arc::new(SampleRing::new(37, 3));
+    const FRAMES: usize = 300_000;
+    let producer = {
+        let ring = ring.clone();
+        std::thread::spawn(move || {
+            let mut sent = 0usize;
+            while sent < FRAMES {
+                let before = ring.dropped_frames();
+                let n = 7.min(FRAMES - sent);
+                let base = sent;
+                // Push only what fits, so nothing is dropped and the sequence stays whole.
+                if ring.frames_queued() + n <= 37 {
+                    ring.push_frames(n, |f, ch| (((base + f) * 3 + ch) % 30_000) as i16);
+                    assert_eq!(ring.dropped_frames(), before);
+                    sent += n;
+                }
+            }
+        })
+    };
+    let mut got = 0usize;
+    while got < FRAMES {
+        if let Some(planar) = ring.pop_planar(1) {
+            for (ch, c) in planar.iter().enumerate() {
+                assert_eq!(
+                    c[0],
+                    ((got * 3 + ch) % 30_000) as i16,
+                    "frame {got} ch {ch}"
+                );
+            }
+            got += 1;
+        }
+    }
+    producer.join().unwrap();
+}
