@@ -135,7 +135,8 @@ def test_generated_toml_parses_into_the_matrix_shape():
     assert data["hub"]["sample_rate"] == 48000
     assert data["hub"]["vban_bind"] == "0.0.0.0:6980"
     _hub, parts, points = _model()
-    assert len(data["participant"]) == len(parts)
+    # The VB-Matrix participants plus the hub's own Dante device (intercom#5), which is not in the XML.
+    assert len(data["participant"]) == len(parts) + 1
     assert len(data["point"]) == len(points) == 212
     # A spot-check that a −8 dB program-ref point survives the render→parse round-trip.
     fohabl_cutters = [
@@ -223,3 +224,23 @@ def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cam
     assert all(pt["gain_db"] in (0.0, -8.0, -10.0) for pt in others)
     text = conv.convert(_xml())
     assert "gain_db = 12.0" not in text
+
+
+# --- intercom#5: the hub's own Dante device (dstack dlink), phase 1 -------------------------------
+
+
+def test_the_dlink_device_is_declared_and_routed_nowhere():
+    data = tomllib.loads(conv.convert(_xml()))
+    d = data["dlink"]
+    assert d["name"] == "strih-snv-intercom"
+    assert d["iface"] == "enp7s0.70"
+    assert d["rx"] == ["Master", "Click"]
+    # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
+    assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
+    assert d["rx_port_base"] == 47100
+    dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
+    assert dl == [
+        {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 2, "out_channels": 0}
+    ]
+    # Phase 1 (owner 2.11.2026: VBAN stays): no point reads or writes the device yet.
+    assert not [pt for pt in data["point"] if "foh_dante" in (pt["src"], pt["dst"])]

@@ -15,7 +15,11 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         .expect("the deployed intercom.strih-snv.toml must load through Matrix::from_toml");
 
     // issue 1439 phase 2: the VB-Matrix grid minus VASIO8 (the old OBS program capture) and its 4 points.
-    assert_eq!(m.participants.len(), 14, "expected 14 participants");
+    assert_eq!(
+        m.participants.len(),
+        15,
+        "expected 14 participants + the dlink device (intercom#5)"
+    );
     assert_eq!(
         m.points.len(),
         212,
