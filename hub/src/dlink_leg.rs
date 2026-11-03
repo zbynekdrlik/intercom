@@ -435,7 +435,8 @@ impl RxWatch {
             let prev = self.last.iter().find(|(p, _, _)| p.rx == row.rx);
             let (since, mut stalled) = match prev {
                 Some((p, since, stalled)) => {
-                    if p.state != row.state || p.status != row.status {
+                    let changed = p.state != row.state || p.status != row.status;
+                    if changed {
                         events.push(RxEvent::State {
                             rx: row.rx,
                             from: p.state,
@@ -448,6 +449,9 @@ impl RxWatch {
                             events.push(RxEvent::Resumed { rx: row.rx });
                         }
                         (now, false)
+                    } else if changed {
+                        // A new state gets its own RX_STALL before it can count as a lost flow.
+                        (now, *stalled)
                     } else {
                         (*since, *stalled)
                     }
@@ -641,7 +645,7 @@ fn log_rx_event(device: &str, rows: &[DlinkRxFacet], e: &RxEvent) {
         }
         RxEvent::Stalled { rx } => {
             let r = row(*rx);
-            tracing::warn!(%device, rx, name = ?r.map(|r| r.name.as_str()), flow = ?r.and_then(|r| r.flow), packets = ?r.map(|r| r.packets), "dlink: RX channel connected but no samples for 1 s — the flow is lost");
+            tracing::warn!(%device, rx, name = ?r.map(|r| r.name.as_str()), flow = ?r.and_then(|r| r.flow), packets = ?r.map(|r| r.packets), stall_ms = RX_STALL.as_millis(), "dlink: RX channel connected but no samples — the flow is lost");
         }
         RxEvent::Resumed { rx } => {
             tracing::info!(%device, rx, "dlink: RX channel receives samples again");
@@ -715,16 +719,18 @@ fn supervise(
             for e in watch.observe(Instant::now(), &rows) {
                 log_rx_event(device, &rows, &e);
             }
-            if let Ok(mut r) = stats.rx.lock() {
-                *r = rows;
-            }
+            // The old rows are freed after the lock: hub-mix reads this mutex for its snapshot.
+            let old = stats
+                .rx
+                .lock()
+                .map(|mut r| std::mem::replace(&mut *r, rows));
+            drop(old);
             thread::sleep(WATCH_INTERVAL);
         };
         let stopped = link.stop();
         stats.running.store(false, Ordering::Relaxed);
-        if let Ok(mut r) = stats.rx.lock() {
-            r.clear();
-        }
+        let old = stats.rx.lock().map(|mut r| std::mem::take(&mut *r));
+        drop(old);
         match ended {
             None => {
                 tracing::info!(%device, ?stopped, "dlink: the Dante device stopped with the hub");

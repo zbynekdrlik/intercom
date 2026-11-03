@@ -40,7 +40,8 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
   channel `rx`, `name`, `tx_channel`, `tx_device`, `status` (Dante's label), `state`
   (`connected`/`pending`/`error`/`idle`, absent = not subscribed), `flow`, `packets`, `written`.
   `written` standing still while `connected` = a lost flow (journal WARN `connected but no samples
-  for 1 s — the flow is lost`, `RxWatch`); growing `written` over -120 dBFS = a quiet source. Each
+  — the flow is lost` after `RX_STALL` 1 s, `RxWatch`; each new state restarts that timer, so a
+  reconnect, or the start, gets 1 s for its first samples); growing `written` over -120 dBFS = a quiet source. Each
   state change logs once (an `error` at warn). Two transmitters on one address must show two
   `flow` numbers (v0.6.2 keys a transmitter by its flow-control address and port; v0.5.x put
   master-asio-dante and band-asio-dante into ONE flow).
