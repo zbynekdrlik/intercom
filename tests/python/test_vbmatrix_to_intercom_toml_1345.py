@@ -248,6 +248,8 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
     assert d["rx_port_base"] == 47100
+    # The Yamaha card runs 96 kHz; the device joins it there, dlink halves to the hub's 48 kHz.
+    assert d["network_rate"] == 96000
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
     assert dl == [
         {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 4, "out_channels": 0}

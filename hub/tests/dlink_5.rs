@@ -396,6 +396,46 @@ fn a_real_dlink_device_hears_its_declared_subscription_in_the_hub_s_leg() {
     assert!(matches!(stopped, dlink::Stopped::Done), "{stopped:?}");
 }
 
+// --- the network rate (dstack #20: the site runs 96 kHz, the hub 48 kHz) -------------------------
+
+#[test]
+fn network_rate_runs_the_device_at_96k_and_the_hub_at_48k() {
+    let m = load(&format!(
+        "{HEAD}{DLINK}network_rate = 96000\n{}",
+        participant(3, 0)
+    ))
+    .unwrap();
+    let (d, _) = m.dlink_participant().unwrap();
+    let c = d.link_config(48_000);
+    // The device joins a 96 kHz transmitter's flow; the hub's processor gets 48 kHz blocks.
+    assert_eq!(c.device().unwrap().sample_rate, 96_000);
+    assert_eq!(c.device_rate(), 96_000);
+    assert!(c.halved());
+}
+
+#[test]
+fn no_network_rate_runs_the_device_at_the_hub_s_rate() {
+    let m = load(&format!("{HEAD}{DLINK}{}", participant(3, 0))).unwrap();
+    let (d, _) = m.dlink_participant().unwrap();
+    let c = d.link_config(48_000);
+    assert_eq!(c.device().unwrap().sample_rate, 48_000);
+    assert!(!c.halved());
+}
+
+#[test]
+fn a_network_rate_neither_the_hub_s_nor_twice_it_fails_the_load() {
+    let err = load(&format!(
+        "{HEAD}{DLINK}network_rate = 44100\n{}",
+        participant(3, 0)
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("network_rate 44100 must be the sample rate 48000 or twice it"),
+        "{err}"
+    );
+}
+
 // --- the ports (a second device on strih-snv: OBS's strih-obs) -----------------------------------
 
 #[test]

@@ -34,6 +34,9 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         .link_config(48_000)
         .device()
         .expect("dstack accepts the deployed [dlink]");
+    // intercom#5: the Yamaha card sends at 96 kHz; a Dante flow needs both ends at one rate
+    // (dstack 3.11.2026), so the device runs at 96 kHz and dlink halves it to the hub's 48 kHz.
+    assert_eq!(dev.sample_rate, 96_000);
     let subs: Vec<_> = dev
         .subscribe
         .iter()
