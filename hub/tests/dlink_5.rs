@@ -502,25 +502,27 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     )
     .expect("the hub's 96 kHz device started");
 
-    // Once the rate step's start-up ringing has passed, the hub reads the constant within a few
-    // LSB of 16384 in whole 48 kHz blocks; RX 2 (no subscription) stays silent.
+    // The claim: a flow forms at 96 kHz and the hub reads the transmitter's constant at its scale,
+    // 16384, at 48 kHz. Count samples at 16384 +-8 until a whole second of them (48000) came
+    // back. Not gapless: under a slow build (CI's llvm-cov) the two devices' pumps run late, the
+    // missing blocks ring through the rate step, and that timing is dstack's to test, not ours.
+    // Without network_rate no flow forms and not one sample arrives (range 0..0).
     let jitter = Mutex::new(input_buffers(&m));
-    let end = Instant::now() + Duration::from_secs(15);
-    let mut settled = 0usize;
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut at_tone = 0usize;
     let (mut lo, mut hi) = (i16::MAX, i16::MIN);
-    while settled < 20 && Instant::now() < end {
-        if let Some(block) = ring.pop_planar(256) {
+    while at_tone < 48_000 && Instant::now() < end {
+        // Drain all that is there, so the ring never overflows on a slow runner.
+        while let Some(block) = ring.pop_planar(256) {
             lo = lo.min(*block[0].iter().min().unwrap());
             hi = hi.max(*block[0].iter().max().unwrap());
-            if block[0].iter().all(|&s| s.abs_diff(16384) <= 8) {
-                settled += 1;
-            }
+            at_tone += block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
             assert!(
                 block[1].iter().all(|&s| s == 0),
                 "RX 2 is not subscribed: silent"
             );
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(2));
     }
     while ring.pop_planar(1).is_some() {}
     std::thread::sleep(Duration::from_millis(50));
@@ -530,8 +532,8 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     let rx_stopped = rx.stop();
     let tx_stopped = tx.stop();
     assert!(
-        settled >= 20,
-        "20 whole 48 kHz blocks of the 96 kHz tone at 16384 (got {settled}, range {lo}..{hi})"
+        at_tone >= 48_000,
+        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi})"
     );
     assert!(pushed >= 1);
     assert!(matches!(rx_stopped, dlink::Stopped::Done), "{rx_stopped:?}");
