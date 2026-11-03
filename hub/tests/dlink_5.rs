@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use dlink::Process;
 use intercom_hub::dlink_leg::{
-    drain_blocks, spawn_dlink, to_i16, DlinkFacet, DlinkLegConfig, DlinkStats, RxProcessor,
-    SampleRing, DEFAULT_LATENCY_MS, DEFAULT_STATE_FILE,
+    drain_blocks, rx_facets, spawn_dlink, to_i16, DlinkFacet, DlinkLegConfig, DlinkRxFacet,
+    DlinkStats, RxEvent, RxProcessor, RxWatch, SampleRing, DEFAULT_LATENCY_MS, DEFAULT_STATE_FILE,
 };
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_DLINK};
@@ -281,9 +281,20 @@ fn the_dlink_facet_is_on_the_dlink_participant_only() {
         blocks: 77,
         ring_frames: 12,
         ring_dropped_frames: 3,
+        rx: vec![DlinkRxFacet {
+            rx: 1,
+            name: "FOH L".into(),
+            tx_channel: Some("Repro 0db L".into()),
+            tx_device: Some("master-asio-dante".into()),
+            status: Some("Receiving"),
+            state: Some("connected"),
+            flow: Some(1),
+            packets: 900,
+            written: 14_400,
+        }],
     });
     // Even a stray facet on another participant is not rendered there.
-    stats[0].dlink = stats[1].dlink;
+    stats[0].dlink = stats[1].dlink.clone();
     let v = serde_json::to_value(HubState::snapshot(&m, "test", &stats)).unwrap();
     let p = &v["participants"];
     assert!(p[0].get("dlink").is_none());
@@ -298,7 +309,154 @@ fn the_dlink_facet_is_on_the_dlink_participant_only() {
     assert_eq!(d["blocks"], 77);
     assert_eq!(d["ring_frames"], 12);
     assert_eq!(d["ring_dropped_frames"], 3);
+    let rx = &d["rx"][0];
+    assert_eq!(rx["rx"], 1);
+    assert_eq!(rx["name"], "FOH L");
+    assert_eq!(rx["tx_channel"], "Repro 0db L");
+    assert_eq!(rx["tx_device"], "master-asio-dante");
+    assert_eq!(rx["status"], "Receiving");
+    assert_eq!(rx["state"], "connected");
+    assert_eq!(rx["flow"], 1);
+    assert_eq!(rx["packets"], 900);
+    assert_eq!(rx["written"], 14_400);
     assert_eq!(p[1]["adapter"], "dlink");
+}
+
+fn channel(
+    rx: usize,
+    sub: Option<(&str, &str)>,
+    status: Option<dlink::SubStatus>,
+) -> dlink::RxChannel {
+    dlink::RxChannel {
+        rx,
+        subscription: sub.map(|(c, d)| dstack::device::Subscription {
+            tx_channel: c.into(),
+            tx_device: d.into(),
+        }),
+        status,
+        flow: status.map(|_| 1),
+        packets: 10,
+        written: 160,
+    }
+}
+
+#[test]
+fn rx_facets_name_each_channel_and_its_dante_state() {
+    let names = vec![
+        "REPRO L".to_string(),
+        "REPRO R".to_string(),
+        "GUIDE".to_string(),
+    ];
+    let rows = rx_facets(
+        &names,
+        &[
+            channel(
+                1,
+                Some(("Repro 0db L", "master-asio-dante")),
+                Some(dlink::SubStatus::Receiving),
+            ),
+            channel(
+                2,
+                Some(("Repro 0db R", "master-asio-dante")),
+                Some(dlink::SubStatus::TxFail),
+            ),
+            channel(3, None, None),
+        ],
+    );
+    assert_eq!(rows[0].name, "REPRO L");
+    assert_eq!(rows[0].state, Some("connected"));
+    assert_eq!(rows[0].status, Some(dlink::SubStatus::Receiving.label()));
+    assert_eq!(rows[0].tx_device.as_deref(), Some("master-asio-dante"));
+    assert_eq!(rows[1].state, Some("error"));
+    assert_eq!(rows[1].status, Some(dlink::SubStatus::TxFail.label()));
+    assert_eq!(
+        (
+            rows[2].name.as_str(),
+            rows[2].state,
+            rows[2].tx_channel.as_deref()
+        ),
+        ("GUIDE", None, None)
+    );
+}
+
+fn row(rx: usize, state: Option<&'static str>, written: u64) -> DlinkRxFacet {
+    DlinkRxFacet {
+        rx,
+        state,
+        status: state.map(|_| "s"),
+        written,
+        ..DlinkRxFacet::default()
+    }
+}
+
+#[test]
+fn the_rx_watch_tells_a_lost_flow_from_a_state_change() {
+    let t0 = Instant::now();
+    let mut w = RxWatch::default();
+    // The first read names every subscribed channel's state; an unsubscribed one stays quiet.
+    assert_eq!(
+        w.observe(t0, &[row(1, Some("connected"), 0), row(2, None, 0)]),
+        vec![RxEvent::State {
+            rx: 1,
+            from: None,
+            to: Some("connected"),
+            status: Some("s")
+        }]
+    );
+    // Samples flowing: nothing to say.
+    assert!(w
+        .observe(
+            t0 + Duration::from_millis(200),
+            &[row(1, Some("connected"), 100), row(2, None, 0)]
+        )
+        .is_empty());
+    // Connected but `written` stands still: nothing before RX_STALL, one Stalled at it, then quiet.
+    assert!(w
+        .observe(
+            t0 + Duration::from_millis(1100),
+            &[row(1, Some("connected"), 100), row(2, None, 0)]
+        )
+        .is_empty());
+    assert_eq!(
+        w.observe(
+            t0 + Duration::from_millis(1200),
+            &[row(1, Some("connected"), 100), row(2, None, 0)]
+        ),
+        vec![RxEvent::Stalled { rx: 1 }]
+    );
+    assert!(w
+        .observe(
+            t0 + Duration::from_millis(3000),
+            &[row(1, Some("connected"), 100), row(2, None, 0)]
+        )
+        .is_empty());
+    // Samples again: Resumed; then the subscription fails: one State to error, and no stall
+    // warning for a channel that is not connected.
+    assert_eq!(
+        w.observe(
+            t0 + Duration::from_millis(3200),
+            &[row(1, Some("connected"), 200), row(2, None, 0)]
+        ),
+        vec![RxEvent::Resumed { rx: 1 }]
+    );
+    assert_eq!(
+        w.observe(
+            t0 + Duration::from_millis(3400),
+            &[row(1, Some("error"), 200), row(2, None, 0)]
+        ),
+        vec![RxEvent::State {
+            rx: 1,
+            from: Some("connected"),
+            to: Some("error"),
+            status: Some("s")
+        }]
+    );
+    assert!(w
+        .observe(
+            t0 + Duration::from_millis(9000),
+            &[row(1, Some("error"), 200), row(2, None, 0)]
+        )
+        .is_empty());
 }
 
 #[test]
@@ -527,6 +685,16 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     while ring.pop_planar(1).is_some() {}
     std::thread::sleep(Duration::from_millis(50));
     let pushed = drain_blocks(&ring, 256, "foh_dante", pid, &jitter);
+    // dlink's own view of the same flow, as the hub's /api/state shows it.
+    let rows = rx_facets(&d.rx, &rx.rx_channels());
+    assert_eq!(rows[0].name, "In 1");
+    assert_eq!(rows[0].state, Some("connected"), "{rows:?}");
+    assert_eq!(rows[0].tx_device.as_deref(), Some("intercom-tx-96"));
+    assert!(
+        rows[0].flow.is_some() && rows[0].packets > 0 && rows[0].written > 0,
+        "{rows:?}"
+    );
+    assert_eq!((rows[1].state, rows[1].written), (None, 0), "{rows:?}");
     assert_eq!(rx.ended(), None);
     assert_eq!(tx.ended(), None);
     let rx_stopped = rx.stop();

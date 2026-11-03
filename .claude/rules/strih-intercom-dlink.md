@@ -36,6 +36,14 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
 - **A running flow of zeros is a SOURCE question, not ours:** 1.9.6 had status 9 and a granted
   flow from the card, yet -120 dBFS; the wire carried zero audio bytes because FOH had moved
   Ableton off the card. Ask dstack/dasio what feeds the TX channel now before touching the hub.
+- **`/api/state` `dlink.rx[]` (dlink v0.6.3 `Link::rx_channels`, read every 200 ms):** per RX
+  channel `rx`, `name`, `tx_channel`, `tx_device`, `status` (Dante's label), `state`
+  (`connected`/`pending`/`error`/`idle`, absent = not subscribed), `flow`, `packets`, `written`.
+  `written` standing still while `connected` = a lost flow (journal WARN `connected but no samples
+  for 1 s — the flow is lost`, `RxWatch`); growing `written` over -120 dBFS = a quiet source. Each
+  state change logs once (an `error` at warn). Two transmitters on one address must show two
+  `flow` numbers (v0.6.2 keys a transmitter by its flow-control address and port; v0.5.x put
+  master-asio-dante and band-asio-dante into ONE flow).
 - **`blocks` / `running` / `ends 0` never prove a flow.** dlink's pump runs on the media clock with
   or without an RX flow, so a lost flow reads as a running device at -120 dBFS (1.9.7, 3.11.2026:
   audio 03:16:04-03:17:51, then TX_FAIL with the pump still counting; called a PASS by mistake).
