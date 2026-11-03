@@ -1,7 +1,8 @@
 //! The hub's own Dante device (intercom#5): dstack's `dlink` embedded in this process.
 //!
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
-//! device of its own, beside the `fohabl-strih` VBAN leg, which stays (owner 2.11.2026). dstack owns
+//! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
+//! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. dstack owns
 //! the protocol, the subscriptions (kept in `state_file`), the 10 ms latency at normal priority and
 //! dantesync as the media clock (dstack#20, dstack#68). The hub only declares its wanted
 //! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
