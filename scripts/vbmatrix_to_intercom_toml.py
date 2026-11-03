@@ -79,8 +79,8 @@ VIDEO = {
 
 # The hub's own Dante device (intercom#5): dstack's dlink in the hub, emitted as the `[dlink]` table
 # and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
-# band click/guide on the Yamaha card's Dante TX. Phase 1 (owner 2.11.2026: VBAN stays): declared and visible on
-# /api/state, routed to NO output. Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
+# band click/guide on the Yamaha card's Dante TX. Since the cut-over (3.11.2026) it carries every
+# point fohabl had (see DANTE_REPLACES). Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
 # Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
 # what camera-box's nft opens on enp7s0.70.
 DLINK = {
@@ -107,6 +107,8 @@ DLINK = {
         ("GUIDE", "GUIDE track 32", "foh-abl-yamaha-accelerator"),
     ],
 }
+# The VBAN program reference the Dante device replaces (intercom#5 cut-over, 3.11.2026).
+DANTE_REPLACES = "fohabl"
 DLINK_PARTICIPANT = {
     "name": "foh_dante",
     "role": "program_ref",
@@ -301,6 +303,14 @@ def build_model(xml_text):
         d = participants[pt["dst"]]
         s["in_channels"] = max(s["in_channels"], pt["in_ch"])
         d["out_channels"] = max(d["out_channels"], pt["out_ch"])
+
+    # intercom#5 cut-over (3.11.2026, FOH turned its VBAN fohabl-strih off): fohabl's points read the
+    # Dante device, the same channel/output/gain (its rx order is fohabl-strih's channel order). Done
+    # after the channel counts, so the fohabl leg keeps its 4 channels: a returning stream is
+    # decoded and routed nowhere.
+    for pt in points:
+        if pt["src"] == DANTE_REPLACES:
+            pt["src"] = DLINK_PARTICIPANT["name"]
 
     # issue 1461: the fixed target of every ingress resampler leg.
     for p in participants.values():

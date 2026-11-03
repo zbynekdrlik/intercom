@@ -1380,82 +1380,82 @@ dst = "cam6"
 out_ch = 2
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 3
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 1
 dst = "speakers"
 out_ch = 1
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 4
 gain_db = -8.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 2
 dst = "speakers"
 out_ch = 2
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 1
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 2
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 3
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "cutters"
 out_ch = 4
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 3
 dst = "speakers"
 out_ch = 1
 gain_db = -10.0
 
 [[point]]
-src = "fohabl"
+src = "foh_dante"
 in_ch = 4
 dst = "speakers"
 out_ch = 2
