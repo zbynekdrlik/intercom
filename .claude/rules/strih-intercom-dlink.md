@@ -36,6 +36,11 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
 - **A running flow of zeros is a SOURCE question, not ours:** 1.9.6 had status 9 and a granted
   flow from the card, yet -120 dBFS; the wire carried zero audio bytes because FOH had moved
   Ableton off the card. Ask dstack/dasio what feeds the TX channel now before touching the hub.
+- **`blocks` / `running` / `ends 0` never prove a flow.** dlink's pump runs on the media clock with
+  or without an RX flow, so a lost flow reads as a running device at -120 dBFS (1.9.7, 3.11.2026:
+  audio 03:16:04-03:17:51, then TX_FAIL with the pump still counting; called a PASS by mistake).
+  Audio is proven only by dstack reading RX status 9 from the Dante side AND a level above -120
+  held over time; a level that drops to exactly -120 mid-music is a flow question first.
 - **The network rate (dlink v0.5.20, `network_rate`):** a Dante flow needs both ends at ONE rate.
   The FOH Dante sources run 96 kHz, so a device at the hub's 48 kHz showed every subscription as
   status 21 (TX_FAIL; v0.5.20 reads 16, format mismatch, with a warning naming both rates) and no
