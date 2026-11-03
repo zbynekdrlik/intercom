@@ -177,7 +177,7 @@ impl From<NetworkFillStats> for JitterFacet {
 }
 
 /// Per-participant runtime counters, gathered from its jitter buffer + tx side each tick.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RuntimeStats {
     pub rx_packets: u64,
     pub tx_packets: u64,
@@ -336,7 +336,7 @@ impl HubState {
             .iter()
             .enumerate()
             .map(|(id, p)| {
-                let s = stats.get(id).copied().unwrap_or_default();
+                let s = stats.get(id).cloned().unwrap_or_default();
                 let vban = p.adapter == crate::matrix::ADAPTER_VBAN;
                 ParticipantState {
                     name: p.name.clone(),
@@ -369,7 +369,7 @@ impl HubState {
                     dlink: (p.adapter == crate::matrix::ADAPTER_DLINK)
                         .then_some(matrix.dlink.as_ref())
                         .flatten()
-                        .map(|d| DlinkState::new(d, s.dlink.unwrap_or_default())),
+                        .map(|d| DlinkState::new(d, s.dlink.clone().unwrap_or_default())),
                     return_addr: None,
                 }
             })

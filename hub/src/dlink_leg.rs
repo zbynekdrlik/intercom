@@ -340,10 +340,150 @@ pub struct DlinkStats {
     ends: AtomicU64,
     blocks: AtomicU64,
     ring: Mutex<Option<Arc<SampleRing>>>,
+    /// The device's RX channels as the supervisor last read them (empty while the device is down).
+    rx: Mutex<Vec<DlinkRxFacet>>,
+}
+
+/// One RX channel on `/api/state` (dlink v0.6.3 `Link::rx_channels`): what it is subscribed to,
+/// the subscription's Dante status, the flow it rides and how much arrived. `written` that stops
+/// while `state` reads `connected` is a lost flow; `written` that grows over silence is a quiet
+/// source (3.11.2026: a lost flow read as a quiet FOH).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DlinkRxFacet {
+    /// The channel, from 1.
+    pub rx: usize,
+    /// Our name for it (`[dlink].rx`).
+    pub name: String,
+    pub tx_channel: Option<String>,
+    pub tx_device: Option<String>,
+    /// Dante's label for the subscription status (`Receiving`, `Tx fail`, ...); absent if none.
+    pub status: Option<&'static str>,
+    /// `connected` / `pending` / `error` / `idle`; absent if not subscribed.
+    pub state: Option<&'static str>,
+    /// The RX flow it rides, from 1.
+    pub flow: Option<usize>,
+    /// That flow's packets so far.
+    pub packets: u64,
+    /// This channel's samples written so far.
+    pub written: u64,
+}
+
+fn state_name(s: dlink::SubState) -> &'static str {
+    match s {
+        dlink::SubState::Connected => "connected",
+        dlink::SubState::Pending => "pending",
+        dlink::SubState::Error => "error",
+        dlink::SubState::Idle => "idle",
+    }
+}
+
+/// The facet rows for dlink's RX channels, named by our `rx` list (by number, from 1).
+pub fn rx_facets(names: &[String], channels: &[dlink::RxChannel]) -> Vec<DlinkRxFacet> {
+    channels
+        .iter()
+        .map(|c| DlinkRxFacet {
+            rx: c.rx,
+            name: c
+                .rx
+                .checked_sub(1)
+                .and_then(|i| names.get(i))
+                .cloned()
+                .unwrap_or_default(),
+            tx_channel: c.subscription.as_ref().map(|s| s.tx_channel.clone()),
+            tx_device: c.subscription.as_ref().map(|s| s.tx_device.clone()),
+            status: c.status.map(|s| s.label()),
+            state: c.status.map(|s| state_name(s.state())),
+            flow: c.flow,
+            packets: c.packets,
+            written: c.written,
+        })
+        .collect()
+}
+
+/// How long a connected channel's `written` may stand still before it counts as a lost flow.
+pub const RX_STALL: Duration = Duration::from_secs(1);
+
+/// What changed on one RX channel between two reads, for the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RxEvent {
+    /// The subscription's state or status label changed.
+    State {
+        rx: usize,
+        from: Option<&'static str>,
+        to: Option<&'static str>,
+        status: Option<&'static str>,
+    },
+    /// Connected, yet no sample written for [`RX_STALL`]: the flow is gone.
+    Stalled { rx: usize },
+    /// Samples arrive again after a stall.
+    Resumed { rx: usize },
+}
+
+/// Follows the RX channels between reads (pure: the caller passes the time).
+#[derive(Debug, Default)]
+pub struct RxWatch {
+    last: Vec<(DlinkRxFacet, Instant, bool)>,
+}
+
+impl RxWatch {
+    /// Compare a fresh read with the last one: state changes, a connected channel whose `written`
+    /// stood still for [`RX_STALL`], and its resumption.
+    pub fn observe(&mut self, now: Instant, rows: &[DlinkRxFacet]) -> Vec<RxEvent> {
+        let mut events = Vec::new();
+        let mut next = Vec::with_capacity(rows.len());
+        for row in rows {
+            let prev = self.last.iter().find(|(p, _, _)| p.rx == row.rx);
+            let (since, mut stalled) = match prev {
+                Some((p, since, stalled)) => {
+                    let changed = p.state != row.state || p.status != row.status;
+                    if changed {
+                        events.push(RxEvent::State {
+                            rx: row.rx,
+                            from: p.state,
+                            to: row.state,
+                            status: row.status,
+                        });
+                    }
+                    if row.written != p.written {
+                        if *stalled {
+                            events.push(RxEvent::Resumed { rx: row.rx });
+                        }
+                        (now, false)
+                    } else if changed {
+                        // A new state gets its own RX_STALL before it can count as a lost flow.
+                        (now, *stalled)
+                    } else {
+                        (*since, *stalled)
+                    }
+                }
+                None => {
+                    if row.state.is_some() {
+                        events.push(RxEvent::State {
+                            rx: row.rx,
+                            from: None,
+                            to: row.state,
+                            status: row.status,
+                        });
+                    }
+                    (now, false)
+                }
+            };
+            if !stalled
+                && row.state == Some("connected")
+                && now.saturating_duration_since(since) >= RX_STALL
+            {
+                events.push(RxEvent::Stalled { rx: row.rx });
+                stalled = true;
+            }
+            next.push((row.clone(), since, stalled));
+        }
+        self.last = next;
+        events
+    }
 }
 
 /// The `/api/state` `dlink` facet of the `dlink` participant (intercom#5). Additive only.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DlinkFacet {
     /// The device is up (started and not ended).
     pub running: bool,
@@ -357,6 +497,8 @@ pub struct DlinkFacet {
     pub ring_frames: usize,
     /// Frames dropped on a full ring (`dlink-rx` fell behind).
     pub ring_dropped_frames: u64,
+    /// The RX channels as last read (empty while the device is down).
+    pub rx: Vec<DlinkRxFacet>,
 }
 
 impl DlinkStats {
@@ -369,6 +511,7 @@ impl DlinkStats {
             blocks: self.blocks.load(Ordering::Relaxed),
             ring_frames: ring.as_ref().map_or(0, |r| r.frames_queued()),
             ring_dropped_frames: ring.as_ref().map_or(0, |r| r.dropped_frames()),
+            rx: self.rx.lock().map(|r| r.clone()).unwrap_or_default(),
         }
     }
 }
@@ -477,6 +620,39 @@ pub fn spawn_dlink(
     }
 }
 
+/// One journal line per RX change: a connect at info, an error or a lost flow at warn.
+fn log_rx_event(device: &str, rows: &[DlinkRxFacet], e: &RxEvent) {
+    let row = |rx: usize| rows.iter().find(|r| r.rx == rx);
+    match e {
+        RxEvent::State {
+            rx,
+            from,
+            to,
+            status,
+        } => {
+            let r = row(*rx);
+            let (name, tx_channel, tx_device, flow) = (
+                r.map(|r| r.name.as_str()),
+                r.and_then(|r| r.tx_channel.as_deref()),
+                r.and_then(|r| r.tx_device.as_deref()),
+                r.and_then(|r| r.flow),
+            );
+            if *to == Some("error") {
+                tracing::warn!(%device, rx, ?name, ?tx_channel, ?tx_device, ?from, ?to, ?status, ?flow, "dlink: RX subscription failed");
+            } else {
+                tracing::info!(%device, rx, ?name, ?tx_channel, ?tx_device, ?from, ?to, ?status, ?flow, "dlink: RX subscription changed");
+            }
+        }
+        RxEvent::Stalled { rx } => {
+            let r = row(*rx);
+            tracing::warn!(%device, rx, name = ?r.map(|r| r.name.as_str()), flow = ?r.and_then(|r| r.flow), packets = ?r.map(|r| r.packets), stall_ms = RX_STALL.as_millis(), "dlink: RX channel connected but no samples — the flow is lost");
+        }
+        RxEvent::Resumed { rx } => {
+            tracing::info!(%device, rx, "dlink: RX channel receives samples again");
+        }
+    }
+}
+
 /// Sleep `d` in watch-sized steps; true once the hub asked to stop.
 fn sleep_or_stop(d: Duration, stop: &AtomicBool) -> bool {
     let end = Instant::now() + d;
@@ -531,6 +707,7 @@ fn supervise(
         stats.starts.fetch_add(1, Ordering::Relaxed);
         stats.running.store(true, Ordering::Relaxed);
         tracing::info!(%device, %iface, channels = cfg.config.rx.len(), latency_ms = cfg.config.latency_ms, "dlink: the Dante device is up");
+        let mut watch = RxWatch::default();
         let ended = loop {
             if stop.load(Ordering::Relaxed) {
                 break None;
@@ -538,10 +715,22 @@ fn supervise(
             if let Some(why) = link.ended() {
                 break Some(why);
             }
+            let rows = rx_facets(&cfg.config.rx, &link.rx_channels());
+            for e in watch.observe(Instant::now(), &rows) {
+                log_rx_event(device, &rows, &e);
+            }
+            // The old rows are freed after the lock: hub-mix reads this mutex for its snapshot.
+            let old = stats
+                .rx
+                .lock()
+                .map(|mut r| std::mem::replace(&mut *r, rows));
+            drop(old);
             thread::sleep(WATCH_INTERVAL);
         };
         let stopped = link.stop();
         stats.running.store(false, Ordering::Relaxed);
+        let old = stats.rx.lock().map(|mut r| std::mem::take(&mut *r));
+        drop(old);
         match ended {
             None => {
                 tracing::info!(%device, ?stopped, "dlink: the Dante device stopped with the hub");

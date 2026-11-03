@@ -457,7 +457,7 @@ out_channels = 4
     #[test]
     fn the_status_line_names_decode_rejects_and_the_worst_leg_only_when_nonzero() {
         let m = matrix();
-        let quiet = HubState::snapshot(&m, "v", &[RuntimeStats::default(); 3]);
+        let quiet = HubState::snapshot(&m, "v", &vec![RuntimeStats::default(); 3]);
         assert!(
             !quiet.status_line().contains("decode_rejects"),
             "{}",
