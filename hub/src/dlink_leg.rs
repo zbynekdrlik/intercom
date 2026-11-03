@@ -79,10 +79,10 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
-    /// The network's sample rate, Hz, when it differs from the hub's (dlink v0.5.20, dstack #20):
-    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's 2:1
-    /// half-band step hands the hub its own rate. Only the hub's rate or twice it; absent = the
-    /// hub's. strih-snv: 96000 (the FOH PC's Dante sources).
+    /// The network's sample rate, Hz, when it differs from the hub's (dlink, dstack #20 / #90):
+    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's `Rated`
+    /// converts to the hub's rate on the device's clock. A Dante rate (44.1..192 kHz); absent =
+    /// the hub's. strih-snv: 96000 (the FOH PC's Dante sources).
     #[serde(default)]
     pub network_rate: Option<u32>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription

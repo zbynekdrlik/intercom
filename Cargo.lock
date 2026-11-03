@@ -85,6 +85,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audio-codec-algorithms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
+
+[[package]]
+name = "audioadapter"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4"
+
+[[package]]
+name = "audioadapter-buffers"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce"
+dependencies = [
+ "audioadapter",
+ "audioadapter-sample",
+ "num-traits",
+]
+
+[[package]]
+name = "audioadapter-sample"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d"
+dependencies = [
+ "audio-codec-algorithms",
+ "num-traits",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -344,19 +377,20 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.5.20"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.20#de30835e0292dfc7045116a7eaed5839a68e7c2c"
+version = "0.6.2"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.2#d7889ee9a39f189f568b675acbafd3598a71ef30"
 dependencies = [
  "dstack",
  "dstack-audio-io",
+ "dstack-resample",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
 ]
 
 [[package]]
 name = "dstack"
-version = "0.5.20"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.20#de30835e0292dfc7045116a7eaed5839a68e7c2c"
+version = "0.6.2"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.2#d7889ee9a39f189f568b675acbafd3598a71ef30"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -378,8 +412,16 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.5.20"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.20#de30835e0292dfc7045116a7eaed5839a68e7c2c"
+version = "0.6.2"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.2#d7889ee9a39f189f568b675acbafd3598a71ef30"
+
+[[package]]
+name = "dstack-resample"
+version = "0.6.2"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.2#d7889ee9a39f189f568b675acbafd3598a71ef30"
+dependencies = [
+ "rubato",
+]
 
 [[package]]
 name = "dsync-ptp"
@@ -935,7 +977,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.20#de30835e0292dfc7045116a7eaed5839a68e7c2c"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.2#d7889ee9a39f189f568b675acbafd3598a71ef30"
 dependencies = [
  "fastrand",
  "flume",
@@ -998,6 +1040,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -1296,6 +1356,20 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rubato"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc1e951b9f5432ec1422f4dcfa5733fc501265902612edf5ef8bd8ecdd960930"
+dependencies = [
+ "audioadapter",
+ "audioadapter-buffers",
+ "num-integer",
+ "num-traits",
+ "visibility",
+ "windowfunctions",
 ]
 
 [[package]]
@@ -2031,6 +2105,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "visibility"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d674d135b4a8c1d7e813e2f8d1c9a58308aee4a680323066025e53132218bd91"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "want"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2150,6 +2235,15 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "windowfunctions"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90628d739333b7c5d2ee0b70210b97b8cddc38440c682c96fd9e2c24c2db5f3a"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "windows"

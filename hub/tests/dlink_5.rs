@@ -410,7 +410,7 @@ fn network_rate_runs_the_device_at_96k_and_the_hub_at_48k() {
     // The device joins a 96 kHz transmitter's flow; the hub's processor gets 48 kHz blocks.
     assert_eq!(c.device().unwrap().sample_rate, 96_000);
     assert_eq!(c.device_rate(), 96_000);
-    assert!(c.halved());
+    assert!(c.converts());
 }
 
 #[test]
@@ -419,19 +419,19 @@ fn no_network_rate_runs_the_device_at_the_hub_s_rate() {
     let (d, _) = m.dlink_participant().unwrap();
     let c = d.link_config(48_000);
     assert_eq!(c.device().unwrap().sample_rate, 48_000);
-    assert!(!c.halved());
+    assert!(!c.converts());
 }
 
 #[test]
-fn a_network_rate_neither_the_hub_s_nor_twice_it_fails_the_load() {
+fn a_network_rate_dante_does_not_run_fails_the_load() {
     let err = load(&format!(
-        "{HEAD}{DLINK}network_rate = 44100\n{}",
+        "{HEAD}{DLINK}network_rate = 12345\n{}",
         participant(3, 0)
     ))
     .unwrap_err()
     .to_string();
     assert!(
-        err.contains("network_rate 44100 must be the sample rate 48000 or twice it"),
+        err.contains("12345 Hz is not one of [44100, 48000, 88200, 96000, 176400, 192000]"),
         "{err}"
     );
 }

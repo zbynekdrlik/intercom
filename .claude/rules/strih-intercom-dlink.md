@@ -46,8 +46,9 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
   status 21 (TX_FAIL; v0.5.20 reads 16, format mismatch, with a warning naming both rates) and no
   RX flow: `-120 dBFS` on `foh_dante` with a healthy pump and 0 drops. Silence plus a running
   device is NOT a quiet FOH: ask dstack to read the RX status from the Dante side (dev1 is not on
-  VLAN 70). `network_rate = 96000` runs the device at 96 kHz; dlink's half-band 2:1 step hands
-  `RxProcessor` 48 kHz blocks of half the frames (0.16 ms each way). Only 1x or 2x the hub's rate.
+  VLAN 70). `network_rate = 96000` runs the device at 96 kHz and dlink converts to the hub's 48 kHz
+  (v0.5.20: a 2:1 half-band step, 0.16 ms each way, 1x/2x only; v0.6: `Rated`, any Dante rate,
+  `Config::converts()` replaced `halved()`).
 - **The cut-over (converter `DANTE_REPLACES = "fohabl"`):** every fohabl point (cutters -8/-10 dB,
   speakers) reads `foh_dante`, same channel/output/gain; `rx` order = fohabl-strih's channel
   order. The VBAN fohabl leg stays declared (4 channels) and routed nowhere. lv1/mbc stay VBAN.
