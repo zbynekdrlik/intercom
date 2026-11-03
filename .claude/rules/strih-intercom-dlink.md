@@ -49,8 +49,8 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
   owner's call, and the TX names belong to that device: dstack never picks them.
 - **Two devices on one address** (the hub + OBS's strih-obs) need distinct ARC/CMC/flows ports and
   process ids; the info port 8700 is shared by dstack itself. camera-box's nft names the RX range.
-- **The crossing:** dlink's pump calls `RxProcessor::process` every 32 frames (dstack rule I7: no
-  alloc, lock, syscall or log). It only copies RX as i16 into the lock-free `SampleRing`. The
+- **The crossing:** dlink's pump calls `RxProcessor::process` once per device block, halved to
+  48 kHz with `network_rate` (dstack rule I7: no alloc, lock, syscall or log). It only copies RX as i16 into the lock-free `SampleRing`. The
   `dlink-rx` thread drains whole hub blocks into the participant's `JitterBuffer::card_capture`
   leg with `push_at` (the card leg's path), so the issue-1461 resampler crosses the clock. Never
   push into the JitterBuffer from `process` (it locks and allocates).
