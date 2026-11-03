@@ -238,18 +238,19 @@ def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
     assert d["iface"] == "enp7s0.70"
     # fohabl-strih's four channels in order (dasio's 30.10 FOH analysis, intercom#5).
     assert d["rx"] == ["REPRO L", "REPRO R", "CLICK 3doba", "GUIDE"]
-    # Declared on the Yamaha card's TX (dasio 2.11.2026); CLICK 3doba on card ch 9 (owner 2.11.2026).
-    yamaha = "foh-abl-yamaha-accelerator"
+    # The two Abletons' own Dante devices on the FOH PC (dasio 3.11.2026; the owner: no return to
+    # VB-Matrix): the master since 01:47, the band since 02:29. The Yamaha card's TX is silent.
+    master, band = "master-asio-dante", "band-asio-dante"
     assert d["subscribe"] == [
-        {"rx": "REPRO L", "tx_channel": "REPRO 0dB L 07", "tx_device": yamaha},
-        {"rx": "REPRO R", "tx_channel": "REPRO 0dB R 08", "tx_device": yamaha},
-        {"rx": "CLICK 3doba", "tx_channel": "09", "tx_device": yamaha},
-        {"rx": "GUIDE", "tx_channel": "GUIDE track 32", "tx_device": yamaha},
+        {"rx": "REPRO L", "tx_channel": "Repro 0db L", "tx_device": master},
+        {"rx": "REPRO R", "tx_channel": "Repro 0db R", "tx_device": master},
+        {"rx": "CLICK 3doba", "tx_channel": "Click 3doba", "tx_device": band},
+        {"rx": "GUIDE", "tx_channel": "Guide 2 iem", "tx_device": band},
     ]
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
     assert d["rx_port_base"] == 47100
-    # The Yamaha card runs 96 kHz; the device joins it there, dlink halves to the hub's 48 kHz.
+    # The FOH Dante sources run 96 kHz; the device joins them there, dlink halves to the hub's 48 kHz.
     assert d["network_rate"] == 96000
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
     assert dl == [
@@ -282,7 +283,7 @@ def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
 
 
 def test_a_dlink_subscription_must_name_one_of_the_device_s_rx_channels(monkeypatch):
-    bad = dict(conv.DLINK, subscribe=[("Talkback", "01", "foh-abl-yamaha-accelerator")])
+    bad = dict(conv.DLINK, subscribe=[("Talkback", "01", "master-asio-dante")])
     monkeypatch.setattr(conv, "DLINK", bad)
     with pytest.raises(ValueError, match="'Talkback' is not one of"):
         conv.convert(_xml())

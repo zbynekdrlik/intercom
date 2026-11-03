@@ -26,7 +26,7 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         "expected the 216-point VB-Matrix grid minus VASIO8's 4"
     );
 
-    // intercom#5: the four declared Yamaha-card subscriptions reach dstack's device config.
+    // intercom#5: the four declared FOH subscriptions reach dstack's device config.
     let dev = m
         .dlink
         .as_ref()
@@ -34,27 +34,24 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         .link_config(48_000)
         .device()
         .expect("dstack accepts the deployed [dlink]");
-    // intercom#5: the Yamaha card sends at 96 kHz; a Dante flow needs both ends at one rate
+    // intercom#5: the FOH Dante sources run at 96 kHz; a Dante flow needs both ends at one rate
     // (dstack 3.11.2026), so the device runs at 96 kHz and dlink halves it to the hub's 48 kHz.
     assert_eq!(dev.sample_rate, 96_000);
+    // The two Abletons' own Dante devices on the FOH PC (dasio 3.11.2026, permanent).
     let subs: Vec<_> = dev
         .subscribe
         .iter()
-        .map(|s| (s.rx, s.tx_channel.as_str()))
+        .map(|s| (s.rx, s.tx_channel.as_str(), s.tx_device.as_str()))
         .collect();
     assert_eq!(
         subs,
         vec![
-            (1, "REPRO 0dB L 07"),
-            (2, "REPRO 0dB R 08"),
-            (3, "09"),
-            (4, "GUIDE track 32")
+            (1, "Repro 0db L", "master-asio-dante"),
+            (2, "Repro 0db R", "master-asio-dante"),
+            (3, "Click 3doba", "band-asio-dante"),
+            (4, "Guide 2 iem", "band-asio-dante")
         ]
     );
-    assert!(dev
-        .subscribe
-        .iter()
-        .all(|s| s.tx_device == "foh-abl-yamaha-accelerator"));
 
     // 10 VBAN inputs (cam1..7 + fohabl/lv1/mbc), 7 active VBAN outputs (cam1..7).
     let vban_in = m

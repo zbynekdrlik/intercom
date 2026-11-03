@@ -79,7 +79,7 @@ VIDEO = {
 
 # The hub's own Dante device (intercom#5): dstack's dlink in the hub, emitted as the `[dlink]` table
 # and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
-# band click/guide on the Yamaha card's Dante TX. Since the cut-over (3.11.2026) it carries every
+# band click/guide from the FOH PC's Ableton Dante devices. Since the cut-over (3.11.2026) it carries every
 # point fohabl had (see DANTE_REPLACES). Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
 # Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
 # what camera-box's nft opens on enp7s0.70.
@@ -95,16 +95,16 @@ DLINK = {
     "flows_port": 4456,
     "process_id": 1,
     "rx_port_base": 47100,
-    # The Yamaha card sends at 96 kHz and a Dante flow needs both ends at one rate (dstack
+    # The FOH Dante sources send at 96 kHz and a Dante flow needs both ends at one rate (dstack
     # 3.11.2026): the device runs at it, dlink v0.5.20 halves it to the hub's 48 kHz.
     "network_rate": 96000,
-    # The Yamaha card's TX names (dasio 2.11.2026). CLICK 3doba goes to the card's TX ch 9, default
-    # name "09" (owner 2.11.2026; dasio routes it in VB-Matrix): a rename of ch 9 must follow here.
+    # The two Abletons' own Dante devices on the FOH PC, 96 kHz (dasio 3.11.2026; the owner: no
+    # return to VB-Matrix, so the Yamaha card's TX is silent). A rename of a TX channel follows here.
     "subscribe": [
-        ("REPRO L", "REPRO 0dB L 07", "foh-abl-yamaha-accelerator"),
-        ("REPRO R", "REPRO 0dB R 08", "foh-abl-yamaha-accelerator"),
-        ("CLICK 3doba", "09", "foh-abl-yamaha-accelerator"),
-        ("GUIDE", "GUIDE track 32", "foh-abl-yamaha-accelerator"),
+        ("REPRO L", "Repro 0db L", "master-asio-dante"),
+        ("REPRO R", "Repro 0db R", "master-asio-dante"),
+        ("CLICK 3doba", "Click 3doba", "band-asio-dante"),
+        ("GUIDE", "Guide 2 iem", "band-asio-dante"),
     ],
 }
 # The VBAN program reference the Dante device replaces (intercom#5 cut-over, 3.11.2026).
