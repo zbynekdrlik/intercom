@@ -11,7 +11,7 @@ members = ["vban", "hub"]
 resolver = "2"
 
 [workspace.package]
-version = "1.9.11"
+version = "1.9.12"
 
 # The same release profile the hub was built with inside the camera-box workspace.
 [profile.release]
