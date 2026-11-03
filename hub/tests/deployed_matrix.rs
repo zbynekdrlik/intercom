@@ -34,6 +34,9 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         .link_config(48_000)
         .device()
         .expect("dstack accepts the deployed [dlink]");
+    // intercom#5: the Yamaha card sends at 96 kHz; a Dante flow needs both ends at one rate
+    // (dstack 3.11.2026), so the device runs at 96 kHz and dlink halves it to the hub's 48 kHz.
+    assert_eq!(dev.sample_rate, 96_000);
     let subs: Vec<_> = dev
         .subscribe
         .iter()
@@ -69,8 +72,16 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         "no self-route point may survive load"
     );
 
-    // Spot-check the −8 dB fohabl→cutters program ref survived into the resolved matrix.
-    let fohabl = m.id_of("fohabl").expect("fohabl participant");
+    // Spot-check the −8 dB FOH program ref into the cutters survived into the resolved matrix. Since
+    // the intercom#5 cut-over the FOH feed is the Dante device, which took every fohabl point.
+    let fohabl = m.id_of("foh_dante").expect("foh_dante participant");
+    let vban_fohabl = m
+        .id_of("fohabl")
+        .expect("the VBAN fohabl leg stays declared");
+    assert!(
+        !m.points.iter().any(|pt| pt.src == vban_fohabl),
+        "the VBAN fohabl leg is routed nowhere after the cut-over"
+    );
     let cutters = m.id_of("cutters").expect("cutters participant");
     let cams: Vec<usize> = (1..=7)
         .filter_map(|i| m.id_of(&format!("cam{i}")))
@@ -83,13 +94,13 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         .collect();
     assert!(
         !fohabl_cutters.is_empty(),
-        "fohabl in1 must route to the cutters"
+        "the FOH program in1 must route to the cutters"
     );
     assert!(
         fohabl_cutters
             .iter()
             .all(|pt| (pt.gain_db - (-8.0)).abs() < 1e-6),
-        "the fohabl program ref must stay at -8 dB"
+        "the FOH program ref must stay at -8 dB"
     );
     // A program reference must NEVER reach a cambox output.
     assert!(

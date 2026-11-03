@@ -67,15 +67,16 @@ def test_no_self_route_and_cam1_never_hears_itself():
     assert not any(pt["src"] == pt["dst"] for pt in points), "the N-1 invariant forbids self-routes"
 
 
-def test_fohabl_program_ref_into_cutters_at_minus_8_never_to_cams():
+def test_the_foh_program_into_cutters_at_minus_8_never_to_cams():
     _hub, _parts, points = _model()
+    # The FOH program feed is the Dante device since the intercom#5 cut-over (it took fohabl's points).
     to_cutters = [
-        pt for pt in points if pt["src"] == "fohabl" and pt["in_ch"] == 1 and pt["dst"] == "cutters"
+        pt for pt in points if pt["src"] == "foh_dante" and pt["in_ch"] == 1 and pt["dst"] == "cutters"
     ]
-    assert to_cutters, "fohabl in1 must route into the cutters"
+    assert to_cutters, "the FOH program in1 must route into the cutters"
     assert all(pt["gain_db"] == -8.0 for pt in to_cutters), to_cutters
     assert not any(
-        pt["src"] == "fohabl" and pt["dst"] in _CAMS for pt in points
+        pt["src"] in ("fohabl", "foh_dante") and pt["dst"] in _CAMS for pt in points
     ), "program references must NEVER reach a cambox output"
 
 
@@ -143,7 +144,7 @@ def test_generated_toml_parses_into_the_matrix_shape():
     fohabl_cutters = [
         pt
         for pt in data["point"]
-        if pt["src"] == "fohabl" and pt.get("in_ch") == 1 and pt["dst"] == "cutters"
+        if pt["src"] == "foh_dante" and pt.get("in_ch") == 1 and pt["dst"] == "cutters"
     ]
     assert fohabl_cutters and all(pt["gain_db"] == -8.0 for pt in fohabl_cutters)
 
@@ -230,7 +231,7 @@ def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cam
 # --- intercom#5: the hub's own Dante device (dstack dlink), phase 1 -------------------------------
 
 
-def test_the_dlink_device_is_declared_and_routed_nowhere():
+def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
     data = tomllib.loads(conv.convert(_xml()))
     d = data["dlink"]
     assert d["name"] == "strih-snv-intercom"
@@ -248,12 +249,36 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
     assert d["rx_port_base"] == 47100
+    # The Yamaha card runs 96 kHz; the device joins it there, dlink halves to the hub's 48 kHz.
+    assert d["network_rate"] == 96000
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
     assert dl == [
         {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 4, "out_channels": 0}
     ]
-    # Phase 1 (owner 2.11.2026: VBAN stays): no point reads or writes the device yet.
-    assert not [pt for pt in data["point"] if "foh_dante" in (pt["src"], pt["dst"])]
+    # The cut-over (3.11.2026, FOH turned its VBAN fohabl-strih off): every point fohabl had now reads
+    # foh_dante, the same channel, output and gain (rx order = fohabl-strih's channel order).
+    dante = sorted(
+        (pt["in_ch"], pt["dst"], pt["out_ch"], pt.get("gain_db"))
+        for pt in data["point"]
+        if pt["src"] == "foh_dante"
+    )
+    assert dante == [
+        (1, "cutters", 1, -8.0),
+        (1, "cutters", 3, -8.0),
+        (1, "speakers", 1, None),
+        (2, "cutters", 2, -8.0),
+        (2, "cutters", 4, -8.0),
+        (2, "speakers", 2, None),
+        (3, "cutters", 1, -10.0),
+        (3, "cutters", 2, -10.0),
+        (3, "cutters", 3, -10.0),
+        (3, "cutters", 4, -10.0),
+        (3, "speakers", 1, -10.0),
+        (4, "speakers", 2, None),
+    ]
+    assert not [pt for pt in data["point"] if pt["dst"] == "foh_dante"]
+    # The VBAN fohabl leg stays declared (a returning stream is decoded), routed nowhere.
+    assert not [pt for pt in data["point"] if pt["src"] == "fohabl"]
 
 
 def test_a_dlink_subscription_must_name_one_of_the_device_s_rx_channels(monkeypatch):

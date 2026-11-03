@@ -1,14 +1,16 @@
 //! The hub's own Dante device (intercom#5): dstack's `dlink` embedded in this process.
 //!
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
-//! device of its own, beside the `fohabl-strih` VBAN leg, which stays (owner 2.11.2026). dstack owns
+//! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
+//! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. dstack owns
 //! the protocol, the subscriptions (kept in `state_file`), the 10 ms latency at normal priority and
 //! dantesync as the media clock (dstack#20, dstack#68). The hub only declares its wanted
 //! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
 //!
 //! The crossing into the hub:
 //!
-//! - dlink's pump calls [`RxProcessor::process`] every 32 frames on the Dante clock. That callback
+//! - dlink's pump calls [`RxProcessor::process`] once per device block on the Dante clock (with
+//!   `network_rate`, dlink's 2:1 step hands it half the frames at the hub's rate). That callback
 //!   must not allocate, lock, make syscalls or log (dstack's rule I7), so it only copies the RX
 //!   channels as i16 into a preallocated lock-free single-producer ring ([`SampleRing`]).
 //! - The `dlink-rx` thread drains the ring in hub blocks and pushes each into the participant's
@@ -77,6 +79,12 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// The network's sample rate, Hz, when it differs from the hub's (dlink v0.5.20, dstack #20):
+    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's 2:1
+    /// half-band step hands the hub its own rate. Only the hub's rate or twice it; absent = the
+    /// hub's. strih-snv: 96000 (the FOH Yamaha card).
+    #[serde(default)]
+    pub network_rate: Option<u32>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
     /// for takes its declared one at start; one Dante Controller sets is saved there and wins.
     /// Declared ones are never saved (dlink v0.5.12, the fix of intercom#5's report), so a TOML
@@ -103,7 +111,7 @@ fn default_state_file() -> PathBuf {
 }
 
 impl DlinkConfig {
-    /// The dlink config the device runs with at the hub's `sample_rate`.
+    /// The dlink config: the hub's `sample_rate` for the app, the device at `network_rate` if set.
     pub fn link_config(&self, sample_rate: u32) -> dlink::Config {
         let mut c = dlink::Config::new(self.name.clone(), self.state_file.clone())
             .rx(self.rx.iter().cloned())
@@ -119,6 +127,9 @@ impl DlinkConfig {
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);
+        }
+        if let Some(hz) = self.network_rate {
+            c = c.network_rate(hz);
         }
         for sub in &self.subscribe {
             // An unknown name is listed by `problems`, so a loaded table never reaches here with one.

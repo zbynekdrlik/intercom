@@ -11,7 +11,8 @@ paths:
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
 no relaying between apps. The embeddable part is dstack's `dlink` crate: 10 ms latency, normal
 priority, no pinning, dantesync as the media clock (a loopback UDP poll, works under the unit's
-sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN stays beside it.
+sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
+(3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
 
@@ -30,6 +31,16 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
 - **strih-snv's mapping** (owner + dasio 2.11.2026): `foh-abl-yamaha-accelerator` TX
   `REPRO 0dB L 07`, `REPRO 0dB R 08`, `09` (CLICK 3doba, routed by dasio in FOH VB-Matrix), `GUIDE
   track 32`. A rename of card ch 9 must follow in the converter's `DLINK`.
+- **The network rate (dlink v0.5.20, `network_rate`):** a Dante flow needs both ends at ONE rate.
+  The FOH Yamaha card runs 96 kHz, so a device at the hub's 48 kHz showed every subscription as
+  status 21 (TX_FAIL; v0.5.20 reads 16, format mismatch, with a warning naming both rates) and no
+  RX flow: `-120 dBFS` on `foh_dante` with a healthy pump and 0 drops. Silence plus a running
+  device is NOT a quiet FOH: ask dstack to read the RX status from the Dante side (dev1 is not on
+  VLAN 70). `network_rate = 96000` runs the device at 96 kHz; dlink's half-band 2:1 step hands
+  `RxProcessor` 48 kHz blocks of half the frames (0.16 ms each way). Only 1x or 2x the hub's rate.
+- **The cut-over (converter `DANTE_REPLACES = "fohabl"`):** every fohabl point (cutters -8/-10 dB,
+  speakers) reads `foh_dante`, same channel/output/gain; `rx` order = fohabl-strih's channel
+  order. The VBAN fohabl leg stays declared (4 channels) and routed nowhere. lv1/mbc stay VBAN.
 - **Growing `rx` over a saved state:** dstack keeps the saved names for the old channels and adds
   the config's for the new, compared case-insensitively; a new name equal to an old one refuses the
   state and the device never starts (1.9.3's `Click` vs `CLICK`). The old channels also keep their
@@ -38,8 +49,8 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). VBAN 
   owner's call, and the TX names belong to that device: dstack never picks them.
 - **Two devices on one address** (the hub + OBS's strih-obs) need distinct ARC/CMC/flows ports and
   process ids; the info port 8700 is shared by dstack itself. camera-box's nft names the RX range.
-- **The crossing:** dlink's pump calls `RxProcessor::process` every 32 frames (dstack rule I7: no
-  alloc, lock, syscall or log). It only copies RX as i16 into the lock-free `SampleRing`. The
+- **The crossing:** dlink's pump calls `RxProcessor::process` once per device block, halved to
+  48 kHz with `network_rate` (dstack rule I7: no alloc, lock, syscall or log). It only copies RX as i16 into the lock-free `SampleRing`. The
   `dlink-rx` thread drains whole hub blocks into the participant's `JitterBuffer::card_capture`
   leg with `push_at` (the card leg's path), so the issue-1461 resampler crosses the clock. Never
   push into the JitterBuffer from `process` (it locks and allocates).
