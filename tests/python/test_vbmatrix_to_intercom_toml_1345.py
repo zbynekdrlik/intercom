@@ -67,15 +67,16 @@ def test_no_self_route_and_cam1_never_hears_itself():
     assert not any(pt["src"] == pt["dst"] for pt in points), "the N-1 invariant forbids self-routes"
 
 
-def test_fohabl_program_ref_into_cutters_at_minus_8_never_to_cams():
+def test_the_foh_program_into_cutters_at_minus_8_never_to_cams():
     _hub, _parts, points = _model()
+    # The FOH program feed is the Dante device since the intercom#5 cut-over (it took fohabl's points).
     to_cutters = [
-        pt for pt in points if pt["src"] == "fohabl" and pt["in_ch"] == 1 and pt["dst"] == "cutters"
+        pt for pt in points if pt["src"] == "foh_dante" and pt["in_ch"] == 1 and pt["dst"] == "cutters"
     ]
-    assert to_cutters, "fohabl in1 must route into the cutters"
+    assert to_cutters, "the FOH program in1 must route into the cutters"
     assert all(pt["gain_db"] == -8.0 for pt in to_cutters), to_cutters
     assert not any(
-        pt["src"] == "fohabl" and pt["dst"] in _CAMS for pt in points
+        pt["src"] in ("fohabl", "foh_dante") and pt["dst"] in _CAMS for pt in points
     ), "program references must NEVER reach a cambox output"
 
 
@@ -143,7 +144,7 @@ def test_generated_toml_parses_into_the_matrix_shape():
     fohabl_cutters = [
         pt
         for pt in data["point"]
-        if pt["src"] == "fohabl" and pt.get("in_ch") == 1 and pt["dst"] == "cutters"
+        if pt["src"] == "foh_dante" and pt.get("in_ch") == 1 and pt["dst"] == "cutters"
     ]
     assert fohabl_cutters and all(pt["gain_db"] == -8.0 for pt in fohabl_cutters)
 
