@@ -35,23 +35,23 @@ network_rate = 96000
 
 [[dlink.subscribe]]
 rx = "REPRO L"
-tx_channel = "REPRO 0dB L 07"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Repro 0db L"
+tx_device = "master-asio-dante"
 
 [[dlink.subscribe]]
 rx = "REPRO R"
-tx_channel = "REPRO 0dB R 08"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Repro 0db R"
+tx_device = "master-asio-dante"
 
 [[dlink.subscribe]]
 rx = "CLICK 3doba"
-tx_channel = "09"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Click 3doba"
+tx_device = "band-asio-dante"
 
 [[dlink.subscribe]]
 rx = "GUIDE"
-tx_channel = "GUIDE track 32"
-tx_device = "foh-abl-yamaha-accelerator"
+tx_channel = "Guide 2 iem"
+tx_device = "band-asio-dante"
 
 [[participant]]
 name = "cam1"

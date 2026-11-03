@@ -28,11 +28,16 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
   state_file holds no subscription for takes the declared one; one Dante Controller sets is saved
   and wins. Declared ones are never saved (v0.5.12; v0.5.11 saved them with the next save, so a
   TOML edit stopped reaching the channel); a Controller change of the channel clears the mark.
-- **strih-snv's mapping** (owner + dasio 2.11.2026): `foh-abl-yamaha-accelerator` TX
-  `REPRO 0dB L 07`, `REPRO 0dB R 08`, `09` (CLICK 3doba, routed by dasio in FOH VB-Matrix), `GUIDE
-  track 32`. A rename of card ch 9 must follow in the converter's `DLINK`.
+- **strih-snv's mapping** (dasio 3.11.2026, permanent; the owner: no return to VB-Matrix): the
+  two Abletons' own Dante devices on the FOH PC (10.77.7.30, 96 kHz): `master-asio-dante`
+  `Repro 0db L` / `Repro 0db R`, `band-asio-dante` `Click 3doba` / `Guide 2 iem`. A TX rename on
+  the FOH side must follow in the converter's `DLINK`. History: 2.11. the Yamaha card
+  (`foh-abl-yamaha-accelerator` 07/08/09/32) via FOH VB-Matrix, silent since the move.
+- **A running flow of zeros is a SOURCE question, not ours:** 1.9.6 had status 9 and a granted
+  flow from the card, yet -120 dBFS; the wire carried zero audio bytes because FOH had moved
+  Ableton off the card. Ask dstack/dasio what feeds the TX channel now before touching the hub.
 - **The network rate (dlink v0.5.20, `network_rate`):** a Dante flow needs both ends at ONE rate.
-  The FOH Yamaha card runs 96 kHz, so a device at the hub's 48 kHz showed every subscription as
+  The FOH Dante sources run 96 kHz, so a device at the hub's 48 kHz showed every subscription as
   status 21 (TX_FAIL; v0.5.20 reads 16, format mismatch, with a warning naming both rates) and no
   RX flow: `-120 dBFS` on `foh_dante` with a healthy pump and 0 drops. Silence plus a running
   device is NOT a quiet FOH: ask dstack to read the RX status from the Dante side (dev1 is not on

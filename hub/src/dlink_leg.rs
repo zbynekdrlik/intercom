@@ -82,7 +82,7 @@ pub struct DlinkConfig {
     /// The network's sample rate, Hz, when it differs from the hub's (dlink v0.5.20, dstack #20):
     /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's 2:1
     /// half-band step hands the hub its own rate. Only the hub's rate or twice it; absent = the
-    /// hub's. strih-snv: 96000 (the FOH Yamaha card).
+    /// hub's. strih-snv: 96000 (the FOH PC's Dante sources).
     #[serde(default)]
     pub network_rate: Option<u32>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
