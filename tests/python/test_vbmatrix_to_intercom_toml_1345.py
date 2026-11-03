@@ -250,7 +250,7 @@ def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
     assert d["rx_port_base"] == 47100
-    # The Yamaha card runs 96 kHz; the device joins it there, dlink halves to the hub's 48 kHz.
+    # The FOH Dante sources run 96 kHz; the device joins them there, dlink halves to the hub's 48 kHz.
     assert d["network_rate"] == 96000
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
     assert dl == [
@@ -283,7 +283,7 @@ def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
 
 
 def test_a_dlink_subscription_must_name_one_of_the_device_s_rx_channels(monkeypatch):
-    bad = dict(conv.DLINK, subscribe=[("Talkback", "01", "foh-abl-yamaha-accelerator")])
+    bad = dict(conv.DLINK, subscribe=[("Talkback", "01", "master-asio-dante")])
     monkeypatch.setattr(conv, "DLINK", bad)
     with pytest.raises(ValueError, match="'Talkback' is not one of"):
         conv.convert(_xml())
