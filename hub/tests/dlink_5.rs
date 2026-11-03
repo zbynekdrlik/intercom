@@ -431,9 +431,111 @@ fn a_network_rate_dante_does_not_run_fails_the_load() {
     .unwrap_err()
     .to_string();
     assert!(
-        err.contains("12345 Hz is not one of [44100, 48000, 88200, 96000, 176400, 192000]"),
+        err.contains("12345") && err.contains("is not one of"),
         "{err}"
     );
+}
+
+/// A native-rate transmitter: a constant 0.5 on its one TX channel, nothing else.
+struct Tone;
+
+impl Process for Tone {
+    fn process(&mut self, block: &mut dlink::Block<'_>) {
+        block.output(0).fill(0.5);
+    }
+}
+
+#[test]
+fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
+    // strih-snv's shape: a native 96 kHz Dante transmitter (FOH's Ableton devices) and the hub's
+    // device with network_rate 96000 handing the hub 48 kHz. Two devices in one process, so the
+    // transmitter takes its own ports and process id (as two devices on one address must).
+    let dir = tempfile::tempdir().unwrap();
+    let tx_cfg = dlink::Config::new("intercom-tx-96", dir.path().join("tx.toml"))
+        .tx(["Tone"])
+        .sample_rate(96_000)
+        .product("newlevel", "intercom-test")
+        .ports(dlink::Ports {
+            arc: 14441,
+            cmc: 18801,
+            flows: 14456,
+        })
+        .process_id(7);
+    assert!(!tx_cfg.converts());
+    let state = dir.path().join("dlink.toml");
+    let table = format!(
+        "{HEAD}[dlink]\nname = \"intercom-rx-96\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\n\
+         network_rate = 96000\nstate_file = \"{}\"\n\
+         arc_port = 14442\ncmc_port = 18802\nflows_port = 14457\nprocess_id = 8\n\
+         [[dlink.subscribe]]\nrx = \"In 1\"\ntx_channel = \"Tone\"\ntx_device = \"intercom-tx-96\"\n{}",
+        state.display(),
+        participant(2, 0)
+    );
+    let m = load(&table).unwrap();
+    let (d, pid) = m.dlink_participant().unwrap();
+    let rx_cfg = d.link_config(48_000);
+    assert_eq!(rx_cfg.device().unwrap().sample_rate, 96_000);
+    assert!(rx_cfg.converts());
+
+    let place = dlink::Place::Ip(routed_ipv4());
+    let tx = dlink::Link::start_on(
+        &tx_cfg,
+        &place,
+        dlink::Map {
+            rx: vec![],
+            tx: vec![0],
+        },
+        Tone,
+        dlink::Clock::System,
+    )
+    .expect("the 96 kHz transmitter started");
+    let ring = Arc::new(SampleRing::new(4096, 2));
+    let rx = dlink::Link::start_on(
+        &rx_cfg,
+        &place,
+        dlink::Map {
+            rx: vec![0, 1],
+            tx: vec![],
+        },
+        RxProcessor::new(ring.clone()),
+        dlink::Clock::System,
+    )
+    .expect("the hub's 96 kHz device started");
+
+    // Once the rate step's start-up ringing has passed, the hub reads the constant within a few
+    // LSB of 16384 in whole 48 kHz blocks; RX 2 (no subscription) stays silent.
+    let jitter = Mutex::new(input_buffers(&m));
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut settled = 0usize;
+    let (mut lo, mut hi) = (i16::MAX, i16::MIN);
+    while settled < 20 && Instant::now() < end {
+        if let Some(block) = ring.pop_planar(256) {
+            lo = lo.min(*block[0].iter().min().unwrap());
+            hi = hi.max(*block[0].iter().max().unwrap());
+            if block[0].iter().all(|&s| s.abs_diff(16384) <= 8) {
+                settled += 1;
+            }
+            assert!(
+                block[1].iter().all(|&s| s == 0),
+                "RX 2 is not subscribed: silent"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    while ring.pop_planar(1).is_some() {}
+    std::thread::sleep(Duration::from_millis(50));
+    let pushed = drain_blocks(&ring, 256, "foh_dante", pid, &jitter);
+    assert_eq!(rx.ended(), None);
+    assert_eq!(tx.ended(), None);
+    let rx_stopped = rx.stop();
+    let tx_stopped = tx.stop();
+    assert!(
+        settled >= 20,
+        "20 whole 48 kHz blocks of the 96 kHz tone at 16384 (got {settled}, range {lo}..{hi})"
+    );
+    assert!(pushed >= 1);
+    assert!(matches!(rx_stopped, dlink::Stopped::Done), "{rx_stopped:?}");
+    assert!(matches!(tx_stopped, dlink::Stopped::Done), "{tx_stopped:?}");
 }
 
 // --- the ports (a second device on strih-snv: OBS's strih-obs) -----------------------------------

@@ -10,7 +10,8 @@
 //! The crossing into the hub:
 //!
 //! - dlink's pump calls [`RxProcessor::process`] once per device block on the Dante clock (with
-//!   `network_rate`, dlink's 2:1 step hands it half the frames at the hub's rate). That callback
+//!   `network_rate`, dlink's `Rated` hands it the hub-rate frames, about the device block x the
+//!   rate ratio, one more or less when the ratio does not divide the block). That callback
 //!   must not allocate, lock, make syscalls or log (dstack's rule I7), so it only copies the RX
 //!   channels as i16 into a preallocated lock-free single-producer ring ([`SampleRing`]).
 //! - The `dlink-rx` thread drains the ring in hub blocks and pushes each into the participant's
