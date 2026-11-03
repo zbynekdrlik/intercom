@@ -230,7 +230,7 @@ def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cam
 # --- intercom#5: the hub's own Dante device (dstack dlink), phase 1 -------------------------------
 
 
-def test_the_dlink_device_is_declared_and_routed_nowhere():
+def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
     data = tomllib.loads(conv.convert(_xml()))
     d = data["dlink"]
     assert d["name"] == "strih-snv-intercom"
@@ -254,8 +254,30 @@ def test_the_dlink_device_is_declared_and_routed_nowhere():
     assert dl == [
         {"name": "foh_dante", "role": "program_ref", "adapter": "dlink", "in_channels": 4, "out_channels": 0}
     ]
-    # Phase 1 (owner 2.11.2026: VBAN stays): no point reads or writes the device yet.
-    assert not [pt for pt in data["point"] if "foh_dante" in (pt["src"], pt["dst"])]
+    # The cut-over (3.11.2026, FOH turned its VBAN fohabl-strih off): every point fohabl had now reads
+    # foh_dante, the same channel, output and gain (rx order = fohabl-strih's channel order).
+    dante = sorted(
+        (pt["in_ch"], pt["dst"], pt["out_ch"], pt.get("gain_db"))
+        for pt in data["point"]
+        if pt["src"] == "foh_dante"
+    )
+    assert dante == [
+        (1, "cutters", 1, -8.0),
+        (1, "cutters", 3, -8.0),
+        (1, "speakers", 1, None),
+        (2, "cutters", 2, -8.0),
+        (2, "cutters", 4, -8.0),
+        (2, "speakers", 2, None),
+        (3, "cutters", 1, -10.0),
+        (3, "cutters", 2, -10.0),
+        (3, "cutters", 3, -10.0),
+        (3, "cutters", 4, -10.0),
+        (3, "speakers", 1, -10.0),
+        (4, "speakers", 2, None),
+    ]
+    assert not [pt for pt in data["point"] if pt["dst"] == "foh_dante"]
+    # The VBAN fohabl leg stays declared (a returning stream is decoded), routed nowhere.
+    assert not [pt for pt in data["point"] if pt["src"] == "fohabl"]
 
 
 def test_a_dlink_subscription_must_name_one_of_the_device_s_rx_channels(monkeypatch):
