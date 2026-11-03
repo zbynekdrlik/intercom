@@ -457,6 +457,33 @@ fn the_rx_watch_tells_a_lost_flow_from_a_state_change() {
             &[row(1, Some("error"), 200), row(2, None, 0)]
         )
         .is_empty());
+    // Back to connected after a long error with `written` still frozen: a state change restarts
+    // the stall timer, so no "flow lost" fires before RX_STALL has passed in the new state.
+    assert_eq!(
+        w.observe(
+            t0 + Duration::from_millis(9200),
+            &[row(1, Some("connected"), 200), row(2, None, 0)]
+        ),
+        vec![RxEvent::State {
+            rx: 1,
+            from: Some("error"),
+            to: Some("connected"),
+            status: Some("s")
+        }]
+    );
+    assert!(w
+        .observe(
+            t0 + Duration::from_millis(10_100),
+            &[row(1, Some("connected"), 200), row(2, None, 0)]
+        )
+        .is_empty());
+    assert_eq!(
+        w.observe(
+            t0 + Duration::from_millis(10_200),
+            &[row(1, Some("connected"), 200), row(2, None, 0)]
+        ),
+        vec![RxEvent::Stalled { rx: 1 }]
+    );
 }
 
 #[test]
