@@ -77,6 +77,12 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
+    /// The network's sample rate, Hz, when it differs from the hub's (dlink v0.5.20, dstack #20):
+    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's 2:1
+    /// half-band step hands the hub its own rate. Only the hub's rate or twice it; absent = the
+    /// hub's. strih-snv: 96000 (the FOH Yamaha card).
+    #[serde(default)]
+    pub network_rate: Option<u32>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
     /// for takes its declared one at start; one Dante Controller sets is saved there and wins.
     /// Declared ones are never saved (dlink v0.5.12, the fix of intercom#5's report), so a TOML
@@ -103,7 +109,7 @@ fn default_state_file() -> PathBuf {
 }
 
 impl DlinkConfig {
-    /// The dlink config the device runs with at the hub's `sample_rate`.
+    /// The dlink config: the hub's `sample_rate` for the app, the device at `network_rate` if set.
     pub fn link_config(&self, sample_rate: u32) -> dlink::Config {
         let mut c = dlink::Config::new(self.name.clone(), self.state_file.clone())
             .rx(self.rx.iter().cloned())
@@ -119,6 +125,9 @@ impl DlinkConfig {
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);
+        }
+        if let Some(hz) = self.network_rate {
+            c = c.network_rate(hz);
         }
         for sub in &self.subscribe {
             // An unknown name is listed by `problems`, so a loaded table never reaches here with one.

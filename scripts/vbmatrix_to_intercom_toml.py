@@ -95,6 +95,9 @@ DLINK = {
     "flows_port": 4456,
     "process_id": 1,
     "rx_port_base": 47100,
+    # The Yamaha card sends at 96 kHz and a Dante flow needs both ends at one rate (dstack
+    # 3.11.2026): the device runs at it, dlink v0.5.20 halves it to the hub's 48 kHz.
+    "network_rate": 96000,
     # The Yamaha card's TX names (dasio 2.11.2026). CLICK 3doba goes to the card's TX ch 9, default
     # name "09" (owner 2.11.2026; dasio routes it in VB-Matrix): a rename of ch 9 must follow here.
     "subscribe": [
@@ -383,7 +386,7 @@ def render(model):
     out.append(f'iface = "{DLINK["iface"]}"')
     joined = ", ".join(f'"{c}"' for c in DLINK["rx"])
     out.append(f"rx = [{joined}]")
-    for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base"):
+    for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base", "network_rate"):
         out.append(f"{key} = {DLINK[key]}")
     out.append("")
     for rx, tx_channel, tx_device in DLINK["subscribe"]:
