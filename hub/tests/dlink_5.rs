@@ -410,7 +410,7 @@ fn network_rate_runs_the_device_at_96k_and_the_hub_at_48k() {
     // The device joins a 96 kHz transmitter's flow; the hub's processor gets 48 kHz blocks.
     assert_eq!(c.device().unwrap().sample_rate, 96_000);
     assert_eq!(c.device_rate(), 96_000);
-    assert!(c.halved());
+    assert!(c.converts());
 }
 
 #[test]
@@ -419,21 +419,125 @@ fn no_network_rate_runs_the_device_at_the_hub_s_rate() {
     let (d, _) = m.dlink_participant().unwrap();
     let c = d.link_config(48_000);
     assert_eq!(c.device().unwrap().sample_rate, 48_000);
-    assert!(!c.halved());
+    assert!(!c.converts());
 }
 
 #[test]
-fn a_network_rate_neither_the_hub_s_nor_twice_it_fails_the_load() {
+fn a_network_rate_dante_does_not_run_fails_the_load() {
     let err = load(&format!(
-        "{HEAD}{DLINK}network_rate = 44100\n{}",
+        "{HEAD}{DLINK}network_rate = 12345\n{}",
         participant(3, 0)
     ))
     .unwrap_err()
     .to_string();
     assert!(
-        err.contains("network_rate 44100 must be the sample rate 48000 or twice it"),
+        err.contains("12345") && err.contains("is not one of"),
         "{err}"
     );
+}
+
+/// A native-rate transmitter: a constant 0.5 on its one TX channel, nothing else.
+struct Tone;
+
+impl Process for Tone {
+    fn process(&mut self, block: &mut dlink::Block<'_>) {
+        block.output(0).fill(0.5);
+    }
+}
+
+#[test]
+fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
+    // strih-snv's shape: a native 96 kHz Dante transmitter (FOH's Ableton devices) and the hub's
+    // device with network_rate 96000 handing the hub 48 kHz. Two devices in one process, so the
+    // transmitter takes its own ports and process id (as two devices on one address must).
+    let dir = tempfile::tempdir().unwrap();
+    let tx_cfg = dlink::Config::new("intercom-tx-96", dir.path().join("tx.toml"))
+        .tx(["Tone"])
+        .sample_rate(96_000)
+        .product("newlevel", "intercom-test")
+        .ports(dlink::Ports {
+            arc: 14441,
+            cmc: 18801,
+            flows: 14456,
+        })
+        .process_id(7);
+    assert!(!tx_cfg.converts());
+    let state = dir.path().join("dlink.toml");
+    let table = format!(
+        "{HEAD}[dlink]\nname = \"intercom-rx-96\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\n\
+         network_rate = 96000\nstate_file = \"{}\"\n\
+         arc_port = 14442\ncmc_port = 18802\nflows_port = 14457\nprocess_id = 8\n\
+         [[dlink.subscribe]]\nrx = \"In 1\"\ntx_channel = \"Tone\"\ntx_device = \"intercom-tx-96\"\n{}",
+        state.display(),
+        participant(2, 0)
+    );
+    let m = load(&table).unwrap();
+    let (d, pid) = m.dlink_participant().unwrap();
+    let rx_cfg = d.link_config(48_000);
+    assert_eq!(rx_cfg.device().unwrap().sample_rate, 96_000);
+    assert!(rx_cfg.converts());
+
+    let place = dlink::Place::Ip(routed_ipv4());
+    let tx = dlink::Link::start_on(
+        &tx_cfg,
+        &place,
+        dlink::Map {
+            rx: vec![],
+            tx: vec![0],
+        },
+        Tone,
+        dlink::Clock::System,
+    )
+    .expect("the 96 kHz transmitter started");
+    let ring = Arc::new(SampleRing::new(4096, 2));
+    let rx = dlink::Link::start_on(
+        &rx_cfg,
+        &place,
+        dlink::Map {
+            rx: vec![0, 1],
+            tx: vec![],
+        },
+        RxProcessor::new(ring.clone()),
+        dlink::Clock::System,
+    )
+    .expect("the hub's 96 kHz device started");
+
+    // The claim: a flow forms at 96 kHz and the hub reads the transmitter's constant at its scale,
+    // 16384, at 48 kHz. Count samples at 16384 +-8 until a whole second of them (48000) came
+    // back. Not gapless: under a slow build (CI's llvm-cov) the two devices' pumps run late, the
+    // missing blocks ring through the rate step, and that timing is dstack's to test, not ours.
+    // Without network_rate no flow forms and not one sample arrives (range 0..0).
+    let jitter = Mutex::new(input_buffers(&m));
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut at_tone = 0usize;
+    let (mut lo, mut hi) = (i16::MAX, i16::MIN);
+    while at_tone < 48_000 && Instant::now() < end {
+        // Drain all that is there, so the ring never overflows on a slow runner.
+        while let Some(block) = ring.pop_planar(256) {
+            lo = lo.min(*block[0].iter().min().unwrap());
+            hi = hi.max(*block[0].iter().max().unwrap());
+            at_tone += block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
+            assert!(
+                block[1].iter().all(|&s| s == 0),
+                "RX 2 is not subscribed: silent"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    while ring.pop_planar(1).is_some() {}
+    std::thread::sleep(Duration::from_millis(50));
+    let pushed = drain_blocks(&ring, 256, "foh_dante", pid, &jitter);
+    assert_eq!(rx.ended(), None);
+    assert_eq!(tx.ended(), None);
+    let rx_stopped = rx.stop();
+    let tx_stopped = tx.stop();
+    assert!(
+        at_tone >= 48_000,
+        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi})"
+    );
+    assert!(pushed >= 1);
+    assert!(matches!(rx_stopped, dlink::Stopped::Done), "{rx_stopped:?}");
+    assert!(matches!(tx_stopped, dlink::Stopped::Done), "{tx_stopped:?}");
 }
 
 // --- the ports (a second device on strih-snv: OBS's strih-obs) -----------------------------------

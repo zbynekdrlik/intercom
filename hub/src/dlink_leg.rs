@@ -10,7 +10,8 @@
 //! The crossing into the hub:
 //!
 //! - dlink's pump calls [`RxProcessor::process`] once per device block on the Dante clock (with
-//!   `network_rate`, dlink's 2:1 step hands it half the frames at the hub's rate). That callback
+//!   `network_rate`, dlink's `Rated` hands it the hub-rate frames, about the device block x the
+//!   rate ratio, one more or less when the ratio does not divide the block). That callback
 //!   must not allocate, lock, make syscalls or log (dstack's rule I7), so it only copies the RX
 //!   channels as i16 into a preallocated lock-free single-producer ring ([`SampleRing`]).
 //! - The `dlink-rx` thread drains the ring in hub blocks and pushes each into the participant's
@@ -79,10 +80,10 @@ pub struct DlinkConfig {
     /// Absent = ports the OS picks.
     #[serde(default)]
     pub rx_port_base: Option<u16>,
-    /// The network's sample rate, Hz, when it differs from the hub's (dlink v0.5.20, dstack #20):
-    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's 2:1
-    /// half-band step hands the hub its own rate. Only the hub's rate or twice it; absent = the
-    /// hub's. strih-snv: 96000 (the FOH PC's Dante sources).
+    /// The network's sample rate, Hz, when it differs from the hub's (dlink, dstack #20 / #90):
+    /// the device runs at it, since a Dante flow needs both ends at one rate, and dlink's `Rated`
+    /// converts to the hub's rate on the device's clock. A Dante rate (44.1..192 kHz); absent =
+    /// the hub's. strih-snv: 96000 (the FOH PC's Dante sources).
     #[serde(default)]
     pub network_rate: Option<u32>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
