@@ -9,17 +9,17 @@ paths:
 # The hub's own Dante device: dstack `dlink` in process (intercom#5)
 
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
-no relaying between apps. The embeddable part is dstack's `dlink` crate: 10 ms latency, normal
-priority, no pinning, dantesync as the media clock (a loopback UDP poll, works under the unit's
-sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
+no relaying between apps. The embeddable part is dstack's `dlink` crate: a 10 ms budget (the whole
+path each way), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
+capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
 
 - **Config:** the optional `[dlink]` table (`dlink_leg::DlinkConfig`, `deny_unknown_fields`):
   `name`, `iface`, `rx` (channel names), `latency_ms` (10: since dlink v0.6.22 the BUDGET, the
-  whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, e.g.
-  5.17 ms for the 48 kHz hub on its 96 kHz device; `/api/state` `latency_ms` is that budget), `state_file`
+  whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, dlink's crate docs have
+  the table of splits; `/api/state` `latency_ms` is that budget), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
   none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
@@ -88,7 +88,7 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
   needs CAP_NET_BIND_SERVICE" means the grant or the firewall is missing. History: a rig rule
   relayed at 10:19 the same day said the opposite; the owner's later word replaced it. A relayed
   rule that contradicts a verbatim owner decision: find the decision's ticket before changing the
-  unit. Pinned by `the_unit_lets_the_ptp_follower_bind_port_319_and_nothing_else`.
+  unit. Pinned by `the_unit_lets_the_ptp_follower_bind_port_319_and_grants_no_other_capability`.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
   latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The

@@ -3,8 +3,9 @@
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
 //! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
 //! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. dstack owns
-//! the protocol, the subscriptions (kept in `state_file`), the 10 ms latency at normal priority and
-//! dantesync as the media clock (dstack#20, dstack#68). The hub only declares its wanted
+//! the protocol, the subscriptions (kept in `state_file`), the 10 ms budget (the whole path each
+//! way, split by dlink) at normal priority and the media clock: Dante PTP followed in process,
+//! the dsync service as fallback (dstack#20, dstack#68, dstack#1). The hub only declares its wanted
 //! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
 //!
 //! The crossing into the hub:
@@ -39,7 +40,7 @@ pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// TOML says otherwise: the unit's `StateDirectory=intercom-hub`.
 pub const DEFAULT_STATE_FILE: &str = "/var/lib/intercom-hub/dlink.toml";
 /// The ring between the pump and the `dlink-rx` thread, in frames: 16 hub blocks (85 ms), far more
-/// than the 10 ms device latency plus a stalled `dlink-rx` wake.
+/// than the whole 10 ms budget (the Dante latency is less) plus a stalled `dlink-rx` wake.
 pub const RING_FRAMES: usize = 4096;
 /// How often `dlink-rx` looks at the ring when it holds less than a block: well under one block.
 pub const DRAIN_INTERVAL: Duration = Duration::from_millis(1);

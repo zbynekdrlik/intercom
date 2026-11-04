@@ -507,7 +507,7 @@ fn the_unit_keeps_a_writable_state_directory_for_the_device() {
 /// drop-in, and the only capability the hub keeps. Without it dlink logs "dsync's in-process
 /// follower did not start ... port 319 needs CAP_NET_BIND_SERVICE" and runs on the service clock.
 #[test]
-fn the_unit_lets_the_ptp_follower_bind_port_319_and_nothing_else() {
+fn the_unit_lets_the_ptp_follower_bind_port_319_and_grants_no_other_capability() {
     let unit = include_str!("../../systemd/intercom-hub.service");
     let directives: Vec<&str> = unit
         .lines()
