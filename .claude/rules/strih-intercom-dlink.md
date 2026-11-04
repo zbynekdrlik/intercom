@@ -84,7 +84,8 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   DVS. The follower binds UDP 319, so the unit grants `AmbientCapabilities=CAP_NET_BIND_SERVICE`
   (ambient: holds for setup-strih's non-root `User=`) with `CapabilityBoundingSet` of that one cap.
   camera-box owns the box side: nft lets UDP 319/320 in, verify-strih item 16 expects the cap.
-  Healthy log: `media clock source source=Follower` (or Linked); `source=Service` plus "port 319
+  Healthy log: the LAST dstack `media clock source` line reads `source=Internal` (dsync-ptp; camera-box
+  verify item 16 grades it); `source=Service` plus "port 319
   needs CAP_NET_BIND_SERVICE" means the grant or the firewall is missing. History: a rig rule
   relayed at 10:19 the same day said the opposite; the owner's later word replaced it. A relayed
   rule that contradicts a verbatim owner decision: find the decision's ticket before changing the
