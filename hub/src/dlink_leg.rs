@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use crate::local_audio::restart_backoff;
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
-/// The device latency unless the TOML sets one: dlink's 10 ms (owner 2.11.2026, dstack#68).
+/// The latency budget unless the TOML sets one: dlink's 10 ms, the hub's whole path each way, the
+/// work and the Dante latency together; dlink splits it (owner 3.11.2026, dstack#68, dlink v0.6.22).
 pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// Where the device keeps what Dante Controller sets (its name, subscriptions, latency) unless the
 /// TOML says otherwise: the unit's `StateDirectory=intercom-hub`.
@@ -59,7 +60,8 @@ pub struct DlinkConfig {
     pub iface: String,
     /// The RX channel names, in channel order: the `dlink` participant's inputs, 1-based.
     pub rx: Vec<String>,
-    /// The device latency in ms (dlink's floor is 4).
+    /// The latency budget in ms (dlink `Config::budget_ns`): the whole path each way. The Dante
+    /// latency is what the work leaves (dlink `split`, at least 4 ms); a budget leaving less fails.
     #[serde(default = "default_latency_ms")]
     pub latency_ms: u32,
     /// Where dstack keeps the device state.
@@ -117,7 +119,7 @@ impl DlinkConfig {
         let mut c = dlink::Config::new(self.name.clone(), self.state_file.clone())
             .rx(self.rx.iter().cloned())
             .sample_rate(sample_rate)
-            .latency_ns(u64::from(self.latency_ms) * 1_000_000)
+            .budget_ns(u64::from(self.latency_ms) * 1_000_000)
             .product("newlevel", "intercom-hub");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
         {

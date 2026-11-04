@@ -17,7 +17,9 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
 ## The pieces
 
 - **Config:** the optional `[dlink]` table (`dlink_leg::DlinkConfig`, `deny_unknown_fields`):
-  `name`, `iface`, `rx` (channel names), `latency_ms` (10), `state_file`
+  `name`, `iface`, `rx` (channel names), `latency_ms` (10: since dlink v0.6.22 the BUDGET, the
+  whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, e.g.
+  5.17 ms for the 48 kHz hub on its 96 kHz device; `/api/state` `latency_ms` is that budget), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
   none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
@@ -110,3 +112,5 @@ as a dev-dependency at the SAME tag as `dlink` (one dstack in the lockfile).
 
 Both `dlink` and the `dstack` dev-dependency move together in `hub/Cargo.toml`; then
 `cargo update -p dstack`. A Dante need or bug goes to dstack over peer; intercom only moves the tag.
+Read dstack's CHANGELOG between the two tags first: a `Port:` line names an API that moved
+(v0.6.22: `Config::latency_ns` gone, `budget_ns` replaces it) and a test that pinned the old value.
