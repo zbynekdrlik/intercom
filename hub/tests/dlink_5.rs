@@ -497,6 +497,27 @@ fn the_unit_keeps_a_writable_state_directory_for_the_device() {
     assert!(DEFAULT_STATE_FILE.starts_with("/var/lib/intercom-hub/"));
 }
 
+/// Owner rule on the rig boxes (camera-box, 4.11.2026): dsync is the only PTP owner, so the hub's
+/// dlink gets no capability to bind PTP's port 319 and its device runs on the dsync service's clock,
+/// the designed path (dlink logs "dsync's in-process follower did not start ... port 319 needs
+/// CAP_NET_BIND_SERVICE" once; that line is expected). camera-box's verify-strih item 16 fails a
+/// hub unit that grants it, so the unit grants no capability at all.
+#[test]
+fn the_unit_gives_dlink_no_capability_for_ptp_port_319() {
+    let unit = include_str!("../../systemd/intercom-hub.service");
+    let directives: Vec<&str> = unit
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    for d in &directives {
+        assert!(
+            !d.starts_with("AmbientCapabilities=") && !d.contains("CAP_NET_BIND_SERVICE"),
+            "dsync owns PTP on the rig: the hub unit grants no capability, found {d:?}"
+        );
+    }
+}
+
 // --- one real dlink device in this process -------------------------------------------------------
 
 /// The box's IPv4 address on its default route (connecting a UDP socket sends nothing).
