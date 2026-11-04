@@ -321,8 +321,8 @@ pub fn keep_off_cpus(
             return Some((
                 true,
                 format!(
-                    "intercom-hub: {MIX_THREAD_NAME}: cannot read its CPU affinity ({e}) -- it \
-                     may share the Dante device's reserved CPUs {reserved:?}"
+                    "intercom-hub: {MIX_THREAD_NAME}: cannot read its CPU affinity ({e}; EINVAL \
+                     = a host past 1024 CPUs) -- it may share the Dante device's reserved CPUs {reserved:?}"
                 ),
             ))
         }
