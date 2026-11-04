@@ -730,15 +730,27 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     // missing blocks ring through the rate step, and that timing is dstack's to test, not ours.
     // Without network_rate no flow forms and not one sample arrives (range 0..0).
     let jitter = Mutex::new(input_buffers(&m));
-    let end = Instant::now() + Duration::from_secs(20);
+    let started = Instant::now();
+    let end = started + Duration::from_secs(20);
     let mut at_tone = 0usize;
+    // When the tone first came, and the off-tone samples after it: a late flow and a broken one
+    // read the same in at_tone alone.
+    let mut first_tone: Option<Duration> = None;
+    let mut off_after_first = 0usize;
     let (mut lo, mut hi) = (i16::MAX, i16::MIN);
     while at_tone < 48_000 && Instant::now() < end {
         // Drain all that is there, so the ring never overflows on a slow runner.
         while let Some(block) = ring.pop_planar(256) {
             lo = lo.min(*block[0].iter().min().unwrap());
             hi = hi.max(*block[0].iter().max().unwrap());
-            at_tone += block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
+            let hits = block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
+            if hits > 0 && first_tone.is_none() {
+                first_tone = Some(started.elapsed());
+            }
+            if first_tone.is_some() {
+                off_after_first += block[0].len() - hits;
+            }
+            at_tone += hits;
             assert!(
                 block[1].iter().all(|&s| s == 0),
                 "RX 2 is not subscribed: silent"
@@ -761,11 +773,16 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     assert_eq!((rows[1].state, rows[1].written), (None, 0), "{rows:?}");
     assert_eq!(rx.ended(), None);
     assert_eq!(tx.ended(), None);
+    // Both devices' own counts (the pump's rebootstraps / missed / overruns, the RX gaps, the TX
+    // holes), so a failure names the side that lost the tone (dstack's ask, dstack #1).
+    let (rx_status, tx_status) = (rx.status(), tx.status());
     let rx_stopped = rx.stop();
     let tx_stopped = tx.stop();
     assert!(
         at_tone >= 48_000,
-        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi})"
+        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi}, \
+         first tone at {first_tone:?}, {off_after_first} off-tone samples after it)\n\
+         hub device: {rx_status}\ntransmitter: {tx_status}"
     );
     assert!(pushed >= 1);
     assert!(matches!(rx_stopped, dlink::Stopped::Done), "{rx_stopped:?}");
