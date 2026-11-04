@@ -497,25 +497,37 @@ fn the_unit_keeps_a_writable_state_directory_for_the_device() {
     assert!(DEFAULT_STATE_FILE.starts_with("/var/lib/intercom-hub/"));
 }
 
-/// Owner rule on the rig boxes (camera-box, 4.11.2026): dsync is the only PTP owner, so the hub's
-/// dlink gets no capability to bind PTP's port 319 and its device runs on the dsync service's clock,
-/// the designed path (dlink logs "dsync's in-process follower did not start ... port 319 needs
-/// CAP_NET_BIND_SERVICE" once; that line is expected). camera-box's verify-strih item 16 fails a
-/// hub unit that grants it, so the unit grants no capability at all.
+/// The hub's Dante device follows Dante PTP in process (dlink's dsync-ptp follower), like DVS; the
+/// dsync service is only its fallback (owner, 4.11.2026, dstack#1). The follower binds UDP 319, so
+/// the unit grants CAP_NET_BIND_SERVICE: ambient, so it holds for setup-strih's non-root User=
+/// drop-in, and the only capability the hub keeps. Without it dlink logs "dsync's in-process
+/// follower did not start ... port 319 needs CAP_NET_BIND_SERVICE" and runs on the service clock.
 #[test]
-fn the_unit_gives_dlink_no_capability_for_ptp_port_319() {
+fn the_unit_lets_the_ptp_follower_bind_port_319_and_nothing_else() {
     let unit = include_str!("../../systemd/intercom-hub.service");
     let directives: Vec<&str> = unit
         .lines()
         .map(str::trim)
         .filter(|l| !l.starts_with('#'))
         .collect();
-    for d in &directives {
-        assert!(
-            !d.starts_with("AmbientCapabilities=") && !d.contains("CAP_NET_BIND_SERVICE"),
-            "dsync owns PTP on the rig: the hub unit grants no capability, found {d:?}"
-        );
-    }
+    assert!(
+        directives.contains(&"AmbientCapabilities=CAP_NET_BIND_SERVICE"),
+        "the follower binds port 319 as the unit's (non-root) user"
+    );
+    assert!(
+        directives.contains(&"CapabilityBoundingSet=CAP_NET_BIND_SERVICE"),
+        "the hub keeps no capability but the one the follower needs"
+    );
+    let grants = directives
+        .iter()
+        .filter(|d| {
+            d.starts_with("AmbientCapabilities=") || d.starts_with("CapabilityBoundingSet=")
+        })
+        .count();
+    assert_eq!(
+        grants, 2,
+        "one grant and one bounding set, nothing added elsewhere"
+    );
 }
 
 // --- one real dlink device in this process -------------------------------------------------------

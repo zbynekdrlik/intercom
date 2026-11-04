@@ -15,8 +15,8 @@ RestartSec=5
 # Journal captures the periodic `intercom-hub: status …` line (levels/underruns) a dev1 watchdog reads.
 StandardOutput=journal
 StandardError=journal
-# Production-by-default hardening: the hub needs no root (it binds only the unprivileged UDP :6980
-# + TCP panel port and reads its world-readable config), so run it as a transient dedicated user
+# Production-by-default hardening: the hub needs no root (it binds UDP :6980, the TCP panel port and,
+# through the one capability below, the PTP follower's UDP 319; it reads its world-readable config), so run it as a transient dedicated user
 # and sandbox it. These directives intentionally do NOT restrict address families / DNS, so the
 # VBAN + camN.lan resolution the live bring-up (M1b/M4) exercises is untouched.
 DynamicUser=yes
@@ -30,6 +30,14 @@ StateDirectory=intercom-hub
 # never appears here — only the file path (issue 1345 M3 follow-up).
 LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
 NoNewPrivileges=true
+# The hub's Dante device (intercom#5) follows Dante PTP in process (dlink's dsync-ptp follower), like
+# DVS; the dsync service is only its fallback (owner, 4.11.2026, dstack#1). The follower binds
+# UDP 319: without this grant dlink logs "dsync's in-process follower did not start ... port 319
+# needs CAP_NET_BIND_SERVICE" and runs on the service clock. Ambient, so it holds for the non-root
+# User= of setup-strih's drop-in; it is the hub's only capability (SCHED_FIFO and mlockall come from
+# the rlimits below, not from capabilities).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 # issue 1401 (design 5980775411): the hub's block loop runs on ONE thread, "hub-mix", at SCHED_FIFO
 # priority 10, so contention on the box no longer makes it miss ticks (a lost block on every
 # output). This grant lets that thread ask for it (sched_setscheduler on itself only; every other

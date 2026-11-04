@@ -77,13 +77,16 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
 - **Supervision:** the `dlink` thread starts the `Link`, polls `ended()` every 200 ms, restarts
   with `restart_backoff`; a start failure logs once per distinct reason. `main` stops the leg after
   the HTTP server's graceful shutdown so the device sends its goodbyes.
-- **The clock: dsync service, never the in-process follower (owner rule on the rig, 4.11.2026).**
-  dsync is the only PTP owner on the rig boxes: the hub unit grants NO capability (no
-  `AmbientCapabilities`, no `CAP_NET_BIND_SERVICE`), nft shuts 319/320, and camera-box's verify-strih
-  item 16 fails a unit that grants it. dlink's one log line "dsync's in-process follower did not
-  start ... port 319 needs CAP_NET_BIND_SERVICE" is EXPECTED, `source=Service` is the designed path.
-  dstack once suggested the capability and retracted it; a later such suggestion goes to camera-box
-  first. Pinned by `the_unit_gives_dlink_no_capability_for_ptp_port_319`.
+- **The clock: the in-process PTP follower, the dsync service only as fallback (owner, 4.11.2026
+  10:26, verbatim on dstack#1).** Every dstack device follows Dante PTP in process (dsync-ptp) like
+  DVS. The follower binds UDP 319, so the unit grants `AmbientCapabilities=CAP_NET_BIND_SERVICE`
+  (ambient: holds for setup-strih's non-root `User=`) with `CapabilityBoundingSet` of that one cap.
+  camera-box owns the box side: nft lets UDP 319/320 in, verify-strih item 16 expects the cap.
+  Healthy log: `media clock source source=Follower` (or Linked); `source=Service` plus "port 319
+  needs CAP_NET_BIND_SERVICE" means the grant or the firewall is missing. History: a rig rule
+  relayed at 10:19 the same day said the opposite; the owner's later word replaced it. A relayed
+  rule that contradicts a verbatim owner decision: find the decision's ticket before changing the
+  unit. Pinned by `the_unit_lets_the_ptp_follower_bind_port_319_and_nothing_else`.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
   latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The
