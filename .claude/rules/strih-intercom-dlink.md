@@ -9,15 +9,15 @@ paths:
 # The hub's own Dante device: dstack `dlink` in process (intercom#5)
 
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
-no relaying between apps. The embeddable part is dstack's `dlink` crate: a 10 ms budget (the whole
-path each way), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
+no relaying between apps. The embeddable part is dstack's `dlink` crate: dlink's default budget, 15 ms since v0.6.28
+(the whole path each way; owner 4.11.2026: robustness over low latency), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
 capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
 
 - **Config:** the optional `[dlink]` table (`dlink_leg::DlinkConfig`, `deny_unknown_fields`):
-  `name`, `iface`, `rx` (channel names), `latency_ms` (10: since dlink v0.6.22 the BUDGET, the
+  `name`, `iface`, `rx` (channel names), `latency_ms` (default `dlink::BUDGET_NS`, 15 ms; since dlink v0.6.22 the BUDGET, the
   whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, dlink's crate docs have
   the table of splits; `/api/state` `latency_ms` is that budget), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or

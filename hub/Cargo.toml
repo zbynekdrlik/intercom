@@ -73,7 +73,7 @@ tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 # The hub's own Dante device (intercom#5): dstack's `dlink`, the owner-ruled embedding for apps
-# (dstack#20, dstack#68): a 10 ms budget each way, normal priority, Dante PTP followed in process
+# (dstack#20, dstack#68): dlink's default budget each way (15 ms since v0.6.28), normal priority, Dante PTP followed in process
 # (the dsync service as fallback, dstack#1). Pinned by tag.
 dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.28" }
 

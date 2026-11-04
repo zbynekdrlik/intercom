@@ -198,13 +198,13 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
     assert_eq!(d.rx, vec!["FOH L", "FOH R", "Click"]);
     assert_eq!(d.latency_ms, DEFAULT_LATENCY_MS);
     assert_eq!(d.state_file.to_str(), Some(DEFAULT_STATE_FILE));
-    // dlink's own device config builds from it: a 10 ms budget, 48 kHz, the three RX names. Since
-    // dlink v0.6.22 the 10 ms is the whole path; the Dante latency is the split's share of it.
+    // dlink's own device config builds from it: dlink's default budget, 48 kHz, the three RX
+    // names. Since dlink v0.6.22 the budget is the whole path; the Dante latency is the split's share of it.
     let c = d.link_config(48_000);
     let split = c.split().unwrap();
     let dev = c.device().unwrap();
     assert_eq!(dev.latency_ns, split.latency_ns);
-    assert!(dev.latency_ns < 10_000_000 && dev.latency_ns >= dlink::MIN_LATENCY_NS);
+    assert!(dev.latency_ns < dlink::BUDGET_NS && dev.latency_ns >= dlink::MIN_LATENCY_NS);
     assert_eq!(dev.rx.len(), 3);
     assert!(dev.tx.is_empty());
 }
@@ -305,7 +305,7 @@ fn the_dlink_facet_is_on_the_dlink_participant_only() {
     let d = &p[1]["dlink"];
     assert_eq!(d["device"], "strih-snv-intercom");
     assert_eq!(d["iface"], "enp7s0.70");
-    assert_eq!(d["latency_ms"], 10);
+    assert_eq!(d["latency_ms"], DEFAULT_LATENCY_MS);
     assert_eq!(d["rx_channels"], 3);
     assert_eq!(d["running"], true);
     assert_eq!(d["starts"], 2);
