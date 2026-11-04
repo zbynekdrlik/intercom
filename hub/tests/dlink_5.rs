@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use dlink::Process;
 use intercom_hub::dlink_leg::{
     drain_blocks, rx_facets, spawn_dlink, to_i16, DlinkFacet, DlinkLegConfig, DlinkRxFacet,
-    DlinkStats, RxEvent, RxProcessor, RxWatch, SampleRing, DEFAULT_LATENCY_MS, DEFAULT_STATE_FILE,
+    DlinkStats, RxEvent, RxProcessor, RxWatch, SampleRing, DEFAULT_STATE_FILE,
 };
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::matrix::{Matrix, ADAPTER_DLINK};
