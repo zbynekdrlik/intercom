@@ -115,3 +115,8 @@ Both `dlink` and the `dstack` dev-dependency move together in `hub/Cargo.toml`; 
 `cargo update -p dstack`. A Dante need or bug goes to dstack over peer; intercom only moves the tag.
 Read dstack's CHANGELOG between the two tags first: a `Port:` line names an API that moved
 (v0.6.22: `Config::latency_ns` gone, `budget_ns` replaces it) and a test that pinned the old value.
+Then run the 96k test under CPU contention before pushing: CI's Coverage runner is slow enough to
+expose a pump-margin regression a quiet dev box hides (v0.6.22/v0.6.23 shrank W and lost blocks;
+fixed in v0.6.24). Recipe: pin the test and two shell busy loops (`while :; do :; done`, killed by
+PID, never `pkill -f`) to one core with `taskset -c 0`, then
+`taskset -c 0 cargo test -p intercom-hub --test dlink_5 a_96k_transmitter`, three times.
