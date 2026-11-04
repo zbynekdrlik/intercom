@@ -121,8 +121,8 @@ fixed in v0.6.24). Recipe: pin the test and two shell busy loops (`while :; do :
 PID, never `pkill -f`) to one core with `taskset -c 0`, then
 `taskset -c 0 cargo test -p intercom-hub --test dlink_5 a_96k_transmitter`, three times.
 A failure prints both devices' `Link::status()` JSON: read `engine` (`overruns`, `rebootstraps`,
-`missed`, `max_process_us`), `rx[].gaps` and `tx[].holes` to tell which side lost the tone.
-**Keep `[profile.dev.package.rubato] opt-level = 3`** in the workspace `Cargo.toml`: unoptimised,
+`missed`, `max_process_us`), `rx[].gaps` and `tx[].holes` to tell which side lost the tone. Since v0.6.25 the journal also carries a 1/s WARN `engine pump lost or overran blocks this second` (deltas, `max_process_us`, B/W/P/offset): a tone gap in that second is the pump, one without it is the flow.
+**Keep `[profile.dev.package.rubato]` and `[profile.dev.package.dstack-resample]` at `opt-level = 3`** in the workspace `Cargo.toml` (dlink docs, v0.6.25): unoptimised,
 rubato (dlink's converter, under dstack-resample) took 2.3-3.3 ms per 1.33 ms 96 kHz block, so every
 debug/llvm-cov block overran and the pump kept restarting (4.11.2026; dstack and dlink at opt 3 did
 not help, rubato alone did). Release builds read 0 overruns either way.

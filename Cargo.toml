@@ -18,7 +18,11 @@ version = "1.9.13"
 # period: every block overran, the pump restarted its schedule and lost blocks (intercom#5,
 # 4.11.2026). With rubato at opt-level 3 the same debug build reads 0 overruns, max 141 us. The
 # release build is unaffected (it already reads 0 overruns, max 66 us).
+# dstack-resample too, as dlink's crate docs ask ("Debug builds with a rate converter", v0.6.25).
 [profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.dstack-resample]
 opt-level = 3
 
 # The same release profile the hub was built with inside the camera-box workspace.
