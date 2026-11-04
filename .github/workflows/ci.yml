@@ -153,6 +153,9 @@ jobs:
     # double. Chromium at a phone viewport, and WebKit (the iPhone engine) for the service-worker
     # picture specs (issue 1379). Every test asserts an empty browser console.
     runs-on: ubuntu-24.04
+    # A bound, not a band-aid: the whole job takes 2-3 min. On 4.11.2026 `playwright install
+    # --with-deps` hung 40 min on a GitHub runner with no limit (the default is 6 h).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
