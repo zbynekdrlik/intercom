@@ -39,8 +39,14 @@ fn the_removed_cpu_keys_fail_the_load() {
 
 #[test]
 fn the_hub_s_10_ms_budget_still_splits_at_96_to_48() {
+    // The hub sets its own budget (`latency_ms`, 10), so v0.6.28's 15 ms default does not apply.
     let d = load("").unwrap().dlink.unwrap();
-    let split = d.link_config(48_000).split().unwrap();
-    eprintln!("{split:?}");
+    let c = d.link_config(48_000);
+    assert_eq!((c.device_rate(), c.converts()), (96_000, true));
+    assert_eq!(c.directions(), dlink::Directions::Rx);
+    let split = c.split().unwrap();
+    // RX-only: the RX path is the budget; the TX path is never run, so it may pass it (dlink docs).
     assert!(split.rx_path_ns <= 10_000_000, "{split:?}");
+    assert!(split.latency_ns >= dlink::MIN_LATENCY_NS, "{split:?}");
+    assert_eq!(split.margin, 384, "W: 2/5 of 10 ms at 96 kHz, {split:?}");
 }
