@@ -2,8 +2,6 @@
 paths:
   - "hub/src/dlink_leg.rs"
   - "hub/tests/dlink_5.rs"
-  - "hub/tests/dlink_cpus_5.rs"
-  - "hub/src/mix_thread.rs"
   - "hub/src/inputs.rs"
   - "intercom.strih-snv.toml"
 ---
@@ -92,18 +90,11 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   relayed at 10:19 the same day said the opposite; the owner's later word replaced it. A relayed
   rule that contradicts a verbatim owner decision: find the decision's ticket before changing the
   unit. Pinned by `the_unit_lets_the_ptp_follower_bind_port_319_and_grants_no_other_capability`.
-- **The device's CPUs (dlink v0.6.26, camera-box#1485):** optional `[dlink] pump_cpu` / `rx_cpu`
-  pin `dstack-engine` / `dstack-rx` (unset = anywhere; `io_cpu` is not a hub key, the device is
-  RX-only). dstack's `Config::device()` refuses a CPU past `MAX_CPU` at load; a CPU the kernel
-  refuses at run time only WARNs `not pinned` from dstack. camera-box writes the value (strih-snv
-  14) from its facts and keeps nice -10 with its pinner. Live 4.11.2026: unpinned at load ~11 the
-  pump was preempted ~3.5 ms past its 3.16 ms margin (WARN ~30 / 3 min, rebootstraps missed=4/5);
-  alone on a cleared CPU 0. `hub-mix` (SCHED_FIFO 10) takes those CPUs out of ITS OWN mask before
-  its FIFO request (`DlinkConfig::reserved_cpus` -> `spawn_mix_thread(&reserved_cpus, ..)`,
-  `mix_thread::plan_affinity`): a FIFO thread on the pump's CPU preempts it. One journal line
-  `hub-mix: runs on CPUs [..], off the Dante device's reserved CPUs [..]`; a mask that would be
-  empty is kept with a WARN. Check on the box: `taskset -pc <tid>` of `hub-mix` / `dstack-engine`
-  / `dstack-rx` (`ps -L -o tid,psr,comm`). Tests: `hub/tests/dlink_cpus_5.rs`.
+- **No CPU pinning (owner, dlink v0.6.28):** dstack removed `Config::pump_cpu` / `io_cpu` /
+  `rx_cpu` ("no CPU pinning for dlink apps"); hub 1.9.14's `[dlink] pump_cpu` / `rx_cpu` keys and
+  hub-mix's reserved-CPU exclusion went with them (1.9.15), and camera-box dropped its pinner. A
+  config still naming them fails the load (`deny_unknown_fields`). Do not re-add pinning: a pump
+  losing blocks under load is a dstack matter.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
   latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The

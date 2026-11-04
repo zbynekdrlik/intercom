@@ -94,7 +94,7 @@ fn the_real_request_changes_only_the_calling_thread() {
 #[test]
 fn spawn_mix_thread_names_its_thread_and_runs_the_body_at_the_granted_class() {
     let (tx, rx) = mpsc::channel();
-    let handle = spawn_mix_thread(&[], move || {
+    let handle = spawn_mix_thread(move || {
         tx.send((
             thread::current().name().map(str::to_string),
             current_sched_class().unwrap(),
@@ -159,7 +159,7 @@ fn the_block_loop_runs_on_the_mix_thread_with_absolute_deadlines() {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     let src = std::fs::read_to_string(&p).expect("read main.rs");
     assert!(
-        src.contains("spawn_mix_thread(&reserved_cpus, move || run_block_loop(block_loop))"),
+        src.contains("spawn_mix_thread(move || run_block_loop(block_loop))"),
         "the block loop is the mix thread's body"
     );
     assert!(

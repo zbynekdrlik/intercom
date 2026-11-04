@@ -352,14 +352,7 @@ async fn main() -> Result<()> {
         live_tx,
         memory_locked: memory_lock.locked,
     };
-    // hub-mix keeps off the CPUs the Dante device's pump / RX threads are pinned to
-    // (camera-box#1485): its SCHED_FIFO there would preempt the pump past its margin.
-    let reserved_cpus = matrix
-        .dlink
-        .as_ref()
-        .map(|d| d.reserved_cpus())
-        .unwrap_or_default();
-    let mix = spawn_mix_thread(&reserved_cpus, move || run_block_loop(block_loop))
+    let mix = spawn_mix_thread(move || run_block_loop(block_loop))
         .context("spawn the hub-mix block loop thread")?;
     // The loop never returns. Should the thread end anyway (a panic), every output would go silent
     // behind a frozen /api/state: stop the daemon instead, so systemd restarts it.

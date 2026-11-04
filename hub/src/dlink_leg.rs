@@ -89,16 +89,6 @@ pub struct DlinkConfig {
     /// the hub's. strih-snv: 96000 (the FOH PC's Dante sources).
     #[serde(default)]
     pub network_rate: Option<u32>,
-    /// The CPU the device's pump thread (`dstack-engine`) runs on (dlink v0.6.26
-    /// `Config::pump_cpu`). Absent = anywhere, as before. On a loaded box an unpinned pump was
-    /// preempted past its margin and lost blocks (camera-box#1485, strih-snv: CPU 14, written by
-    /// camera-box from its facts). `hub-mix` keeps off this CPU (its SCHED_FIFO would preempt it).
-    #[serde(default)]
-    pub pump_cpu: Option<usize>,
-    /// The CPU the device's RX thread (`dstack-rx`) runs on (dlink `Config::rx_cpu`). Absent =
-    /// anywhere. `hub-mix` keeps off it too.
-    #[serde(default)]
-    pub rx_cpu: Option<usize>,
     /// Declared subscriptions (dlink v0.5.12): an RX channel the state file holds no subscription
     /// for takes its declared one at start; one Dante Controller sets is saved there and wins.
     /// Declared ones are never saved (dlink v0.5.12, the fix of intercom#5's report), so a TOML
@@ -126,15 +116,6 @@ fn default_state_file() -> PathBuf {
 
 impl DlinkConfig {
     /// The dlink config: the hub's `sample_rate` for the app, the device at `network_rate` if set.
-    /// The CPUs the device's real-time threads are pinned to (`pump_cpu`, `rx_cpu`), which the
-    /// SCHED_FIFO `hub-mix` thread must keep off. Sorted, no duplicates; empty when neither is set.
-    pub fn reserved_cpus(&self) -> Vec<usize> {
-        let mut cpus: Vec<usize> = self.pump_cpu.into_iter().chain(self.rx_cpu).collect();
-        cpus.sort_unstable();
-        cpus.dedup();
-        cpus
-    }
-
     pub fn link_config(&self, sample_rate: u32) -> dlink::Config {
         let mut c = dlink::Config::new(self.name.clone(), self.state_file.clone())
             .rx(self.rx.iter().cloned())
@@ -153,12 +134,6 @@ impl DlinkConfig {
         }
         if let Some(hz) = self.network_rate {
             c = c.network_rate(hz);
-        }
-        if let Some(cpu) = self.pump_cpu {
-            c = c.pump_cpu(cpu);
-        }
-        if let Some(cpu) = self.rx_cpu {
-            c = c.rx_cpu(cpu);
         }
         for sub in &self.subscribe {
             // An unknown name is listed by `problems`, so a loaded table never reaches here with one.
