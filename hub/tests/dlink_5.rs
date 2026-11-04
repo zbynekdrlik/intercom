@@ -196,7 +196,7 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
     assert_eq!(d.name, "strih-snv-intercom");
     assert_eq!(d.iface, "enp7s0.70");
     assert_eq!(d.rx, vec!["FOH L", "FOH R", "Click"]);
-    assert_eq!(d.latency_ms, DEFAULT_LATENCY_MS);
+    assert_eq!(d.latency_ms, 15, "dlink's default budget, owner 4.11.2026");
     assert_eq!(d.state_file.to_str(), Some(DEFAULT_STATE_FILE));
     // dlink's own device config builds from it: dlink's default budget, 48 kHz, the three RX
     // names. Since dlink v0.6.22 the budget is the whole path; the Dante latency is the split's share of it.
@@ -305,7 +305,7 @@ fn the_dlink_facet_is_on_the_dlink_participant_only() {
     let d = &p[1]["dlink"];
     assert_eq!(d["device"], "strih-snv-intercom");
     assert_eq!(d["iface"], "enp7s0.70");
-    assert_eq!(d["latency_ms"], DEFAULT_LATENCY_MS);
+    assert_eq!(d["latency_ms"], 15);
     assert_eq!(d["rx_channels"], 3);
     assert_eq!(d["running"], true);
     assert_eq!(d["starts"], 2);
