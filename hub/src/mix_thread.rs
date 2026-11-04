@@ -27,6 +27,12 @@
 //!   would make a later allocation fail, [`memlock_limit_check`]): ONE warning naming the reason,
 //!   the hub runs unlocked as before, and `/api/state` reads `memory_locked: false`.
 //!
+//! - **Off the Dante device's reserved CPUs** (camera-box#1485, dlink v0.6.26). When `[dlink]` pins
+//!   the device's pump / RX thread (`pump_cpu`, `rx_cpu`), this thread takes those CPUs out of its
+//!   own affinity BEFORE it asks for SCHED_FIFO ([`plan_affinity`], [`keep_off_cpus`]): a FIFO
+//!   thread on the pump's CPU preempts the pump past its margin. Only this thread's mask changes
+//!   (`sched_setaffinity(0, ..)`); if nothing would be left it keeps its mask and warns.
+//!
 //! The rtprio-off rule of the OBS boxes (issue 1357) is about OBS's render tick and the NDI threads
 //! that inherited its SCHED_FIFO. It does not apply here: the hub is not OBS, this one thread
 //! creates no threads, and it sleeps between blocks, so it can never hold a core.
@@ -236,16 +242,142 @@ pub fn apply_memory_lock(lock: impl FnOnce() -> io::Result<()>) -> MemoryLock {
     }
 }
 
-/// Start the mix thread: name it [`MIX_THREAD_NAME`], ask for SCHED_FIFO [`MIX_RT_PRIORITY`] on it
-/// (one warning and SCHED_OTHER when refused), pre-fault its stack ([`prefault_stack`]), then run
-/// `body` on it.
-pub fn spawn_mix_thread<F>(body: F) -> io::Result<thread::JoinHandle<()>>
+/// What the mix thread does with its CPU affinity, given the CPUs it may run on and the ones the
+/// Dante device reserves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AffinityPlan {
+    /// No reserved CPU is in the mask (or none is reserved): leave it.
+    Unchanged,
+    /// Run on exactly these CPUs (the mask minus the reserved ones, ascending).
+    Narrow(Vec<usize>),
+    /// Every allowed CPU is reserved: keep the mask (a thread needs a CPU) and warn.
+    AllReserved,
+}
+
+/// The pure decision of [`keep_off_cpus`].
+pub fn plan_affinity(allowed: &[usize], reserved: &[usize]) -> AffinityPlan {
+    if !allowed.iter().any(|c| reserved.contains(c)) {
+        return AffinityPlan::Unchanged;
+    }
+    let mut rest: Vec<usize> = allowed
+        .iter()
+        .copied()
+        .filter(|c| !reserved.contains(c))
+        .collect();
+    rest.sort_unstable();
+    rest.dedup();
+    if rest.is_empty() {
+        AffinityPlan::AllReserved
+    } else {
+        AffinityPlan::Narrow(rest)
+    }
+}
+
+/// The CPUs the CALLING thread may run on (`sched_getaffinity(0, ..)`), ascending.
+pub fn current_affinity() -> io::Result<Vec<usize>> {
+    // SAFETY: an all-zero cpu_set_t is a valid empty set; the call writes inside it; pid 0 = the
+    // calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((0..libc::CPU_SETSIZE as usize)
+            .filter(|&c| libc::CPU_ISSET(c, &set))
+            .collect())
+    }
+}
+
+/// Run the CALLING thread on exactly `cpus` (`sched_setaffinity(0, ..)`, never the process).
+pub fn set_affinity(cpus: &[usize]) -> io::Result<()> {
+    // SAFETY: as above; CPU_SET only writes inside the set for a CPU below CPU_SETSIZE, which
+    // the filter guarantees.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for &c in cpus.iter().filter(|&&c| c < libc::CPU_SETSIZE as usize) {
+            libc::CPU_SET(c, &mut set);
+        }
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// Take `reserved` out of the calling thread's affinity through `get` / `set` ([`plan_affinity`]);
+/// returns the ONE line to log and whether it is a warning. `None` when nothing is reserved.
+pub fn keep_off_cpus(
+    reserved: &[usize],
+    get: impl FnOnce() -> io::Result<Vec<usize>>,
+    set: impl FnOnce(&[usize]) -> io::Result<()>,
+) -> Option<(bool, String)> {
+    if reserved.is_empty() {
+        return None;
+    }
+    let allowed = match get() {
+        Ok(a) => a,
+        Err(e) => {
+            return Some((
+                true,
+                format!(
+                    "intercom-hub: {MIX_THREAD_NAME}: cannot read its CPU affinity ({e}; EINVAL \
+                     = a host past 1024 CPUs) -- it may share the Dante device's reserved CPUs {reserved:?}"
+                ),
+            ))
+        }
+    };
+    Some(match plan_affinity(&allowed, reserved) {
+        AffinityPlan::Unchanged => (
+            false,
+            format!(
+                "intercom-hub: {MIX_THREAD_NAME}: the Dante device's reserved CPUs {reserved:?} \
+                 are outside its CPUs {allowed:?}"
+            ),
+        ),
+        AffinityPlan::Narrow(rest) => match set(&rest) {
+            Ok(()) => (
+                false,
+                format!(
+                    "intercom-hub: {MIX_THREAD_NAME}: runs on CPUs {rest:?}, off the Dante \
+                     device's reserved CPUs {reserved:?}"
+                ),
+            ),
+            Err(e) => (
+                true,
+                format!(
+                    "intercom-hub: {MIX_THREAD_NAME}: keeping off the Dante device's reserved \
+                     CPUs {reserved:?} refused ({e}) -- its SCHED_FIFO can preempt the pump"
+                ),
+            ),
+        },
+        AffinityPlan::AllReserved => (
+            true,
+            format!(
+                "intercom-hub: {MIX_THREAD_NAME}: every CPU it may use {allowed:?} is reserved \
+                 for the Dante device {reserved:?} -- it keeps them, and its SCHED_FIFO can \
+                 preempt the pump"
+            ),
+        ),
+    })
+}
+
+/// Start the mix thread: name it [`MIX_THREAD_NAME`], take the Dante device's `reserved` CPUs out
+/// of its affinity ([`keep_off_cpus`]), ask for SCHED_FIFO [`MIX_RT_PRIORITY`] on it (one warning
+/// and SCHED_OTHER when refused), pre-fault its stack ([`prefault_stack`]), then run `body` on it.
+pub fn spawn_mix_thread<F>(reserved: &[usize], body: F) -> io::Result<thread::JoinHandle<()>>
 where
     F: FnOnce() + Send + 'static,
 {
+    let reserved = reserved.to_vec();
     thread::Builder::new()
         .name(MIX_THREAD_NAME.into())
         .spawn(move || {
+            match keep_off_cpus(&reserved, current_affinity, set_affinity) {
+                Some((true, line)) => tracing::warn!("{line}"),
+                Some((false, line)) => tracing::info!("{line}"),
+                None => {}
+            }
             match apply_realtime(set_realtime_fifo) {
                 (_, Some(warning)) => tracing::warn!("{warning}"),
                 (class, None) => tracing::info!(

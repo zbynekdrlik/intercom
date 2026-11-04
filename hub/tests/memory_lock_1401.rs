@@ -133,7 +133,7 @@ fn main_locks_the_memory_before_it_spawns_the_hub_mix_thread() {
         .find("apply_memory_lock(lock_all_memory)")
         .expect("main asks for the memory lock");
     let spawn = src
-        .find("spawn_mix_thread(move || run_block_loop(block_loop))")
+        .find("spawn_mix_thread(&reserved_cpus, move || run_block_loop(block_loop))")
         .expect("the hub-mix spawn");
     assert!(lock < spawn, "the memory is locked before hub-mix starts");
     // Locked before the live channel is seeded, so /api/state never omits the field (review 1).
