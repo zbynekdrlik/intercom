@@ -9,15 +9,17 @@ paths:
 # The hub's own Dante device: dstack `dlink` in process (intercom#5)
 
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
-no relaying between apps. The embeddable part is dstack's `dlink` crate: 10 ms latency, normal
-priority, no pinning, dantesync as the media clock (a loopback UDP poll, works under the unit's
-sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
+no relaying between apps. The embeddable part is dstack's `dlink` crate: a 10 ms budget (the whole
+path each way), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
+capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
 
 - **Config:** the optional `[dlink]` table (`dlink_leg::DlinkConfig`, `deny_unknown_fields`):
-  `name`, `iface`, `rx` (channel names), `latency_ms` (10), `state_file`
+  `name`, `iface`, `rx` (channel names), `latency_ms` (10: since dlink v0.6.22 the BUDGET, the
+  whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, dlink's crate docs have
+  the table of splits; `/api/state` `latency_ms` is that budget), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
   none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
@@ -77,6 +79,17 @@ sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since
 - **Supervision:** the `dlink` thread starts the `Link`, polls `ended()` every 200 ms, restarts
   with `restart_backoff`; a start failure logs once per distinct reason. `main` stops the leg after
   the HTTP server's graceful shutdown so the device sends its goodbyes.
+- **The clock: the in-process PTP follower, the dsync service only as fallback (owner, 4.11.2026
+  10:26, verbatim on dstack#1).** Every dstack device follows Dante PTP in process (dsync-ptp) like
+  DVS. The follower binds UDP 319, so the unit grants `AmbientCapabilities=CAP_NET_BIND_SERVICE`
+  (ambient: holds for setup-strih's non-root `User=`) with `CapabilityBoundingSet` of that one cap.
+  camera-box owns the box side: nft lets UDP 319/320 in, verify-strih item 16 expects the cap.
+  Healthy log: the LAST dstack `media clock source` line reads `source=Internal` (dsync-ptp; camera-box
+  verify item 16 grades it); `source=Service` plus "port 319
+  needs CAP_NET_BIND_SERVICE" means the grant or the firewall is missing. History: a rig rule
+  relayed at 10:19 the same day said the opposite; the owner's later word replaced it. A relayed
+  rule that contradicts a verbatim owner decision: find the decision's ticket before changing the
+  unit. Pinned by `the_unit_lets_the_ptp_follower_bind_port_319_and_grants_no_other_capability`.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
   latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The
@@ -100,3 +113,16 @@ as a dev-dependency at the SAME tag as `dlink` (one dstack in the lockfile).
 
 Both `dlink` and the `dstack` dev-dependency move together in `hub/Cargo.toml`; then
 `cargo update -p dstack`. A Dante need or bug goes to dstack over peer; intercom only moves the tag.
+Read dstack's CHANGELOG between the two tags first: a `Port:` line names an API that moved
+(v0.6.22: `Config::latency_ns` gone, `budget_ns` replaces it) and a test that pinned the old value.
+Then run the 96k test under CPU contention before pushing: CI's Coverage runner is slow enough to
+expose a pump-margin regression a quiet dev box hides (v0.6.22/v0.6.23 shrank W and lost blocks;
+fixed in v0.6.24). Recipe: pin the test and two shell busy loops (`while :; do :; done`, killed by
+PID, never `pkill -f`) to one core with `taskset -c 0`, then
+`taskset -c 0 cargo test -p intercom-hub --test dlink_5 a_96k_transmitter`, three times.
+A failure prints both devices' `Link::status()` JSON: read `engine` (`overruns`, `rebootstraps`,
+`missed`, `max_process_us`), `rx[].gaps` and `tx[].holes` to tell which side lost the tone.
+**Keep `[profile.dev.package.rubato] opt-level = 3`** in the workspace `Cargo.toml`: unoptimised,
+rubato (dlink's converter, under dstack-resample) took 2.3-3.3 ms per 1.33 ms 96 kHz block, so every
+debug/llvm-cov block overran and the pump kept restarting (4.11.2026; dstack and dlink at opt 3 did
+not help, rubato alone did). Release builds read 0 overruns either way.

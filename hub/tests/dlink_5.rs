@@ -198,9 +198,13 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
     assert_eq!(d.rx, vec!["FOH L", "FOH R", "Click"]);
     assert_eq!(d.latency_ms, DEFAULT_LATENCY_MS);
     assert_eq!(d.state_file.to_str(), Some(DEFAULT_STATE_FILE));
-    // dlink's own device config builds from it: 10 ms, 48 kHz, the three RX names.
-    let dev = d.link_config(48_000).device().unwrap();
-    assert_eq!(dev.latency_ns, 10_000_000);
+    // dlink's own device config builds from it: a 10 ms budget, 48 kHz, the three RX names. Since
+    // dlink v0.6.22 the 10 ms is the whole path; the Dante latency is the split's share of it.
+    let c = d.link_config(48_000);
+    let split = c.split().unwrap();
+    let dev = c.device().unwrap();
+    assert_eq!(dev.latency_ns, split.latency_ns);
+    assert!(dev.latency_ns < 10_000_000 && dev.latency_ns >= dlink::MIN_LATENCY_NS);
     assert_eq!(dev.rx.len(), 3);
     assert!(dev.tx.is_empty());
 }
@@ -497,6 +501,39 @@ fn the_unit_keeps_a_writable_state_directory_for_the_device() {
     assert!(DEFAULT_STATE_FILE.starts_with("/var/lib/intercom-hub/"));
 }
 
+/// The hub's Dante device follows Dante PTP in process (dlink's dsync-ptp follower), like DVS; the
+/// dsync service is only its fallback (owner, 4.11.2026, dstack#1). The follower binds UDP 319, so
+/// the unit grants CAP_NET_BIND_SERVICE: ambient, so it holds for setup-strih's non-root User=
+/// drop-in, and the only capability the hub keeps. Without it dlink logs "dsync's in-process
+/// follower did not start ... port 319 needs CAP_NET_BIND_SERVICE" and runs on the service clock.
+#[test]
+fn the_unit_lets_the_ptp_follower_bind_port_319_and_grants_no_other_capability() {
+    let unit = include_str!("../../systemd/intercom-hub.service");
+    let directives: Vec<&str> = unit
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    assert!(
+        directives.contains(&"AmbientCapabilities=CAP_NET_BIND_SERVICE"),
+        "the follower binds port 319 as the unit's (non-root) user"
+    );
+    assert!(
+        directives.contains(&"CapabilityBoundingSet=CAP_NET_BIND_SERVICE"),
+        "the hub keeps no capability but the one the follower needs"
+    );
+    let grants = directives
+        .iter()
+        .filter(|d| {
+            d.starts_with("AmbientCapabilities=") || d.starts_with("CapabilityBoundingSet=")
+        })
+        .count();
+    assert_eq!(
+        grants, 2,
+        "one grant and one bounding set, nothing added elsewhere"
+    );
+}
+
 // --- one real dlink device in this process -------------------------------------------------------
 
 /// The box's IPv4 address on its default route (connecting a UDP socket sends nothing).
@@ -693,15 +730,27 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     // missing blocks ring through the rate step, and that timing is dstack's to test, not ours.
     // Without network_rate no flow forms and not one sample arrives (range 0..0).
     let jitter = Mutex::new(input_buffers(&m));
-    let end = Instant::now() + Duration::from_secs(20);
+    let started = Instant::now();
+    let end = started + Duration::from_secs(20);
     let mut at_tone = 0usize;
+    // When the tone first came, and the off-tone samples after it: a late flow and a broken one
+    // read the same in at_tone alone.
+    let mut first_tone: Option<Duration> = None;
+    let mut off_after_first = 0usize;
     let (mut lo, mut hi) = (i16::MAX, i16::MIN);
     while at_tone < 48_000 && Instant::now() < end {
         // Drain all that is there, so the ring never overflows on a slow runner.
         while let Some(block) = ring.pop_planar(256) {
             lo = lo.min(*block[0].iter().min().unwrap());
             hi = hi.max(*block[0].iter().max().unwrap());
-            at_tone += block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
+            let hits = block[0].iter().filter(|&&s| s.abs_diff(16384) <= 8).count();
+            if hits > 0 && first_tone.is_none() {
+                first_tone = Some(started.elapsed());
+            }
+            if first_tone.is_some() {
+                off_after_first += block[0].len() - hits;
+            }
+            at_tone += hits;
             assert!(
                 block[1].iter().all(|&s| s == 0),
                 "RX 2 is not subscribed: silent"
@@ -724,11 +773,16 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     assert_eq!((rows[1].state, rows[1].written), (None, 0), "{rows:?}");
     assert_eq!(rx.ended(), None);
     assert_eq!(tx.ended(), None);
+    // Both devices' own counts (the pump's rebootstraps / missed / overruns, the RX gaps, the TX
+    // holes), so a failure names the side that lost the tone (dstack's ask, dstack #1).
+    let (rx_status, tx_status) = (rx.status(), tx.status());
     let rx_stopped = rx.stop();
     let tx_stopped = tx.stop();
     assert!(
         at_tone >= 48_000,
-        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi})"
+        "a second of the 96 kHz tone at 16384 in the hub's 48 kHz (got {at_tone}, range {lo}..{hi}, \
+         first tone at {first_tone:?}, {off_after_first} off-tone samples after it)\n\
+         hub device: {rx_status}\ntransmitter: {tx_status}"
     );
     assert!(pushed >= 1);
     assert!(matches!(rx_stopped, dlink::Stopped::Done), "{rx_stopped:?}");

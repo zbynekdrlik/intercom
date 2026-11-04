@@ -11,7 +11,15 @@ members = ["vban", "hub"]
 resolver = "2"
 
 [workspace.package]
-version = "1.9.11"
+version = "1.9.12"
+
+# The dlink device's rate converter (dstack-resample -> rubato) runs on its real-time pump. Built
+# unoptimised (cargo test, CI's llvm-cov) a 96 -> 48 kHz block took 2.3-3.3 ms against its 1.33 ms
+# period: every block overran, the pump restarted its schedule and lost blocks (intercom#5,
+# 4.11.2026). With rubato at opt-level 3 the same debug build reads 0 overruns, max 141 us. The
+# release build is unaffected (it already reads 0 overruns, max 66 us).
+[profile.dev.package.rubato]
+opt-level = 3
 
 # The same release profile the hub was built with inside the camera-box workspace.
 [profile.release]
