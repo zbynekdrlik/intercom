@@ -59,8 +59,13 @@ fn the_hub_takes_dlink_s_15_ms_default_budget_at_96_to_48() {
         "P, as dstack computed it: {split:?}"
     );
     assert_eq!(
-        split.margin, 576,
-        "W: 2/5 of 15 ms at 96 kHz = 6 ms, {split:?}"
+        split.margin, 1440,
+        "W: an RX-only device's is the whole 15 ms at 96 kHz (dlink v0.6.32), {split:?}"
+    );
+    assert_eq!(
+        split.margin,
+        dlink::rx_work_margin(dlink::BUDGET_NS, 96_000, dlink::BLOCK),
+        "W is dlink's RX-only margin, {split:?}"
     );
     assert!(
         split.margin * 1_000_000_000 / 96_000 > 3_600_000,

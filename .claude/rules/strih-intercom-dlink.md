@@ -95,6 +95,10 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   hub-mix's reserved-CPU exclusion went with them (1.9.15), and camera-box dropped its pinner. A
   config still naming them fails the load (`deny_unknown_fields`). Do not re-add pinning: a pump
   losing blocks under load is a dstack matter.
+- **W of an RX-only device = the whole budget (dlink v0.6.32):** the hub is RX-only, so its pump
+  margin is `dlink::rx_work_margin` (1440 samples at 96 kHz, 15 ms), not 2/5 of the budget (576);
+  P (13041666 ns) and the RX path are unchanged. A late pump catches up instead of re-bootstrapping.
+  The pump WARN's `max_process_us` is that second's max.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
   latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The

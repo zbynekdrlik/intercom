@@ -36,8 +36,9 @@ use crate::vban_io::{DecodedAudio, JitterBuffer};
 /// The latency budget unless the TOML sets one: dlink's own default (`dlink::BUDGET_NS`, 15 ms since
 /// v0.6.28), the hub's whole path each way, the work and the Dante latency together; dlink splits it
 /// (dstack#68, dlink v0.6.22). Owner 4.11.2026 (dstack#1): robustness over low latency for dlink
-/// apps, and no CPU pinning, so the pump's margin W (2/5, 6 ms) has to absorb a loaded box's
-/// multi-ms preemption (strih-snv at load ~11: 2.7-3.6 ms, which the old 10 ms / W 4 ms barely held).
+/// apps, and no CPU pinning, so the pump's margin W has to absorb a loaded box's multi-ms preemption
+/// (strih-snv at load ~11: 2.7-3.6 ms, which the old 10 ms / W 4 ms barely held). The hub is
+/// RX-only, so since v0.6.32 W is the whole budget (`dlink::rx_work_margin`, 15 ms), not 2/5 of it.
 pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
 /// Where the device keeps what Dante Controller sets (its name, subscriptions, latency) unless the
 /// TOML says otherwise: the unit's `StateDirectory=intercom-hub`.
