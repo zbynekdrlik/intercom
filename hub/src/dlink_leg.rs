@@ -3,8 +3,8 @@
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
 //! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
 //! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. dstack owns
-//! the protocol, the subscriptions (kept in `state_file`), the 10 ms budget (the whole path each
-//! way, split by dlink) at normal priority and the media clock: Dante PTP followed in process,
+//! the protocol, the subscriptions (kept in `state_file`), dlink's default 15 ms budget (the whole
+//! path each way, split by dlink) at normal priority and the media clock: Dante PTP followed in process,
 //! the dsync service as fallback (dstack#20, dstack#68, dstack#1). The hub only declares its wanted
 //! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
 //!
@@ -33,14 +33,17 @@ use serde::{Deserialize, Serialize};
 use crate::local_audio::restart_backoff;
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
-/// The latency budget unless the TOML sets one: dlink's 10 ms, the hub's whole path each way, the
-/// work and the Dante latency together; dlink splits it (owner 3.11.2026, dstack#68, dlink v0.6.22).
-pub const DEFAULT_LATENCY_MS: u32 = 10;
+/// The latency budget unless the TOML sets one: dlink's own default (`dlink::BUDGET_NS`, 15 ms since
+/// v0.6.28), the hub's whole path each way, the work and the Dante latency together; dlink splits it
+/// (dstack#68, dlink v0.6.22). Owner 4.11.2026 (dstack#1): robustness over low latency for dlink
+/// apps, and no CPU pinning, so the pump's margin W (2/5, 6 ms) has to absorb a loaded box's
+/// multi-ms preemption (strih-snv at load ~11: 2.7-3.6 ms, which the old 10 ms / W 4 ms barely held).
+pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
 /// Where the device keeps what Dante Controller sets (its name, subscriptions, latency) unless the
 /// TOML says otherwise: the unit's `StateDirectory=intercom-hub`.
 pub const DEFAULT_STATE_FILE: &str = "/var/lib/intercom-hub/dlink.toml";
 /// The ring between the pump and the `dlink-rx` thread, in frames: 16 hub blocks (85 ms), far more
-/// than the whole 10 ms budget (the Dante latency is less) plus a stalled `dlink-rx` wake.
+/// than the whole 15 ms budget (the Dante latency is less) plus a stalled `dlink-rx` wake.
 pub const RING_FRAMES: usize = 4096;
 /// How often `dlink-rx` looks at the ring when it holds less than a block: well under one block.
 pub const DRAIN_INTERVAL: Duration = Duration::from_millis(1);
