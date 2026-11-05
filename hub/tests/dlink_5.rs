@@ -1058,3 +1058,38 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
     // The declared ones hold on the channels nobody subscribed in Dante Controller.
     assert!(state.subscriptions[0].is_some() && state.subscriptions[1].is_some());
 }
+
+// --- the RX flow ports stay out of Linux's ephemeral range (dstack finding 5.11.2026) ------------
+
+/// Linux's default `net.ipv4.ip_local_port_range`: ports the kernel numbers an unbound socket from.
+const EPHEMERAL: std::ops::RangeInclusive<u32> = 32_768..=60_999;
+/// dstack binds one RX flow port per flow from `rx_port_base`.
+const RX_FLOW_PORTS: u32 = 32;
+
+#[test]
+fn every_deployed_device_s_rx_flow_ports_sit_below_the_ephemeral_range() {
+    // camera-box 5.11.2026: OBS's device on strih-snv failed to start with "RX flow port 47217:
+    // Address already in use", taken by a socket the OS numbered itself. A fixed port inside the
+    // ephemeral range can be taken the same way by any socket, so the device never starts.
+    for (name, toml) in [
+        ("strih-snv", include_str!("../../intercom.strih-snv.toml")),
+        ("strih-pp", include_str!("../../intercom.strih-pp.toml")),
+        ("stream-snv", include_str!("../../intercom.stream-snv.toml")),
+        ("stream-pp", include_str!("../../intercom.stream-pp.toml")),
+    ] {
+        let Some(d) = Matrix::from_toml(toml).unwrap().dlink else {
+            assert_ne!(name, "strih-snv", "strih-snv runs the hub's Dante device");
+            continue;
+        };
+        let Some(base) = d.link_config(48_000).device().unwrap().rx_port_base else {
+            panic!(
+                "{name}: a deployed device declares its RX flow ports (strih-snv has two devices)"
+            );
+        };
+        let ports = u32::from(base)..u32::from(base) + RX_FLOW_PORTS;
+        assert!(
+            ports.end <= *EPHEMERAL.start(),
+            "{name}: RX flow ports {ports:?} reach into the ephemeral range {EPHEMERAL:?}"
+        );
+    }
+}
