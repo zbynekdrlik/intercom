@@ -1078,6 +1078,7 @@ fn every_deployed_device_s_rx_flow_ports_sit_below_the_ephemeral_range() {
         ("stream-pp", include_str!("../../intercom.stream-pp.toml")),
     ] {
         let Some(d) = Matrix::from_toml(toml).unwrap().dlink else {
+            assert_ne!(name, "strih-snv", "strih-snv runs the hub's Dante device");
             continue;
         };
         let Some(base) = d.link_config(48_000).device().unwrap().rx_port_base else {
