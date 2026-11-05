@@ -21,7 +21,7 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, dlink's crate docs have
   the table of splits; `/api/state` `latency_ms` is that budget), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
-  none), `process_id`, `rx_port_base` (32 ports from it). `Matrix::from_toml` runs dstack's own
+  none), `process_id`, `rx_port_base` (32 ports from it; keep them below Linux's ephemeral 32768-60999, a socket the OS numbers can take one there and the device never starts: strih-snv 30100-30131, OBS 30000-30031). `Matrix::from_toml` runs dstack's own
   `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
   participant iff the table; input only, `in_channels` 1..=rx.len().
 - **Declared subscriptions** (dlink v0.5.12): `[[dlink.subscribe]]` with `rx` (our RX channel by
