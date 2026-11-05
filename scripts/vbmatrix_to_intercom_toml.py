@@ -81,8 +81,9 @@ VIDEO = {
 # and one input-only `dlink` participant. Not in the VB-Matrix: dasio sends the FOH master mix and the
 # band click/guide from the FOH PC's Ableton Dante devices. Since the cut-over (3.11.2026) it carries every
 # point fohabl had (see DANTE_REPLACES). Ports agreed with camera-box 2.11.2026: OBS's strih-obs keeps
-# Dante's defaults on the same address, the hub takes the second set; RX flows UDP 47100-47131 are
-# what camera-box's nft opens on enp7s0.70.
+# Dante's defaults on the same address, the hub takes the second set; RX flows UDP 30100-30131 are
+# what camera-box's nft opens on enp7s0.70. Below Linux's ephemeral 32768-60999 (camera-box
+# 5.11.2026): there a socket the OS numbers itself can take a port and the device never starts.
 DLINK = {
     "name": "strih-snv-intercom",
     "iface": "enp7s0.70",
@@ -94,7 +95,7 @@ DLINK = {
     "cmc_port": 8801,
     "flows_port": 4456,
     "process_id": 1,
-    "rx_port_base": 47100,
+    "rx_port_base": 30100,
     # The FOH Dante sources send at 96 kHz and a Dante flow needs both ends at one rate (dstack
     # 3.11.2026): the device runs at it, dlink v0.5.20 halves it to the hub's 48 kHz.
     "network_rate": 96000,

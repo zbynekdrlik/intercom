@@ -249,7 +249,8 @@ def test_the_dlink_device_is_declared_and_carries_fohabl_s_points():
     ]
     # Agreed with camera-box 2.11.2026: OBS's strih-obs keeps Dante's defaults on the same address.
     assert (d["arc_port"], d["cmc_port"], d["flows_port"], d["process_id"]) == (4441, 8801, 4456, 1)
-    assert d["rx_port_base"] == 47100
+    # Below Linux's ephemeral 32768-60999 (camera-box 5.11.2026), next to OBS's 30000-30031.
+    assert d["rx_port_base"] == 30100
     # The FOH Dante sources run 96 kHz; the device joins them there, dlink halves to the hub's 48 kHz.
     assert d["network_rate"] == 96000
     dl = [p for p in data["participant"] if p["adapter"] == "dlink"]
