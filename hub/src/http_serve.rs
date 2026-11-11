@@ -3,7 +3,7 @@
 //!
 //! axum 0.7's `axum::serve` has no accept hook: its per-connection `make_service` future is
 //! infallible and cannot refuse. This loop accepts itself, asks the guard about the connection's
-//! local address, and drops a refused stream before a byte is read. It serves the rest the way
+//! local and peer addresses, and drops a refused stream before a byte is read. It serves the rest the way
 //! `axum::serve` does inside: hyper-util's auto (HTTP/1 + HTTP/2) connection with upgrades (the
 //! `/ws` and `/janus` WebSocket routes) under a graceful-shutdown watcher.
 
@@ -20,12 +20,13 @@ use tokio::net::TcpListener;
 
 use crate::dante_guard::DanteGuard;
 
-/// A failed `accept` (out of file descriptors, a reset before accept) is retried after this pause,
-/// as `axum::serve` does.
+/// A failed `accept` other than a per-connection error (out of file descriptors) is retried after
+/// this pause, as `axum::serve` does; a per-connection error is retried at once.
 const ACCEPT_ERROR_PAUSE: Duration = Duration::from_secs(1);
 
 /// Serve `router` on `listener` until `shutdown` completes, then wait for the open connections to
-/// finish. A connection whose local address is on the Dante leg is closed at once and counted.
+/// finish. A connection whose local or peer address is on the Dante leg is closed at once and
+/// counted.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
@@ -39,10 +40,16 @@ pub async fn serve(
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok(a) => a,
+                Err(e) if is_connection_error(&e) => {
+                    tracing::debug!(error = ?e, "http: a connection failed before accept");
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(error = ?e, "http: accept failed, retrying in 1 s");
-                    tokio::time::sleep(ACCEPT_ERROR_PAUSE).await;
-                    continue;
+                    tokio::select! {
+                        () = tokio::time::sleep(ACCEPT_ERROR_PAUSE) => continue,
+                        () = &mut shutdown => break,
+                    }
                 }
             },
             () = &mut shutdown => break,
@@ -73,4 +80,14 @@ pub async fn serve(
     tracing::info!("http: shutting down, waiting for the open connections");
     graceful.shutdown().await;
     Ok(())
+}
+
+/// The accept errors that belong to one connection, not to the listener (axum 0.7.9's split).
+fn is_connection_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
 }

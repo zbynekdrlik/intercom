@@ -135,9 +135,7 @@ async fn main() -> Result<()> {
         .port();
     check_bind(&dante_guard, "vban_bind", vban_socket.local_addr()?)?;
     // Each datagram carries its ingress interface + destination, so a Dante one is dropped.
-    if let Err(e) = intercom_hub::pktinfo::enable(&vban_socket) {
-        tracing::warn!(bind = %matrix.hub.vban_bind, error = %e, "VBAN: no IP_PKTINFO on this socket (not IPv4?) — the Dante filter sees no ingress interface here");
-    }
+    intercom_hub::pktinfo::enable_guarded(&vban_socket, &dante_guard, "VBAN socket")?;
 
     let input_streams = matrix.vban_input_streams();
     let outputs = matrix.vban_outputs();
@@ -461,10 +459,16 @@ fn spawn_vban_receive(rx: VbanReceive) {
         let mut decode_rejects: Vec<DecodeRejects> =
             (0..n).map(|_| DecodeRejects::default()).collect();
         loop {
-            match intercom_hub::pktinfo::recv_from_with_info(&vban_socket, &mut buf).await {
-                // The Dante leg's datagrams are dropped before any parsing (intercom#25).
-                Ok((_, from, info)) if dante_guard.check_datagram(vban_port, info, from) => {}
-                Ok((len, from, _)) => match classify_packet(&input_streams, &buf[..len]) {
+            // The Dante leg's datagrams are dropped inside, before any parsing (intercom#25).
+            match intercom_hub::pktinfo::recv_admitted(
+                &vban_socket,
+                &mut buf,
+                &dante_guard,
+                vban_port,
+            )
+            .await
+            {
+                Ok((len, from)) => match classify_packet(&input_streams, &buf[..len]) {
                     RoutedPacket::Audio {
                         id,
                         audio,

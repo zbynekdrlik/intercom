@@ -6,13 +6,15 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::Interest;
 
-use crate::dante_guard::PacketInfo;
+use crate::dante_guard::{DanteGuard, PacketInfo};
 
-/// Ask the kernel to attach `IP_PKTINFO` to every datagram the socket receives. Only an IPv4
-/// socket has it; an IPv6 socket returns the error and its datagrams carry no info.
+/// Ask the kernel to attach `IP_PKTINFO` to every datagram the socket receives. The hub binds IPv4
+/// while its Dante guard is active ([`crate::dante_guard::check_bind`]); Linux also attaches it to
+/// the IPv4-mapped datagrams of a dual-stack socket, never to native IPv6 ones.
 pub fn enable(socket: &impl AsRawFd) -> io::Result<()> {
     let on: libc::c_int = 1;
     // SAFETY: a valid fd and a c_int option value of the right size.
@@ -32,7 +34,39 @@ pub fn enable(socket: &impl AsRawFd) -> io::Result<()> {
     }
 }
 
-/// `recv_from` plus the datagram's [`PacketInfo`] (None when the socket has no `IP_PKTINFO`).
+/// [`enable`] for a socket the Dante guard filters: a failure stops the caller while the guard is
+/// active (the filter would be blind), and is only a warning when there is nothing to filter.
+pub fn enable_guarded(socket: &impl AsRawFd, guard: &DanteGuard, what: &str) -> anyhow::Result<()> {
+    match enable(socket) {
+        Ok(()) => Ok(()),
+        Err(e) if guard.active() => Err(anyhow::anyhow!(
+            "{what}: IP_PKTINFO refused ({e}); the Dante filter needs it (intercom#25)"
+        )),
+        Err(e) => {
+            tracing::warn!(what, error = %e, "no IP_PKTINFO on this socket (no Dante leg to filter)");
+            Ok(())
+        }
+    }
+}
+
+/// The next datagram the Dante guard admits on `port`; the refused ones are counted and dropped
+/// here, before any caller can parse one or learn an address from it (intercom#25).
+pub async fn recv_admitted(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+    guard: &DanteGuard,
+    port: u16,
+) -> io::Result<(usize, SocketAddr)> {
+    loop {
+        let (n, from, info) = recv_from_with_info(socket, buf).await?;
+        if !guard.check_datagram(port, info, from) {
+            return Ok((n, from));
+        }
+    }
+}
+
+/// `recv_from` plus the datagram's [`PacketInfo`] (None when the socket has no `IP_PKTINFO`, or
+/// the control message was truncated).
 pub async fn recv_from_with_info(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
@@ -42,6 +76,9 @@ pub async fn recv_from_with_info(
         .async_io(Interest::READABLE, || recvmsg(fd, buf))
         .await
 }
+
+/// One warning for a truncated control message (the buffer holds `IP_PKTINFO` with room to spare).
+static CTRUNC_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Control buffer, aligned for `cmsghdr`.
 #[repr(C, align(8))]
@@ -69,7 +106,14 @@ fn recvmsg(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, Option<P
         return Err(io::Error::last_os_error());
     }
     let peer = sockaddr_to_std(&from)?;
-    let info = packet_info(&msg);
+    let info = if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        if !CTRUNC_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(%peer, "recvmsg: control message truncated, no IP_PKTINFO for this datagram (warned once)");
+        }
+        None
+    } else {
+        packet_info(&msg)
+    };
     Ok((n as usize, peer, info))
 }
 

@@ -725,8 +725,9 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         }
     };
     // Each datagram carries its ingress interface + destination, so a Dante one is dropped.
-    if let Err(e) = crate::pktinfo::enable(&socket) {
-        tracing::warn!(bind = %cfg.rtp_bind, error = %e, "janus: no IP_PKTINFO on the RTP socket (not IPv4?) — the Dante filter sees no ingress interface here");
+    if let Err(e) = crate::pktinfo::enable_guarded(&socket, &dante_guard, "janus RTP socket") {
+        tracing::error!(bind = %cfg.rtp_bind, error = %e, "janus: adapter disabled");
+        return;
     }
     let local_ip = cfg.rtp_bind.ip().to_string();
     let local_port = socket
@@ -844,13 +845,12 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         loop {
             tokio::select! {
                 // The room mix minus ourselves: decode + push to the phones jitter buffer.
-                recvd = crate::pktinfo::recv_from_with_info(&socket, &mut recv_buf) => {
+                // The Dante leg's datagrams are dropped inside, before anything else (intercom#25).
+                recvd = crate::pktinfo::recv_admitted(&socket, &mut recv_buf, &dante_guard, local_port) => {
                     match recvd {
-                        // The Dante leg's datagrams are dropped first (intercom#25).
-                        Ok((_, from, info)) if dante_guard.check_datagram(local_port, info, from) => {}
                         // Only this session's Janus endpoint: an abandoned session's leftovers or a
                         // stray datagram must not feed (or lock out) the room mix.
-                        Ok((len, from, _)) if is_session_peer(from, session.janus_rtp_addr) => {
+                        Ok((len, from)) if is_session_peer(from, session.janus_rtp_addr) => {
                             if let Some(rtp) = rtp_depacketize(&recv_buf[..len]) {
                                 if rtp.payload_type == session.payload_type && !rtp.payload.is_empty() {
                                     push_room_mix(&mut decoder, &rtp, &jitter, phones_id, &stats);

@@ -20,7 +20,8 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -122,8 +123,8 @@ pub struct PacketInfo {
 pub struct DanteNets {
     /// The dlink interface's index, when it exists.
     pub ifindex: Option<u32>,
-    /// The dlink interface's IPv4 address, when it has one.
-    pub iface_addr: Option<Ipv4Addr>,
+    /// Every IPv4 address on the dlink interface (a DHCP lease and a link-local one alike).
+    pub iface_addrs: Vec<Ipv4Addr>,
     /// Every Dante subnet: the dlink interface's own and `DANTE_SUBNET`'s.
     pub nets: Vec<Ipv4Net>,
 }
@@ -138,44 +139,76 @@ impl DanteNets {
                 None => return false,
             },
         };
-        self.iface_addr == Some(v4) || self.nets.iter().any(|n| n.contains(v4))
+        self.iface_addrs.contains(&v4) || self.nets.iter().any(|n| n.contains(v4))
     }
 
-    /// A TCP connection is refused when its local address is a Dante address.
-    pub fn refuses_connection(&self, local: SocketAddr) -> bool {
-        self.is_dante(local.ip())
+    /// A TCP connection is refused when its local address or its peer is a Dante address. Linux
+    /// accepts a packet for any local address on any interface, so a Dante host that sends to the
+    /// LAN address over the Dante leg has a LAN local address; its own address gives it away
+    /// (§4: no address in `<dante>` is ever used for non-Dante traffic).
+    pub fn refuses_connection(&self, local: SocketAddr, peer: SocketAddr) -> bool {
+        self.is_dante(local.ip()) || self.is_dante(peer.ip())
     }
 
-    /// A datagram is refused when it came in on the dlink interface or was sent to a Dante address.
-    /// Without packet info (a socket that is not IPv4) nothing can be told, so nothing is refused.
-    pub fn refuses_datagram(&self, info: Option<PacketInfo>) -> bool {
+    /// A datagram is refused when it came in on the dlink interface, was sent to a Dante address,
+    /// or comes from one. Without packet info only the sender's address can be judged here; the
+    /// guard refuses such a datagram outright while it is active ([`DanteGuard::check_datagram`]).
+    pub fn refuses_datagram(&self, info: Option<PacketInfo>, from: SocketAddr) -> bool {
+        let from_dante = self.is_dante(from.ip());
         match info {
-            Some(i) => self.ifindex == Some(i.ifindex) || self.is_dante(IpAddr::V4(i.dst)),
-            None => false,
+            Some(i) => {
+                from_dante || self.ifindex == Some(i.ifindex) || self.is_dante(IpAddr::V4(i.dst))
+            }
+            None => from_dante,
         }
     }
 }
 
-/// The per-port refusal counts. The first refusal on a port is warned once.
+/// How many distinct ports get their own refusal counter (the hub has three: HTTP, VBAN, RTP).
+pub const REFUSAL_PORT_SLOTS: usize = 8;
+
+/// The per-port refusal counts, lock-free: the real-time hub-mix thread reads them once a second
+/// and must never wait on a receive task. A port takes a free slot on its first refusal; past
+/// [`REFUSAL_PORT_SLOTS`] ports the rest are counted under port 0. The first refusal on a port is
+/// warned once.
 #[derive(Debug, Default)]
 pub struct Refusals {
-    by_port: Mutex<BTreeMap<u16, u64>>,
+    /// 0 = free, else the port + 1.
+    ports: [AtomicU32; REFUSAL_PORT_SLOTS],
+    counts: [AtomicU64; REFUSAL_PORT_SLOTS],
+    other: AtomicU64,
 }
 
 impl Refusals {
     /// Count one refusal on `port`; true when it is the port's first.
     pub fn record(&self, port: u16) -> bool {
-        let mut map = self.by_port.lock().unwrap_or_else(|e| e.into_inner());
-        let n = map.entry(port).or_insert(0);
-        *n += 1;
-        *n == 1
+        let key = u32::from(port) + 1;
+        for (slot, count) in self.ports.iter().zip(&self.counts) {
+            let owner = match slot.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => key,
+                Err(current) => current,
+            };
+            if owner == key {
+                return count.fetch_add(1, Ordering::Relaxed) == 0;
+            }
+        }
+        self.other.fetch_add(1, Ordering::Relaxed) == 0
     }
 
     pub fn snapshot(&self) -> BTreeMap<u16, u64> {
-        self.by_port
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        let mut map = BTreeMap::new();
+        for (slot, count) in self.ports.iter().zip(&self.counts) {
+            let key = slot.load(Ordering::Acquire);
+            let n = count.load(Ordering::Relaxed);
+            if key != 0 && n != 0 {
+                map.insert((key - 1) as u16, n);
+            }
+        }
+        let other = self.other.load(Ordering::Relaxed);
+        if other != 0 {
+            *map.entry(0).or_insert(0) += other;
+        }
+        map
     }
 }
 
@@ -250,7 +283,7 @@ impl DanteGuard {
             .nets
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .refuses_connection(local);
+            .refuses_connection(local, peer);
         if refused {
             self.note_refusal("tcp", local.port(), peer);
         }
@@ -258,12 +291,15 @@ impl DanteGuard {
     }
 
     /// Decide a received datagram on `port`; a refusal is counted and logged. True = drop it.
+    /// While the guard is active a datagram without packet info is refused (fail closed: the
+    /// sockets are IPv4 with `IP_PKTINFO`, so a missing one is a truncated control message).
     pub fn check_datagram(&self, port: u16, info: Option<PacketInfo>, from: SocketAddr) -> bool {
-        let refused = self
-            .nets
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .refuses_datagram(info);
+        let refused = (self.active() && info.is_none())
+            || self
+                .nets
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .refuses_datagram(info, from);
         if refused {
             self.note_refusal("udp", port, from);
         }
@@ -302,7 +338,7 @@ impl DanteGuard {
                     tracing::info!(
                         iface = guard.iface.as_deref().unwrap_or("-"),
                         ifindex = ?now.ifindex,
-                        addr = ?now.iface_addr,
+                        addrs = ?now.iface_addrs,
                         nets = %format_nets(&now.nets),
                         "dante-guard: the Dante leg changed"
                     );
@@ -323,7 +359,7 @@ impl DanteGuard {
         tracing::info!(
             iface = self.iface.as_deref().unwrap_or("-"),
             ifindex = ?now.ifindex,
-            addr = ?now.iface_addr,
+            addrs = ?now.iface_addrs,
             nets = %format_nets(&now.nets),
             "dante-guard: the HTTP, VBAN and Janus RTP sockets refuse traffic on the Dante leg"
         );
@@ -340,12 +376,11 @@ fn format_nets(nets: &[Ipv4Net]) -> String {
         .join(",")
 }
 
-/// The resolved view of one interface: its index and its first IPv4 address with that address's
-/// subnet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The resolved view of one interface: its index and every IPv4 address with its subnet.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IfaceInfo {
     pub ifindex: u32,
-    pub addr: Option<(Ipv4Addr, Ipv4Net)>,
+    pub addrs: Vec<(Ipv4Addr, Ipv4Net)>,
 }
 
 /// Build the view from an interface resolver (pure given `resolve`).
@@ -360,8 +395,8 @@ pub fn build_nets(
     };
     if let Some(info) = iface.and_then(resolve) {
         nets.ifindex = Some(info.ifindex);
-        if let Some((addr, net)) = info.addr {
-            nets.iface_addr = Some(addr);
+        for (addr, net) in info.addrs {
+            nets.iface_addrs.push(addr);
             if !nets.nets.contains(&net) {
                 nets.nets.push(net);
             }
@@ -380,17 +415,18 @@ pub fn resolve_iface(name: &str) -> Option<IfaceInfo> {
     }
     Some(IfaceInfo {
         ifindex,
-        addr: iface_ipv4(name),
+        addrs: iface_ipv4s(name),
     })
 }
 
-fn iface_ipv4(name: &str) -> Option<(Ipv4Addr, Ipv4Net)> {
+fn iface_ipv4s(name: &str) -> Vec<(Ipv4Addr, Ipv4Net)> {
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `head` with a list we free below with freeifaddrs.
     if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return None;
+        tracing::warn!(iface = name, error = %std::io::Error::last_os_error(), "dante-guard: getifaddrs failed");
+        return Vec::new();
     }
-    let mut found = None;
+    let mut found = Vec::new();
     let mut cur = head;
     while !cur.is_null() {
         // SAFETY: `cur` is a node of the list getifaddrs returned and is not freed yet.
@@ -419,8 +455,7 @@ fn iface_ipv4(name: &str) -> Option<(Ipv4Addr, Ipv4Net)> {
         };
         let prefix = netmask.leading_ones() as u8;
         if let Ok(net) = Ipv4Net::new(addr, prefix) {
-            found = Some((addr, net));
-            break;
+            found.push((addr, net));
         }
     }
     // SAFETY: the list getifaddrs allocated, freed once.
@@ -430,7 +465,13 @@ fn iface_ipv4(name: &str) -> Option<(Ipv4Addr, Ipv4Net)> {
 
 /// Refuse a configured listen address inside the Dante leg: whatever the hub binds (and tells
 /// Janus, for the RTP bind) must never be a Dante address (§4).
+///
+/// While the guard is active the bind must be IPv4: only an IPv4 socket's datagrams carry the
+/// ingress interface, and native IPv6 traffic on the Dante iface could not be told apart.
 pub fn check_bind(guard: &DanteGuard, what: &str, addr: SocketAddr) -> Result<()> {
+    if guard.active() && addr.is_ipv6() {
+        bail!("{what} {addr} is IPv6: with a Dante leg the hub binds IPv4 only, so every datagram carries its ingress interface (intercom#25)");
+    }
     if guard.is_dante(addr.ip()) {
         bail!("{what} {addr} is a Dante address: a non-Dante service never binds the Dante leg (intercom#25, two-networks §4)");
     }

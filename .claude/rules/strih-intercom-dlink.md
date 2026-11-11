@@ -147,21 +147,32 @@ Dante device and a LAN service, its ruling on intercom#25 is **option B**: liste
 drop at once whatever arrives on the Dante leg. That way a LAN address that changes needs no rebind,
 and the box's nginx keeps `127.0.0.1:8790`.
 
-- **`dante_guard::DanteGuard` is the one decision point.** The Dante leg is the union of the dlink
-  `iface` (its ifindex, its IPv4 and that subnet, re-resolved every 2 s) and `DANTE_SUBNET`, which is
-  §4's per-app setting: env, CIDR, comma list. The site's subnet is never in this public repo.
-  Neither set means no filter (strih-pp). A malformed `DANTE_SUBNET` stops the hub at start.
+- **`dante_guard::DanteGuard` is the one decision point.** The Dante leg is the union of two sets:
+  - the dlink `iface`: its ifindex, every IPv4 on it and their subnets, re-resolved every 2 s;
+  - `DANTE_SUBNET`, §4's per-app setting (env, CIDR, comma list). The site's subnet is never in
+    this public repo.
+
+  Neither set means no filter (strih-pp). A malformed `DANTE_SUBNET` stops the hub at start. The
+  iface part counts only once the interface exists. strih-snv's NM VLAN is up before the hub
+  starts; anywhere else, set `DANTE_SUBNET` for cover from the first second.
 - **TCP:** `http_serve::serve` is the hub's own accept loop. axum 0.7's `serve` has no accept hook:
-  its `make_service` future is `Infallible`. The loop drops a stream whose local address is Dante
-  before reading a byte, and serves the rest through hyper-util `auto` with upgrades and graceful
-  shutdown. Never go back to `axum::serve` (pinned by the test).
-- **UDP:** VBAN and Janus RTP enable `IP_PKTINFO` (`pktinfo::enable`) and receive with
-  `pktinfo::recv_from_with_info`, which runs `recvmsg` through tokio's `async_io`. A datagram whose
-  ingress ifindex is the dlink iface, or whose destination is Dante, is dropped before parsing. An
-  IPv6 socket has no `IP_PKTINFO` (a warning), so keep the binds IPv4.
-- **Refusals** are counted per local port. The first one on each port is a warning, and the counts
-  appear on `/api/state` as `dante_refusals` (omitted while empty). On a box whose nft already
-  blocks the leg they stay empty; a count means that line was missing.
+  its `make_service` future is `Infallible`. The loop drops a stream whose local **or peer**
+  address is Dante before reading a byte. Linux accepts a packet for any local address on any
+  interface, so a Dante host that dials the LAN address over the Dante leg is caught by its own
+  address. The rest is served through hyper-util `auto` with upgrades and graceful shutdown, and
+  the WebSocket, h2c and shutdown tests pin that. Never go back to `axum::serve` (also pinned).
+- **UDP:** VBAN and Janus RTP enable `IP_PKTINFO` with `pktinfo::enable_guarded`, which is fatal
+  while the guard is active. They read only through `pktinfo::recv_admitted`, a `recvmsg` loop on
+  tokio's `async_io` that drops a refused datagram before the caller sees it. A datagram is refused
+  when its ingress ifindex is the dlink iface or its destination or source is Dante. An active
+  guard refuses a datagram without packet info (a truncated control message, warned once).
+- **IPv4 binds only while the guard is active** (`check_bind`). Linux attaches `IP_PKTINFO` to
+  IPv4-mapped datagrams on a dual-stack socket, but native IPv6 on the Dante iface could not be
+  told apart.
+- **Refusals** are counted per local port in lock-free slots, so the SCHED_FIFO hub-mix thread
+  reads them once a second without waiting. The first refusal on each port is a warning, and the
+  counts appear on `/api/state` as `dante_refusals` (omitted while empty). On a box whose nft
+  already blocks the leg they stay empty; a count means that line was missing.
 - **Announcements:** a `bind` / `vban_bind` / `rtp_bind` inside the Dante leg fails at start
   (`check_bind`; `rtp_bind`'s IP is what Janus is told). NDI `connect` skips a source whose
   `p_url_address` is Dante and keeps looking. Janus's own ICE candidates come from its core config,
