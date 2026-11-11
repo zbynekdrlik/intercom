@@ -41,14 +41,14 @@ use crate::matrix::VideoConfig;
 
 /// Start the Interkom picture capture worker for `cfg` and return the shared [`VideoState`] the HTTP
 /// layer reads. The caller only calls this when the `[video]` table is present AND `enabled`.
-pub fn start(cfg: &VideoConfig) -> Arc<VideoState> {
+pub fn start(cfg: &VideoConfig, guard: Arc<crate::dante_guard::DanteGuard>) -> Arc<VideoState> {
     let state = Arc::new(VideoState::new(&cfg.ndi_source_name).with_target_fps(cfg.fps));
     worker::spawn_video(
         cfg.ndi_source_name.clone(),
         cfg.fps as f64,
         cfg.jpeg_quality,
         state.clone(),
-        source::build_default_source,
+        source::build_default_source(guard),
     );
     state
 }

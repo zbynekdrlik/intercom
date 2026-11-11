@@ -67,13 +67,35 @@ impl VideoSource for StubSource {
 /// low bandwidth; a connect failure is propagated so the worker backs off and retries (a
 /// cambox NDI feed that comes and goes must self-heal) rather than silently faking a feed.
 #[cfg(not(feature = "ndi"))]
-pub fn build_default_source(source_name: &str) -> anyhow::Result<Box<dyn VideoSource>> {
-    Ok(Box::new(StubSource::new(source_name)))
+pub fn build_default_source(
+    _guard: std::sync::Arc<crate::dante_guard::DanteGuard>,
+) -> crate::ndi_video::worker::SourceBuilder {
+    std::sync::Arc::new(|source_name: &str| {
+        Ok(Box::new(StubSource::new(source_name)) as Box<dyn VideoSource>)
+    })
 }
 
+/// With `--features ndi` the builder skips a source announced at a Dante address (intercom#25:
+/// §4, a receiver never uses a `<dante>` address for non-Dante media).
 #[cfg(feature = "ndi")]
-pub fn build_default_source(source_name: &str) -> anyhow::Result<Box<dyn VideoSource>> {
-    Ok(Box::new(
-        crate::ndi_video::ndi_source::NdiVideoSource::connect(source_name)?,
-    ))
+pub fn build_default_source(
+    guard: std::sync::Arc<crate::dante_guard::DanteGuard>,
+) -> crate::ndi_video::worker::SourceBuilder {
+    std::sync::Arc::new(move |source_name: &str| {
+        Ok(
+            Box::new(crate::ndi_video::ndi_source::NdiVideoSource::connect(
+                source_name,
+                &guard,
+            )?) as Box<dyn VideoSource>,
+        )
+    })
+}
+
+/// The address of an NDI source's `p_url_address` (`ip:port`, IPv6 in brackets). None when it is
+/// empty or not an address.
+pub fn ndi_url_ip(url: &str) -> Option<std::net::IpAddr> {
+    url.trim()
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|a| a.ip())
 }

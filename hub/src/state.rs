@@ -6,6 +6,8 @@
 //! facet (fixed target, depth, the resampler's rate and phase, resyncs; issues 1401 + 1461). The
 //! whole snapshot is rebuilt each block-status tick from the jitter buffers.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::alsa_card::{AlsaDirFacet, AlsaLegFacet, ALSA_CARD_PERIODS};
@@ -325,6 +327,11 @@ pub struct HubState {
     /// (verify-strih item 16 FAILs it). Set by the daemon; omitted from the pure snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_locked: Option<bool>,
+    /// Connections and datagrams refused because they arrived on the Dante leg, per local port
+    /// (intercom#25, two-networks §4). Omitted while empty: the box's own layout already keeps
+    /// that traffic out, so a count here means that line was not there. Set by the daemon.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub dante_refusals: BTreeMap<u16, u64>,
 }
 
 impl HubState {
@@ -386,6 +393,7 @@ impl HubState {
             lost_ticks: 0,
             mix_thread_sched: None,
             memory_locked: None,
+            dante_refusals: BTreeMap::new(),
         }
     }
 

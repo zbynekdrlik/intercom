@@ -23,6 +23,7 @@ pub mod block_clock;
 // The part-1 connector -> HDMI PCM matcher (issue 1424). The hub's own copy since the split from
 // camera-box (intercom#1): camera-box keeps the appliance copy and its C-twin parity test against the
 // OBS output module, so both sides pick the PCM by ONE rule. Std-only.
+pub mod dante_guard;
 pub mod dlink_leg;
 pub mod drm_output_audio_match;
 pub mod engine;
@@ -30,6 +31,7 @@ pub mod fir;
 pub mod hdmi_audio;
 pub mod hdmi_leg;
 pub mod http;
+pub mod http_serve;
 pub mod inputs;
 pub mod janus_codec;
 pub mod janus_pacing;
@@ -43,6 +45,7 @@ pub mod mix_thread;
 pub mod mulaw;
 pub mod ndi_video;
 pub mod pipe_fill;
+pub mod pktinfo;
 pub mod return_addr;
 pub mod state;
 pub mod turn;

@@ -71,6 +71,11 @@ libc = "0.2"
 # and futures-util is already in the graph through axum: nothing new is downloaded.
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# The HTTP accept loop that refuses a connection arriving on the Dante leg (intercom#25,
+# src/http_serve.rs): axum 0.7's `serve` has no accept hook, so the hub accepts itself and serves
+# through the same hyper-util connection builder axum uses inside. Both are already in the graph
+# through axum: nothing new is downloaded.
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "service", "tokio"] }
 
 # The hub's own Dante device (intercom#5): dstack's `dlink`, the owner-ruled embedding for apps
 # (dstack#20, dstack#68): dlink's default budget each way (15 ms since v0.6.28), normal priority, Dante PTP followed in process
