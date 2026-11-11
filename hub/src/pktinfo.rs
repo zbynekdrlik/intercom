@@ -106,15 +106,27 @@ fn recvmsg(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, Option<P
         return Err(io::Error::last_os_error());
     }
     let peer = sockaddr_to_std(&from)?;
-    let info = if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        if !CTRUNC_WARNED.swap(true, Ordering::Relaxed) {
-            tracing::warn!(%peer, "recvmsg: control message truncated, no IP_PKTINFO for this datagram (warned once)");
-        }
+    let info = info_unless_truncated(msg.msg_flags, || packet_info(&msg));
+    if info.is_none()
+        && msg.msg_flags & libc::MSG_CTRUNC != 0
+        && !CTRUNC_WARNED.swap(true, Ordering::Relaxed)
+    {
+        tracing::warn!(%peer, "recvmsg: control message truncated, no IP_PKTINFO for this datagram (warned once)");
+    }
+    Ok((n as usize, peer, info))
+}
+
+/// A truncated control message (`MSG_CTRUNC` in `flags`) may have lost the `IP_PKTINFO`: then
+/// there is no info, whatever the cut buffer still holds. Otherwise the parsed info.
+pub fn info_unless_truncated(
+    flags: libc::c_int,
+    parse: impl FnOnce() -> Option<PacketInfo>,
+) -> Option<PacketInfo> {
+    if flags & libc::MSG_CTRUNC != 0 {
         None
     } else {
-        packet_info(&msg)
-    };
-    Ok((n as usize, peer, info))
+        parse()
+    }
 }
 
 fn sockaddr_to_std(addr: &libc::sockaddr_storage) -> io::Result<SocketAddr> {

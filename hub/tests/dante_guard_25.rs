@@ -334,6 +334,60 @@ async fn a_datagram_on_the_dlink_iface_is_dropped_and_counted_per_port() {
     assert_eq!(g.refusals().get(&port), Some(&3));
 }
 
+#[test]
+fn refusals_from_many_threads_land_in_one_slot_per_port() {
+    let r = std::sync::Arc::new(intercom_hub::dante_guard::Refusals::default());
+    let firsts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            let (r, firsts) = (r.clone(), firsts.clone());
+            std::thread::spawn(move || {
+                for i in 0..5000u32 {
+                    let port = [8790, 6980, 6990][((i + t) % 3) as usize];
+                    if r.record(port) {
+                        firsts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let snap = r.snapshot();
+    assert_eq!(snap.len(), 3, "one slot per port: {snap:?}");
+    assert_eq!(
+        snap.values().sum::<u64>(),
+        8 * 5000,
+        "no count lost: {snap:?}"
+    );
+    assert_eq!(
+        firsts.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "one first refusal per port"
+    );
+}
+
+#[test]
+fn a_truncated_control_message_gives_no_packet_info() {
+    let info = PacketInfo {
+        ifindex: 3,
+        dst: v4(10, 77, 9, 202),
+    };
+    assert_eq!(
+        intercom_hub::pktinfo::info_unless_truncated(libc::MSG_CTRUNC, || Some(info)),
+        None
+    );
+    assert_eq!(
+        intercom_hub::pktinfo::info_unless_truncated(0, || Some(info)),
+        Some(info)
+    );
+    assert_eq!(
+        intercom_hub::pktinfo::info_unless_truncated(libc::MSG_TRUNC, || Some(info)),
+        Some(info)
+    );
+}
+
 #[tokio::test]
 async fn recv_admitted_hands_on_only_the_lan_datagrams() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

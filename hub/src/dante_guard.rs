@@ -169,8 +169,9 @@ pub const REFUSAL_PORT_SLOTS: usize = 8;
 
 /// The per-port refusal counts, lock-free: the real-time hub-mix thread reads them once a second
 /// and must never wait on a receive task. A port takes a free slot on its first refusal; past
-/// [`REFUSAL_PORT_SLOTS`] ports the rest are counted under port 0. The first refusal on a port is
-/// warned once.
+/// [`REFUSAL_PORT_SLOTS`] ports the rest are counted under port 0, and those ports share one
+/// first-refusal warning (the hub has three ports, so it never happens). The first refusal on a
+/// port is warned once.
 #[derive(Debug, Default)]
 pub struct Refusals {
     /// 0 = free, else the port + 1.
