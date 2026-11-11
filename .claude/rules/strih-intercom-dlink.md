@@ -4,6 +4,10 @@ paths:
   - "hub/tests/dlink_5.rs"
   - "hub/src/inputs.rs"
   - "intercom.strih-snv.toml"
+  - "hub/src/dante_guard.rs"
+  - "hub/src/pktinfo.rs"
+  - "hub/src/http_serve.rs"
+  - "hub/tests/dante_guard_25.rs"
 ---
 
 # The hub's own Dante device: dstack `dlink` in process (intercom#5)
@@ -135,3 +139,44 @@ A failure prints both devices' `Link::status()` JSON: read `engine` (`overruns`,
 rubato (dlink's converter, under dstack-resample) took 2.3-3.3 ms per 1.33 ms 96 kHz block, so every
 debug/llvm-cov block overran and the pump kept restarting (4.11.2026; dstack and dlink at opt 3 did
 not help, rubato alone did). Release builds read 0 overruns either way.
+
+## The other sockets stay off the Dante leg (intercom#25, dstack two-networks.md §4)
+
+dstack owns the one standard for a PC with a Dante leg (`docs/two-networks.md`). For an app that is a
+Dante device and a LAN service, its ruling on intercom#25 is **option B**: listen on all addresses and
+drop at once whatever arrives on the Dante leg. That way a LAN address that changes needs no rebind,
+and the box's nginx keeps `127.0.0.1:8790`.
+
+- **`dante_guard::DanteGuard` is the one decision point.** The Dante leg is the union of two sets:
+  - the dlink `iface`: its ifindex, every IPv4 on it and their subnets, re-resolved every 2 s;
+  - `DANTE_SUBNET`, §4's per-app setting (env, CIDR, comma list). The site's subnet is never in
+    this public repo.
+
+  Neither set means no filter (strih-pp). A malformed `DANTE_SUBNET` stops the hub at start. The
+  iface part counts only once the interface exists. strih-snv's NM VLAN is up before the hub
+  starts; anywhere else, set `DANTE_SUBNET` for cover from the first second.
+- **TCP:** `http_serve::serve` is the hub's own accept loop. axum 0.7's `serve` has no accept hook:
+  its `make_service` future is `Infallible`. The loop drops a stream whose local **or peer**
+  address is Dante before reading a byte. Linux accepts a packet for any local address on any
+  interface, so a Dante host that dials the LAN address over the Dante leg is caught by its own
+  address. The rest is served through hyper-util `auto` with upgrades and graceful shutdown, and
+  the WebSocket, h2c and shutdown tests pin that. Never go back to `axum::serve` (also pinned).
+- **UDP:** VBAN and Janus RTP enable `IP_PKTINFO` with `pktinfo::enable_guarded`, which is fatal
+  while the guard is active. They read only through `pktinfo::recv_admitted`, a `recvmsg` loop on
+  tokio's `async_io` that drops a refused datagram before the caller sees it. A datagram is refused
+  when its ingress ifindex is the dlink iface or its destination or source is Dante. An active
+  guard refuses a datagram without packet info (a truncated control message, warned once).
+- **IPv4 binds only while the guard is active** (`check_bind`). Linux attaches `IP_PKTINFO` to
+  IPv4-mapped datagrams on a dual-stack socket, but native IPv6 on the Dante iface could not be
+  told apart.
+- **Refusals** are counted per local port in lock-free slots, so the SCHED_FIFO hub-mix thread
+  reads them once a second without waiting. The first refusal on each port is a warning, and the
+  counts appear on `/api/state` as `dante_refusals` (omitted while empty). On a box whose nft
+  already blocks the leg they stay empty; a count means that line was missing.
+- **Announcements:** a `bind` / `vban_bind` / `rtp_bind` inside the Dante leg fails at start
+  (`check_bind`; `rtp_bind`'s IP is what Janus is told). NDI `connect` skips a source whose
+  `p_url_address` is Dante and keeps looking. Janus's own ICE candidates come from its core config,
+  which belongs to camera-box: camera-box#1499.
+- Tests: `hub/tests/dante_guard_25.rs`. It drives the real `IP_PKTINFO` on loopback (`lo` as the
+  dlink iface) and the real accept loop (`DANTE_SUBNET` 127.0.0.0/8: closed with no byte; another
+  subnet: 200).

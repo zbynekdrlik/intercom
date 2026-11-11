@@ -25,9 +25,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// The rolling window over which `fps_actual` is measured.
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 
-/// A source builder: NDI-source-name → a boxed [`VideoSource`] (or an error to retry). A fn pointer so
-/// a test can inject a fake source; production passes [`crate::ndi_video::source::build_default_source`].
-pub type SourceBuilder = fn(&str) -> anyhow::Result<Box<dyn VideoSource>>;
+/// A source builder: NDI-source-name → a boxed [`VideoSource`] (or an error to retry). A shared
+/// closure so a test can inject a fake source; production passes
+/// [`crate::ndi_video::source::build_default_source`], which carries the Dante guard (intercom#25).
+pub type SourceBuilder =
+    std::sync::Arc<dyn Fn(&str) -> anyhow::Result<Box<dyn VideoSource>> + Send + Sync>;
 
 /// Wall-clock milliseconds (for the slot's `updated_ms` staleness).
 fn now_ms() -> u64 {

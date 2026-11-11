@@ -22,6 +22,7 @@ use std::sync::mpsc::SyncSender;
 use intercom_hub::alsa_card::AlsaLegStats;
 use intercom_hub::alsa_leg::{spawn_alsa_capture, spawn_alsa_playback, AlsaCaptureConfig};
 use intercom_hub::block_clock::{run_batch, BlockGrid};
+use intercom_hub::dante_guard::{check_bind, DanteGuard};
 use intercom_hub::dlink_leg::{spawn_dlink, DlinkLegConfig, DlinkStats};
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::hdmi_audio::HdmiLegStats;
@@ -116,10 +117,25 @@ async fn main() -> Result<()> {
     let sample_rate = matrix.hub.sample_rate;
     let n = matrix.participants.len();
 
+    // The Dante leg (intercom#25, two-networks §4): the dlink iface + DANTE_SUBNET. The HTTP, VBAN
+    // and Janus RTP sockets listen on all addresses and drop whatever arrives on that leg; nothing
+    // the hub binds may be a Dante address.
+    let dante_guard = DanteGuard::from_env(matrix.dlink.as_ref().map(|d| d.iface.clone()))?;
+    dante_guard.log_start();
+    dante_guard.spawn_refresher();
+    check_bind(&dante_guard, "bind", http_addr)?;
+
     // The VBAN receive socket — fail loud on a bind failure (port already in use, bad address).
     let vban_socket = tokio::net::UdpSocket::bind(&matrix.hub.vban_bind)
         .await
         .with_context(|| format!("bind VBAN socket {}", matrix.hub.vban_bind))?;
+    let vban_port = vban_socket
+        .local_addr()
+        .context("VBAN socket address")?
+        .port();
+    check_bind(&dante_guard, "vban_bind", vban_socket.local_addr()?)?;
+    // Each datagram carries its ingress interface + destination, so a Dante one is dropped.
+    intercom_hub::pktinfo::enable_guarded(&vban_socket, &dante_guard, "VBAN socket")?;
 
     let input_streams = matrix.vban_input_streams();
     let outputs = matrix.vban_outputs();
@@ -188,6 +204,8 @@ async fn main() -> Result<()> {
                 .rtp_bind
                 .parse()
                 .with_context(|| format!("invalid janus rtp_bind '{}'", jcfg.rtp_bind))?;
+            // rtp_bind's IP is what the hub tells Janus to send to (intercom#25).
+            check_bind(&dante_guard, "janus rtp_bind", rtp_bind)?;
             let rt = intercom_hub::janus_rtp::JanusRuntimeConfig {
                 api_url: jcfg.api_url.clone(),
                 room: jcfg.room,
@@ -212,6 +230,7 @@ async fn main() -> Result<()> {
                     jitter: jitter.clone(),
                     phones_id: pid,
                     stats: stats.clone(),
+                    dante_guard: dante_guard.clone(),
                 },
             ));
             tracing::info!(
@@ -269,7 +288,7 @@ async fn main() -> Result<()> {
     // `/interkom.jpg`, and the `/api/state` `video` facet. Absent/disabled → the hub serves no picture.
     let video_state: Option<Arc<intercom_hub::ndi_video::VideoState>> = match &matrix.video {
         Some(v) if v.enabled => {
-            let st = intercom_hub::ndi_video::start(v);
+            let st = intercom_hub::ndi_video::start(v, dante_guard.clone());
             tracing::info!(source = %v.ndi_source_name, fps = v.fps, jpeg_quality = v.jpeg_quality, "interkom-video picture leg enabled");
             Some(st)
         }
@@ -321,6 +340,8 @@ async fn main() -> Result<()> {
         return_addrs: return_addrs.clone(),
         n,
         sample_rate,
+        dante_guard: dante_guard.clone(),
+        vban_port,
     });
 
     // --- block/mix thread: pop a block from every buffer, mix N-1, send each cambox's stream --
@@ -351,6 +372,7 @@ async fn main() -> Result<()> {
         video_for_loop: video_state.clone(),
         live_tx,
         memory_locked: memory_lock.locked,
+        dante_guard: dante_guard.clone(),
     };
     let mix = spawn_mix_thread(move || run_block_loop(block_loop))
         .context("spawn the hub-mix block loop thread")?;
@@ -392,9 +414,10 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;
-    let served = axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    // A connection on the Dante leg is closed at once (intercom#25); axum::serve has no accept hook.
+    let served =
+        intercom_hub::http_serve::serve(listener, router(state), dante_guard, shutdown_signal())
+            .await;
     // The Dante device says goodbye before the process ends, also when the server failed (its own
     // wait is dlink::STOP_WAIT).
     if let Some(leg) = dlink_leg {
@@ -424,6 +447,8 @@ fn spawn_vban_receive(rx: VbanReceive) {
         return_addrs,
         n,
         sample_rate,
+        dante_guard,
+        vban_port,
     } = rx;
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
@@ -434,7 +459,15 @@ fn spawn_vban_receive(rx: VbanReceive) {
         let mut decode_rejects: Vec<DecodeRejects> =
             (0..n).map(|_| DecodeRejects::default()).collect();
         loop {
-            match vban_socket.recv_from(&mut buf).await {
+            // The Dante leg's datagrams are dropped inside, before any parsing (intercom#25).
+            match intercom_hub::pktinfo::recv_admitted(
+                &vban_socket,
+                &mut buf,
+                &dante_guard,
+                vban_port,
+            )
+            .await
+            {
                 Ok((len, from)) => match classify_packet(&input_streams, &buf[..len]) {
                     RoutedPacket::Audio {
                         id,
@@ -501,6 +534,9 @@ struct VbanReceive {
     return_addrs: Arc<Mutex<ReturnAddrs>>,
     n: usize,
     sample_rate: u32,
+    /// Drops a datagram that arrived on the Dante leg (intercom#25).
+    dante_guard: Arc<DanteGuard>,
+    vban_port: u16,
 }
 
 /// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
@@ -574,6 +610,8 @@ struct BlockLoop {
     live_tx: tokio::sync::watch::Sender<Arc<HubState>>,
     /// Whether `main` locked the process memory before the spawn (`/api/state` `memory_locked`).
     memory_locked: bool,
+    /// The Dante-leg refusal counts (`/api/state` `dante_refusals`, intercom#25).
+    dante_guard: Arc<DanteGuard>,
 }
 
 /// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
@@ -600,6 +638,7 @@ fn run_block_loop(bl: BlockLoop) {
         video_for_loop,
         live_tx,
         memory_locked,
+        dante_guard,
     } = bl;
     let LocalAudioWiring {
         program_sink_tx,
@@ -808,6 +847,8 @@ fn run_block_loop(bl: BlockLoop) {
                 snapshot.lost_ticks = lost_total;
                 snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
                 snapshot.memory_locked = Some(memory_locked);
+                // Once a second; the lock is taken by a receive path only when it refuses.
+                snapshot.dante_refusals = dante_guard.refusals();
                 // Attach the Interkom picture facet (M3c) when the video leg is running.
                 if let Some(vs) = &video_for_loop {
                     let now_wall = std::time::SystemTime::now()

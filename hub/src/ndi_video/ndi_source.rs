@@ -251,7 +251,7 @@ unsafe impl Send for NdiVideoSource {}
 impl NdiVideoSource {
     /// Find `source_name` (substring match, e.g. `"CAM1 (usb)"`) and connect a LOWEST-bandwidth
     /// receiver. Bounded find (~5 s) so a missing source becomes an error the worker retries.
-    pub fn connect(source_name: &str) -> Result<Self> {
+    pub fn connect(source_name: &str, guard: &crate::dante_guard::DanteGuard) -> Result<Self> {
         // Process-shared runtime (never a fresh per-connect load — see the module doc).
         let lib = NdiLib::shared()?;
 
@@ -278,10 +278,26 @@ impl NdiVideoSource {
                         continue;
                     }
                     let name = unsafe { CStr::from_ptr(src.p_ndi_name) }.to_string_lossy();
-                    if name.contains(source_name) {
-                        found = Some(src);
-                        break;
+                    if !name.contains(source_name) {
+                        continue;
                     }
+                    // intercom#25 (two-networks §4): never a source announced at a Dante address;
+                    // keep looking, the same name may come again at its LAN address.
+                    let url = if src.p_url_address.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { CStr::from_ptr(src.p_url_address) }
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    let ip = crate::ndi_video::source::ndi_url_ip(&url);
+                    if ip.is_some_and(|ip| guard.is_dante(ip)) {
+                        tracing::warn!(source = %name, url = %url, "NDI source announced at a Dante address — skipped (intercom#25)");
+                        continue;
+                    }
+                    tracing::debug!(source = %name, url = %url, "NDI source matched");
+                    found = Some(src);
+                    break;
                 }
             }
             if found.is_some() {

@@ -701,6 +701,8 @@ pub struct JanusAdapterIo {
     pub jitter: Arc<Mutex<Vec<JitterBuffer>>>,
     pub phones_id: usize,
     pub stats: Arc<JanusSharedStats>,
+    /// Drops a datagram that arrived on the Dante leg (intercom#25).
+    pub dante_guard: Arc<crate::dante_guard::DanteGuard>,
 }
 
 /// The re-establishing adapter task. It binds the RTP socket, starts the paced sender thread
@@ -713,6 +715,7 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         jitter,
         phones_id,
         stats,
+        dante_guard,
     } = io;
     let (socket, send_socket) = match bind_rtp_sockets(cfg.rtp_bind) {
         Ok(s) => s,
@@ -721,6 +724,11 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
             return;
         }
     };
+    // Each datagram carries its ingress interface + destination, so a Dante one is dropped.
+    if let Err(e) = crate::pktinfo::enable_guarded(&socket, &dante_guard, "janus RTP socket") {
+        tracing::error!(bind = %cfg.rtp_bind, error = %e, "janus: adapter disabled");
+        return;
+    }
     let local_ip = cfg.rtp_bind.ip().to_string();
     let local_port = socket
         .local_addr()
@@ -837,7 +845,8 @@ pub async fn run_janus_participant(cfg: JanusRuntimeConfig, ssrc: u32, io: Janus
         loop {
             tokio::select! {
                 // The room mix minus ourselves: decode + push to the phones jitter buffer.
-                recvd = socket.recv_from(&mut recv_buf) => {
+                // The Dante leg's datagrams are dropped inside, before anything else (intercom#25).
+                recvd = crate::pktinfo::recv_admitted(&socket, &mut recv_buf, &dante_guard, local_port) => {
                     match recvd {
                         // Only this session's Janus endpoint: an abandoned session's leftovers or a
                         // stray datagram must not feed (or lock out) the room mix.
