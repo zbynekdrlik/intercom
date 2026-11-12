@@ -140,6 +140,13 @@ rubato (dlink's converter, under dstack-resample) took 2.3-3.3 ms per 1.33 ms 96
 debug/llvm-cov block overran and the pump kept restarting (4.11.2026; dstack and dlink at opt 3 did
 not help, rubato alone did). Release builds read 0 overruns either way.
 
+**Never pin dstack v0.6.98 (12.11.2026).** Its `Link::start` waits with no limit for a missing
+iface (dstack#225) and ignores the hub's stop flag, so `leg.stop()`'s join hangs a hub shutdown
+until systemd's SIGKILL. dstack#230 restores the fail-at-once start (the `supervise` loop's
+stop-aware backoff stays the only wait) and adds `Link::start_until(config, &AtomicBool)`; take
+the tag after v0.6.98, which dstack announces over peer. On any dstack move, check that a missing
+iface still lets the hub stop within `dlink::STOP_WAIT`.
+
 ## The other sockets stay off the Dante leg (intercom#25, dstack two-networks.md §4)
 
 dstack owns the one standard for a PC with a Dante leg (`docs/two-networks.md`). For an app that is a
