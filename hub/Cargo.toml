@@ -78,7 +78,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "service", "tokio"] }
 
 # The hub's own Dante device (intercom#5): dstack's `dlink`, the owner-ruled embedding for apps
-# (dstack#20, dstack#68): dlink's default budget each way (15 ms since v0.6.28), normal priority, Dante PTP followed in process
+# (dstack#20, dstack#68): dlink's default latency terms (the 15 ms reference path each way, dlink v0.6.106), normal priority, Dante PTP followed in process
 # (the dsync service as fallback, dstack#1). Pinned by tag.
 dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.118" }
 

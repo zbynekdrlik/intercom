@@ -28,7 +28,8 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
   none), `process_id`. **No flow port base** (intercom#28, dstack v0.6.117 #264): a device's
   flow ports come from its slot (ARC port - 4440 = k: RX `29800 + 64k` .. +31, TX the next 32,
-  inside 29800-31847, the range camera-box's generic Dante-leg filter accepts); strih-snv's hub
+  inside 29800-31847, the range camera-box's generic Dante-leg filter accepts; camera-box#1519 deploys
+  the v0.6.118 hub together with that filter, so the old 30100-30131 nft opening is never the only one); strih-snv's hub
   device is slot 1 (RX 29864-29895), OBS's strih-obs slot 0. `rx_port_base` / `tx_port_base` fail
   the load. An ARC port outside 4440-4471 has no slot, and dstack refuses to start it: the tests' own
   devices use slots 29-31 (dev1 holds slot 0 on its routed address). `Matrix::from_toml` runs dstack's own

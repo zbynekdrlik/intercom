@@ -215,6 +215,34 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
 }
 
 #[test]
+fn set_latency_terms_reach_dstack_and_api_state() {
+    // intercom#28 (dlink v0.6.106): (a) and (b) in ms with decimals feed `Config::network_latency_ns`
+    // and `Config::receive_buffer_ns`; P = (a) + (b), whole samples at the device's rate (48 kHz).
+    let table = format!("{DLINK}network_latency_ms = 0.25\nreceive_buffer_ms = 4.75\n");
+    let m = load(&format!("{HEAD}{table}{}", participant(3, 0))).unwrap();
+    let (d, id) = m.dlink_participant().unwrap();
+    assert_eq!(
+        (d.network_latency_ms, d.receive_buffer_ms),
+        (Some(0.25), Some(4.75))
+    );
+    let split = d.link_config(48_000).split().unwrap();
+    assert_eq!(split.network_latency_ns, 250_000);
+    assert_eq!(split.receive_buffer_ns, 4_750_000);
+    assert_eq!(split.latency_ns, 5_000_000);
+    assert_eq!(
+        d.link_config(48_000).device().unwrap().latency_ns,
+        5_000_000
+    );
+    let mut stats = vec![RuntimeStats::default(); m.participants.len()];
+    stats[id].dlink = Some(Default::default());
+    let v = serde_json::to_value(HubState::snapshot(&m, "test", &stats)).unwrap();
+    let l = &v["participants"][id]["dlink"]["latency"];
+    assert_eq!(l["network_latency_ns"], 250_000);
+    assert_eq!(l["receive_buffer_ns"], 4_750_000);
+    assert_eq!(l["latency_ns"], 5_000_000);
+}
+
+#[test]
 fn a_box_without_dlink_has_no_device() {
     let m = load(HEAD).unwrap();
     assert!(m.dlink.is_none());
