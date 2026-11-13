@@ -33,13 +33,6 @@ use serde::{Deserialize, Serialize};
 use crate::local_audio::restart_backoff;
 use crate::vban_io::{DecodedAudio, JitterBuffer};
 
-/// The hub's path each way at dlink's defaults (`dlink::REFERENCE_PATH_NS`, 15 ms): the Dante
-/// latency P plus the hand-off, with the pump's work margin W 15 ms on an RX-only device. Owner
-/// 4.11.2026 (dstack#1): robustness over low latency for dlink apps, and no CPU pinning, so W has
-/// to absorb a loaded box's multi-ms preemption (strih-snv at load ~11: 2.7-3.6 ms). Since dlink
-/// v0.6.106 (dstack#244) the latency is named terms; the TOML sets neither, so P and W stay as the
-/// v0.6.78 hub had them.
-pub const REFERENCE_PATH_MS: u64 = dlink::REFERENCE_PATH_NS / 1_000_000;
 /// Where the device keeps what Dante Controller sets (its name, subscriptions, latency) unless the
 /// TOML says otherwise: the unit's `StateDirectory=intercom-hub`.
 pub const DEFAULT_STATE_FILE: &str = "/var/lib/intercom-hub/dlink.toml";
@@ -103,7 +96,7 @@ pub struct DlinkConfig {
     /// The latency split, computed once by `Matrix::from_toml` (never a TOML key): `/api/state`
     /// copies it and nothing on the hub-mix thread splits again.
     #[serde(skip)]
-    pub latency: DlinkLatency,
+    pub latency: Option<DlinkLatency>,
 }
 
 /// The device's latency terms (dlink `Split`, dstack#244), in ns, as `/api/state` shows them.
@@ -225,12 +218,9 @@ impl DlinkConfig {
                 }
             }
         }
-        let config = self.link_config(sample_rate);
-        if let Err(p) = config.device() {
+        // dstack's own checks; `device()` includes the latency split's refusal.
+        if let Err(p) = self.link_config(sample_rate).device() {
             out.extend(p);
-        }
-        if let Err(p) = config.split() {
-            out.push(p);
         }
         out
     }
@@ -243,13 +233,17 @@ impl DlinkConfig {
 }
 
 /// The largest latency term the TOML takes, in ms: far past any Dante latency (Dante's own menu
-/// ends at 10 ms; dstack's range at 296 ms).
+/// ends at 10 ms).
 pub const MAX_TERM_MS: f64 = 1000.0;
 
 /// A TOML term in ms as whole ns (dstack's CLI takes up to 6 decimals, so ns are exact); `None`
-/// for one that is not a positive finite number up to [`MAX_TERM_MS`].
+/// for one that is not a finite number up to [`MAX_TERM_MS`] of at least 1 ns once rounded.
 pub fn ms_to_ns(ms: f64) -> Option<u64> {
-    (ms.is_finite() && ms > 0.0 && ms <= MAX_TERM_MS).then(|| (ms * 1_000_000.0).round() as u64)
+    if !ms.is_finite() || ms > MAX_TERM_MS {
+        return None;
+    }
+    let ns = (ms * 1_000_000.0).round();
+    (ns >= 1.0).then_some(ns as u64)
 }
 
 /// A float sample from the Dante engine as the hub's i16: rounded, saturating, NaN as 0.
@@ -779,7 +773,7 @@ fn supervise(
         };
         stats.starts.fetch_add(1, Ordering::Relaxed);
         stats.running.store(true, Ordering::Relaxed);
-        tracing::info!(%device, %iface, channels = cfg.config.rx.len(), latency_ns = cfg.config.latency.latency_ns, rx_path_ns = cfg.config.latency.rx_path_ns, "dlink: the Dante device is up");
+        tracing::info!(%device, %iface, channels = cfg.config.rx.len(), latency = ?cfg.config.latency, "dlink: the Dante device is up");
         let mut watch = RxWatch::default();
         let ended = loop {
             if stop.load(Ordering::Relaxed) {

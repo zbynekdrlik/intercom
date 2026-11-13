@@ -220,8 +220,9 @@ pub struct DlinkState {
     /// The device name Dante Controller lists.
     pub device: String,
     pub iface: String,
-    /// The latency split's terms (dlink v0.6.106, dstack#244), in ns.
-    pub latency: crate::dlink_leg::DlinkLatency,
+    /// The latency split's terms (dlink v0.6.106, dstack#244), in ns; null only for a table that
+    /// never went through `Matrix::from_toml`.
+    pub latency: Option<crate::dlink_leg::DlinkLatency>,
     pub rx_channels: usize,
     #[serde(flatten)]
     pub facet: crate::dlink_leg::DlinkFacet,

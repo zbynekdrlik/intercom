@@ -378,7 +378,7 @@ impl Matrix {
             let split = d
                 .split(raw.hub.sample_rate)
                 .map_err(|e| anyhow::anyhow!("dlink: {e}"))?;
-            d.latency = crate::dlink_leg::DlinkLatency::from(&split);
+            d.latency = Some(crate::dlink_leg::DlinkLatency::from(&split));
         }
         let dlink_participants: Vec<&Participant> = raw
             .participants

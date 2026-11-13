@@ -78,6 +78,6 @@ fn the_hub_takes_dlink_s_default_latency_terms_at_96_to_48() {
     // What `/api/state` shows is that split, computed once at load.
     assert_eq!(
         d.latency,
-        intercom_hub::dlink_leg::DlinkLatency::from(&split)
+        Some(intercom_hub::dlink_leg::DlinkLatency::from(&split))
     );
 }

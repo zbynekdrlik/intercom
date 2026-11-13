@@ -209,7 +209,7 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
     let dev = c.device().unwrap();
     assert_eq!(dev.latency_ns, split.latency_ns);
     assert!(dev.latency_ns < dlink::REFERENCE_PATH_NS && dev.latency_ns >= dlink::MIN_LATENCY_NS);
-    assert_eq!(d.latency.latency_ns, split.latency_ns);
+    assert_eq!(d.latency.map(|l| l.latency_ns), Some(split.latency_ns));
     assert_eq!(dev.rx.len(), 3);
     assert!(dev.tx.is_empty());
 }
@@ -256,7 +256,7 @@ fn dstack_s_own_device_checks_refuse_a_bad_table_at_load() {
     let low = format!("{DLINK}network_latency_ms = 0.5\nreceive_buffer_ms = 0.5\n");
     let e = refusal(&format!("{HEAD}{low}{}", participant(1, 0)));
     assert!(e.contains("network_latency_ns + receive_buffer_ns"), "{e}");
-    for bad in ["0", "-1.5", "1001", "nan", "inf"] {
+    for bad in ["0", "-1.5", "0.0000004", "1001", "nan", "inf"] {
         let t = format!("{DLINK}network_latency_ms = {bad}\n");
         let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
         assert!(
@@ -1116,42 +1116,49 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
 
 // --- the flow ports come from the device's slot (dstack v0.6.117, intercom#28) -------------------
 
-/// dstack's flow range: every device's RX and TX flow ports, the range the generic Dante-leg filter
-/// accepts (dstack #264). Below Linux's ephemeral 32768-60999 (dstack finding 5.11.2026).
-const FLOW_RANGE: std::ops::RangeInclusive<u32> = 29_800..=31_847;
-
 #[test]
 fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
-    // camera-box#1519: one generic stateful Dante-leg filter on every PC accepts 29800-31847. The
-    // hub's device declares no base, so its ports are its own slot's block (ARC 4441 = slot 1:
-    // RX 29864-29895, TX 29896-29927), clear of OBS's strih-obs on the same address (slot 0).
+    // camera-box#1519: one generic stateful Dante-leg filter on every PC accepts dstack's flow
+    // range (29800-31847). The hub's device declares no base, so dstack binds its own slot's
+    // block (ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927), clear of OBS's strih-obs.
+    use dstack::device::ports::{flow_bases, FLOW_PORT_FIRST, FLOW_PORT_LAST, PORT_SLOTS};
+    let mut devices = 0;
     for (name, toml) in [
         ("strih-snv", include_str!("../../intercom.strih-snv.toml")),
         ("strih-pp", include_str!("../../intercom.strih-pp.toml")),
         ("stream-snv", include_str!("../../intercom.stream-snv.toml")),
         ("stream-pp", include_str!("../../intercom.stream-pp.toml")),
     ] {
+        // Only strih-snv has a Dante network (owner 2.11.2026).
         let Some(d) = Matrix::from_toml(toml).unwrap().dlink else {
             assert_ne!(name, "strih-snv", "strih-snv runs the hub's Dante device");
             continue;
         };
+        devices += 1;
         let dev = d.link_config(48_000).device().unwrap();
         assert_eq!(
             (dev.rx_port_base, dev.tx_port_base),
             (None, None),
             "{name}: no fixed base, the slot's own block"
         );
-        let slot = u32::from(dev.arc_port) - 4440;
-        assert!(slot < 32, "{name}: ARC {} is a device slot's", dev.arc_port);
-        let rx = 29_800 + 64 * slot;
-        for port in [rx, rx + 63] {
+        // What dstack binds (its own function, not this test's arithmetic).
+        let bases = flow_bases(dev.rx_port_base, dev.tx_port_base, dev.arc_port).unwrap();
+        assert!(bases.warnings.is_empty(), "{name}: {:?}", bases.warnings);
+        assert!(
+            bases.slot.is_some_and(|k| k < PORT_SLOTS),
+            "{name}: {bases:?}"
+        );
+        for base in [bases.rx, bases.tx] {
+            let ports = u32::from(base)..=u32::from(base) + 31;
             assert!(
-                FLOW_RANGE.contains(&port),
-                "{name}: flow port {port} leaves {FLOW_RANGE:?}"
+                *ports.start() >= u32::from(FLOW_PORT_FIRST)
+                    && *ports.end() <= u32::from(FLOW_PORT_LAST),
+                "{name}: flow ports {ports:?} leave {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}"
             );
         }
         if name == "strih-snv" {
-            assert_eq!(rx, 29_864, "strih-snv's hub device is slot 1");
+            assert_eq!((bases.slot, bases.rx, bases.tx), (Some(1), 29_864, 29_896));
         }
     }
+    assert_eq!(devices, 1, "strih-snv's device was checked");
 }
