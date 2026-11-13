@@ -341,7 +341,8 @@ impl Matrix {
     /// channel outside a participant's declared channel count, or a `src == dst` self-route (the
     /// mix-minus invariant).
     pub fn from_toml(s: &str) -> Result<Self> {
-        let raw: MatrixToml = toml::from_str(s).map_err(|e| anyhow!("parse intercom.toml: {e}"))?;
+        let mut raw: MatrixToml =
+            toml::from_str(s).map_err(|e| anyhow!("parse intercom.toml: {e}"))?;
 
         if raw.hub.sample_rate == 0 {
             bail!("hub.sample_rate must be > 0");
@@ -369,11 +370,15 @@ impl Matrix {
 
         // The hub's own Dante device (intercom#5): dstack's own device checks run here, so a bad
         // `[dlink]` fails the load, never the rig start. One `dlink` participant iff the table.
-        if let Some(d) = &raw.dlink {
+        if let Some(d) = raw.dlink.as_mut() {
             let problems = d.problems(raw.hub.sample_rate);
             if !problems.is_empty() {
                 bail!("dlink: {}", problems.join("; "));
             }
+            let split = d
+                .split(raw.hub.sample_rate)
+                .map_err(|e| anyhow::anyhow!("dlink: {e}"))?;
+            d.latency = Some(crate::dlink_leg::DlinkLatency::from(&split));
         }
         let dlink_participants: Vec<&Participant> = raw
             .participants

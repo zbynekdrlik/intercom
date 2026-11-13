@@ -13,20 +13,28 @@ paths:
 # The hub's own Dante device: dstack `dlink` in process (intercom#5)
 
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
-no relaying between apps. The embeddable part is dstack's `dlink` crate: dlink's default budget, 15 ms since v0.6.28
-(the whole path each way; owner 4.11.2026: robustness over low latency), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
+no relaying between apps. The embeddable part is dstack's `dlink` crate at its default latency terms (the 15 ms
+reference path each way; owner 4.11.2026: robustness over low latency), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
 capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
 
 - **Config:** the optional `[dlink]` table (`dlink_leg::DlinkConfig`, `deny_unknown_fields`):
-  `name`, `iface`, `rx` (channel names), `latency_ms` (default `dlink::BUDGET_NS`, 15 ms; since dlink v0.6.22 the BUDGET, the
-  whole path each way, fed to `Config::budget_ns`; the Dante latency is dlink's `split` of it, dlink's crate docs have
-  the table of splits; `/api/state` `latency_ms` is that budget), `state_file`
+  `name`, `iface`, `rx` (channel names), the optional latency terms `network_latency_ms` / `receive_buffer_ms` (ms with decimals; dlink
+  v0.6.106, dstack#244: (a) `Config::network_latency_ns`, default 1 ms, and (b)
+  `Config::receive_buffer_ns`; P = (a) + (b). Unset, P / W / the RX path are exactly the old 15 ms
+  budget's; the removed `latency_ms` fails the load, intercom#28), `state_file`
   (`/var/lib/intercom-hub/dlink.toml`), and `arc_port` / `cmc_port` / `flows_port` (all three or
-  none), `process_id`, `rx_port_base` (32 ports from it; keep them below Linux's ephemeral 32768-60999, a socket the OS numbers can take one there and the device never starts: strih-snv 30100-30131, OBS 30000-30031). `Matrix::from_toml` runs dstack's own
-  `Config::device()` checks, so a bad table fails the load. Exactly one `adapter = "dlink"`
+  none), `process_id`. **No flow port base** (intercom#28, dstack v0.6.117 #264): a device's
+  flow ports come from its slot (ARC port - 4440 = k: RX `29800 + 64k` .. +31, TX the next 32,
+  inside 29800-31847, the range camera-box's generic Dante-leg filter accepts; camera-box#1519 deploys
+  the v0.6.118 hub together with that filter, so the old 30100-30131 nft opening is never the only one); strih-snv's hub
+  device is slot 1 (RX 29864-29895), OBS's strih-obs slot 0. `rx_port_base` / `tx_port_base` fail
+  the load. An ARC port outside 4440-4471 has no slot, and dstack refuses to start it: the tests' own
+  devices use slots 29-31 (dev1 holds slot 0 on its routed address). `Matrix::from_toml` runs dstack's own
+  `Config::device()` and `Config::split()` checks, so a bad table fails the load, and keeps the
+  split (`DlinkConfig::latency`) for `/api/state`. Exactly one `adapter = "dlink"`
   participant iff the table; input only, `in_channels` 1..=rx.len().
 - **Declared subscriptions** (dlink v0.5.12): `[[dlink.subscribe]]` with `rx` (our RX channel by
   its NAME in `rx`; the hub turns it into dstack's 1-based number), `tx_channel`, `tx_device`
@@ -99,13 +107,14 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   hub-mix's reserved-CPU exclusion went with them (1.9.15), and camera-box dropped its pinner. A
   config still naming them fails the load (`deny_unknown_fields`). Do not re-add pinning: a pump
   losing blocks under load is a dstack matter.
-- **W of an RX-only device = the whole budget (dlink v0.6.32):** the hub is RX-only, so its pump
-  margin is `dlink::rx_work_margin` (1440 samples at 96 kHz, 15 ms), not 2/5 of the budget (576);
+- **W of an RX-only device = 15 ms (dlink v0.6.32; `dlink::RX_WORK_MARGIN_NS` since v0.6.106):**
+  the hub is RX-only, so its pump margin is 1440 samples at 96 kHz, not 576;
   P (13041666 ns) and the RX path are unchanged. A late pump catches up instead of re-bootstrapping.
   The pump WARN's `max_process_us` is that second's max.
 - **The unit:** `StateDirectory=intercom-hub` (ProtectSystem=strict leaves nothing else writable).
 - **`/api/state`:** `participants[].dlink` on the dlink participant only: device, iface,
-  latency_ms, rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The
+  `latency` (the split's terms in ns: `network_latency_ns`, `receive_buffer_ns`, `latency_ns` = P,
+  `rx_handoff_ns`, `work_margin_ns`, `rx_path_ns`; was the budget `latency_ms` before hub 1.9.23), rx_channels, running, starts, ends, blocks, ring_frames, ring_dropped_frames. The
   participant's `jitter` facet is the resampler leg's as on the card capture.
 
 ## Tests
@@ -139,6 +148,13 @@ A failure prints both devices' `Link::status()` JSON: read `engine` (`overruns`,
 rubato (dlink's converter, under dstack-resample) took 2.3-3.3 ms per 1.33 ms 96 kHz block, so every
 debug/llvm-cov block overran and the pump kept restarting (4.11.2026; dstack and dlink at opt 3 did
 not help, rubato alone did). Release builds read 0 overruns either way.
+
+**Never pin dstack v0.6.98 (12.11.2026).** Its `Link::start` waits with no limit for a missing
+iface (dstack#225) and ignores the hub's stop flag, so `leg.stop()`'s join hangs a hub shutdown
+until systemd's SIGKILL. dstack#230 restores the fail-at-once start (the `supervise` loop's
+stop-aware backoff stays the only wait) and adds `Link::start_until(config, &AtomicBool)`; take
+the tag after v0.6.98, which dstack announces over peer. On any dstack move, check that a missing
+iface still lets the hub stop within `dlink::STOP_WAIT`.
 
 ## The other sockets stay off the Dante leg (intercom#25, dstack two-networks.md §4)
 

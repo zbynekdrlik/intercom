@@ -196,17 +196,50 @@ fn a_dlink_participant_loads_with_its_table_and_defaults() {
     assert_eq!(d.name, "strih-snv-intercom");
     assert_eq!(d.iface, "enp7s0.70");
     assert_eq!(d.rx, vec!["FOH L", "FOH R", "Click"]);
-    assert_eq!(d.latency_ms, 15, "dlink's default budget, owner 4.11.2026");
+    assert_eq!(
+        (d.network_latency_ms, d.receive_buffer_ms),
+        (None, None),
+        "dlink's default terms, owner 4.11.2026"
+    );
     assert_eq!(d.state_file.to_str(), Some(DEFAULT_STATE_FILE));
-    // dlink's own device config builds from it: dlink's default budget, 48 kHz, the three RX
-    // names. Since dlink v0.6.22 the budget is the whole path; the Dante latency is the split's share of it.
+    // dlink's own device config builds from it: dlink's default terms, 48 kHz, the three RX
+    // names. The Dante latency P is the split's (a) + (b) (dlink v0.6.106).
     let c = d.link_config(48_000);
     let split = c.split().unwrap();
     let dev = c.device().unwrap();
     assert_eq!(dev.latency_ns, split.latency_ns);
-    assert!(dev.latency_ns < dlink::BUDGET_NS && dev.latency_ns >= dlink::MIN_LATENCY_NS);
+    assert!(dev.latency_ns < dlink::REFERENCE_PATH_NS && dev.latency_ns >= dlink::MIN_LATENCY_NS);
+    assert_eq!(d.latency.map(|l| l.latency_ns), Some(split.latency_ns));
     assert_eq!(dev.rx.len(), 3);
     assert!(dev.tx.is_empty());
+}
+
+#[test]
+fn set_latency_terms_reach_dstack_and_api_state() {
+    // intercom#28 (dlink v0.6.106): (a) and (b) in ms with decimals feed `Config::network_latency_ns`
+    // and `Config::receive_buffer_ns`; P = (a) + (b), whole samples at the device's rate (48 kHz).
+    let table = format!("{DLINK}network_latency_ms = 0.25\nreceive_buffer_ms = 4.75\n");
+    let m = load(&format!("{HEAD}{table}{}", participant(3, 0))).unwrap();
+    let (d, id) = m.dlink_participant().unwrap();
+    assert_eq!(
+        (d.network_latency_ms, d.receive_buffer_ms),
+        (Some(0.25), Some(4.75))
+    );
+    let split = d.link_config(48_000).split().unwrap();
+    assert_eq!(split.network_latency_ns, 250_000);
+    assert_eq!(split.receive_buffer_ns, 4_750_000);
+    assert_eq!(split.latency_ns, 5_000_000);
+    assert_eq!(
+        d.link_config(48_000).device().unwrap().latency_ns,
+        5_000_000
+    );
+    let mut stats = vec![RuntimeStats::default(); m.participants.len()];
+    stats[id].dlink = Some(Default::default());
+    let v = serde_json::to_value(HubState::snapshot(&m, "test", &stats)).unwrap();
+    let l = &v["participants"][id]["dlink"]["latency"];
+    assert_eq!(l["network_latency_ns"], 250_000);
+    assert_eq!(l["receive_buffer_ns"], 4_750_000);
+    assert_eq!(l["latency_ns"], 5_000_000);
 }
 
 #[test]
@@ -247,9 +280,24 @@ fn dstack_s_own_device_checks_refuse_a_bad_table_at_load() {
     let e = refusal(&format!("{HEAD}{bad_name}{}", participant(1, 0)));
     assert!(e.starts_with("dlink: "), "{e}");
     assert!(e.contains("name"), "{e}");
-    let low = format!("{DLINK}latency_ms = 2\n");
+    // (a) + (b) under an RX-only device's 4 ms floor: dstack's split refuses it.
+    let low = format!("{DLINK}network_latency_ms = 0.5\nreceive_buffer_ms = 0.5\n");
     let e = refusal(&format!("{HEAD}{low}{}", participant(1, 0)));
-    assert!(e.contains("latency"), "{e}");
+    assert!(e.contains("network_latency_ns + receive_buffer_ns"), "{e}");
+    for bad in ["0", "-1.5", "0.0000004", "1001", "nan", "inf"] {
+        let t = format!("{DLINK}network_latency_ms = {bad}\n");
+        let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
+        assert!(
+            e.contains("network_latency_ms: a positive number"),
+            "{bad}: {e}"
+        );
+        let t = format!("{DLINK}receive_buffer_ms = {bad}\n");
+        let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
+        assert!(
+            e.contains("receive_buffer_ms: a positive number"),
+            "{bad}: {e}"
+        );
+    }
     let rel = format!("{DLINK}state_file = \"dlink.toml\"\n");
     assert!(refusal(&format!("{HEAD}{rel}{}", participant(1, 0)))
         .contains("state_file: an absolute path"));
@@ -305,7 +353,24 @@ fn the_dlink_facet_is_on_the_dlink_participant_only() {
     let d = &p[1]["dlink"];
     assert_eq!(d["device"], "strih-snv-intercom");
     assert_eq!(d["iface"], "enp7s0.70");
-    assert_eq!(d["latency_ms"], 15);
+    assert!(
+        d.get("latency_ms").is_none(),
+        "the budget is gone (dlink v0.6.106)"
+    );
+    let l = &d["latency"];
+    let split = m
+        .dlink
+        .as_ref()
+        .unwrap()
+        .link_config(48_000)
+        .split()
+        .unwrap();
+    assert_eq!(l["network_latency_ns"], split.network_latency_ns);
+    assert_eq!(l["receive_buffer_ns"], split.receive_buffer_ns);
+    assert_eq!(l["latency_ns"], split.latency_ns);
+    assert_eq!(l["rx_handoff_ns"], split.rx_handoff_ns);
+    assert_eq!(l["work_margin_ns"], split.work_margin_ns);
+    assert_eq!(l["rx_path_ns"], split.rx_path_ns);
     assert_eq!(d["rx_channels"], 3);
     assert_eq!(d["running"], true);
     assert_eq!(d["starts"], 2);
@@ -562,8 +627,11 @@ impl Process for HubPlusTone {
 fn a_real_dlink_device_hears_its_declared_subscription_in_the_hub_s_leg() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("dlink.toml");
+    // Slot 29 (dstack v0.6.117): its flow ports are its slot's block; slot 0 may be a real device
+    // of the box (dev1 holds 4440 on its routed address).
     let table = format!(
         "{HEAD}[dlink]\nname = \"intercom-test\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\nstate_file = \"{}\"\n\
+         arc_port = 4469\ncmc_port = 8829\nflows_port = 4484\nprocess_id = 9\n\
          [[dlink.subscribe]]\nrx = \"In 1\"\ntx_channel = \"Tone\"\ntx_device = \"intercom-test\"\n{}",
         state.display(),
         participant(2, 0)
@@ -677,10 +745,12 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
         .tx(["Tone"])
         .sample_rate(96_000)
         .product("newlevel", "intercom-test")
+        // Slots 30 and 31 (dstack v0.6.117, intercom#28): a device's flow ports come from its
+        // slot, and a port outside 4440-4471 has none; the top slots stay clear of a box's own.
         .ports(dlink::Ports {
-            arc: 14441,
-            cmc: 18801,
-            flows: 14456,
+            arc: 4470,
+            cmc: 8830,
+            flows: 4485,
         })
         .process_id(7);
     assert!(!tx_cfg.converts());
@@ -688,7 +758,7 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
     let table = format!(
         "{HEAD}[dlink]\nname = \"intercom-rx-96\"\niface = \"lo\"\nrx = [\"In 1\", \"In 2\"]\n\
          network_rate = 96000\nstate_file = \"{}\"\n\
-         arc_port = 14442\ncmc_port = 18802\nflows_port = 14457\nprocess_id = 8\n\
+         arc_port = 4471\ncmc_port = 8831\nflows_port = 4486\nprocess_id = 8\n\
          [[dlink.subscribe]]\nrx = \"In 1\"\ntx_channel = \"Tone\"\ntx_device = \"intercom-tx-96\"\n{}",
         state.display(),
         participant(2, 0)
@@ -793,9 +863,8 @@ fn a_96k_transmitter_reaches_the_hub_at_48k_through_dlink_s_rate_step() {
 
 #[test]
 fn the_ports_and_process_id_reach_dstack_s_device_config() {
-    let table = format!(
-        "{DLINK}arc_port = 4441\ncmc_port = 8801\nflows_port = 4456\nprocess_id = 1\nrx_port_base = 47100\n"
-    );
+    let table =
+        format!("{DLINK}arc_port = 4441\ncmc_port = 8801\nflows_port = 4456\nprocess_id = 1\n");
     let m = load(&format!("{HEAD}{table}{}", participant(3, 0))).unwrap();
     let (d, _) = m.dlink_participant().unwrap();
     let dev = d.link_config(48_000).device().unwrap();
@@ -805,9 +874,10 @@ fn the_ports_and_process_id_reach_dstack_s_device_config() {
             dev.cmc_port,
             dev.flows_port,
             dev.process_id,
-            dev.rx_port_base
+            dev.rx_port_base,
+            dev.tx_port_base
         ),
-        (4441, 8801, 4456, 1, Some(47_100))
+        (4441, 8801, 4456, 1, None, None)
     );
 }
 
@@ -821,19 +891,32 @@ fn absent_ports_keep_dante_s_defaults() {
             dev.cmc_port,
             dev.flows_port,
             dev.process_id,
-            dev.rx_port_base
+            dev.rx_port_base,
+            dev.tx_port_base
         ),
-        (4440, 8800, 4455, 0, None)
+        (4440, 8800, 4455, 0, None, None)
     );
 }
 
 #[test]
-fn the_three_control_ports_come_together_and_the_rx_range_clears_them() {
+fn the_three_control_ports_come_together() {
     let partial = format!("{DLINK}arc_port = 4441\n");
     assert!(refusal(&format!("{HEAD}{partial}{}", participant(1, 0))).contains("all three or none"));
-    // base 4430 covers 4430..=4461, which holds the ARC port 4440: dstack refuses it.
-    let overlap = format!("{DLINK}rx_port_base = 4430\n");
-    assert!(refusal(&format!("{HEAD}{overlap}{}", participant(1, 0))).contains("rx_port_base"));
+}
+
+#[test]
+fn the_removed_keys_fail_the_load() {
+    // intercom#28: `latency_ms` (the budget, gone in dlink v0.6.106) and `rx_port_base` (the flow
+    // ports come from the slot since v0.6.117) are refused, never silently read another way.
+    for key in [
+        "latency_ms = 15",
+        "rx_port_base = 30100",
+        "tx_port_base = 30132",
+    ] {
+        let t = format!("{DLINK}{key}\n");
+        let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
+        assert!(e.contains("unknown field"), "{key}: {e}");
+    }
 }
 
 // --- declared subscriptions (dlink v0.5.12) -----------------------------------------------------
@@ -1059,37 +1142,51 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
     assert!(state.subscriptions[0].is_some() && state.subscriptions[1].is_some());
 }
 
-// --- the RX flow ports stay out of Linux's ephemeral range (dstack finding 5.11.2026) ------------
-
-/// Linux's default `net.ipv4.ip_local_port_range`: ports the kernel numbers an unbound socket from.
-const EPHEMERAL: std::ops::RangeInclusive<u32> = 32_768..=60_999;
-/// dstack binds one RX flow port per flow from `rx_port_base`.
-const RX_FLOW_PORTS: u32 = 32;
+// --- the flow ports come from the device's slot (dstack v0.6.117, intercom#28) -------------------
 
 #[test]
-fn every_deployed_device_s_rx_flow_ports_sit_below_the_ephemeral_range() {
-    // camera-box 5.11.2026: OBS's device on strih-snv failed to start with "RX flow port 47217:
-    // Address already in use", taken by a socket the OS numbered itself. A fixed port inside the
-    // ephemeral range can be taken the same way by any socket, so the device never starts.
+fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
+    // camera-box#1519: one generic stateful Dante-leg filter on every PC accepts dstack's flow
+    // range (29800-31847). The hub's device declares no base, so dstack binds its own slot's
+    // block (ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927), clear of OBS's strih-obs.
+    use dstack::device::ports::{flow_bases, FLOW_PORT_FIRST, FLOW_PORT_LAST, PORT_SLOTS};
+    let mut devices = 0;
     for (name, toml) in [
         ("strih-snv", include_str!("../../intercom.strih-snv.toml")),
         ("strih-pp", include_str!("../../intercom.strih-pp.toml")),
         ("stream-snv", include_str!("../../intercom.stream-snv.toml")),
         ("stream-pp", include_str!("../../intercom.stream-pp.toml")),
     ] {
+        // Only strih-snv has a Dante network (owner 2.11.2026).
         let Some(d) = Matrix::from_toml(toml).unwrap().dlink else {
             assert_ne!(name, "strih-snv", "strih-snv runs the hub's Dante device");
             continue;
         };
-        let Some(base) = d.link_config(48_000).device().unwrap().rx_port_base else {
-            panic!(
-                "{name}: a deployed device declares its RX flow ports (strih-snv has two devices)"
-            );
-        };
-        let ports = u32::from(base)..u32::from(base) + RX_FLOW_PORTS;
-        assert!(
-            ports.end <= *EPHEMERAL.start(),
-            "{name}: RX flow ports {ports:?} reach into the ephemeral range {EPHEMERAL:?}"
+        devices += 1;
+        let dev = d.link_config(48_000).device().unwrap();
+        assert_eq!(
+            (dev.rx_port_base, dev.tx_port_base),
+            (None, None),
+            "{name}: no fixed base, the slot's own block"
         );
+        // What dstack binds (its own function, not this test's arithmetic).
+        let bases = flow_bases(dev.rx_port_base, dev.tx_port_base, dev.arc_port).unwrap();
+        assert!(bases.warnings.is_empty(), "{name}: {:?}", bases.warnings);
+        assert!(
+            bases.slot.is_some_and(|k| k < PORT_SLOTS),
+            "{name}: {bases:?}"
+        );
+        for base in [bases.rx, bases.tx] {
+            let ports = u32::from(base)..=u32::from(base) + 31;
+            assert!(
+                *ports.start() >= u32::from(FLOW_PORT_FIRST)
+                    && *ports.end() <= u32::from(FLOW_PORT_LAST),
+                "{name}: flow ports {ports:?} leave {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}"
+            );
+        }
+        if name == "strih-snv" {
+            assert_eq!((bases.slot, bases.rx, bases.tx), (Some(1), 29_864, 29_896));
+        }
     }
+    assert_eq!(devices, 1, "strih-snv's device was checked");
 }

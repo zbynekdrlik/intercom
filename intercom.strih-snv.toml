@@ -30,7 +30,6 @@ arc_port = 4441
 cmc_port = 8801
 flows_port = 4456
 process_id = 1
-rx_port_base = 30100
 network_rate = 96000
 
 [[dlink.subscribe]]

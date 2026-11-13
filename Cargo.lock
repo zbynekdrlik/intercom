@@ -371,8 +371,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.118"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.118#a6fe1509becfa3d1dc17b1b0c4a64711b6b9bde6"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -383,8 +383,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.118"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.118#a6fe1509becfa3d1dc17b1b0c4a64711b6b9bde6"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -406,21 +406,21 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.118"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.118#a6fe1509becfa3d1dc17b1b0c4a64711b6b9bde6"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.118"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.118#a6fe1509becfa3d1dc17b1b0c4a64711b6b9bde6"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.29.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.29.0#f3c34bccfd14c3ce9e5a5ee672763b849893e10c"
+version = "1.33.1"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.33.1#f45090fb0be4eb756441f9eed3ed0c10d6ffeb0e"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "intercom-hub"
-version = "1.9.22"
+version = "1.9.23"
 dependencies = [
  "anyhow",
  "axum",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "intercom-vban"
-version = "1.9.22"
+version = "1.9.23"
 dependencies = [
  "anyhow",
 ]
@@ -977,7 +977,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.118#a6fe1509becfa3d1dc17b1b0c4a64711b6b9bde6"
 dependencies = [
  "fastrand",
  "flume",
