@@ -220,7 +220,8 @@ pub struct DlinkState {
     /// The device name Dante Controller lists.
     pub device: String,
     pub iface: String,
-    pub latency_ms: u32,
+    /// The latency split's terms (dlink v0.6.106, dstack#244), in ns.
+    pub latency: crate::dlink_leg::DlinkLatency,
     pub rx_channels: usize,
     #[serde(flatten)]
     pub facet: crate::dlink_leg::DlinkFacet,
@@ -231,7 +232,7 @@ impl DlinkState {
         DlinkState {
             device: d.name.clone(),
             iface: d.iface.clone(),
-            latency_ms: d.latency_ms,
+            latency: d.latency,
             rx_channels: d.rx.len(),
             facet,
         }

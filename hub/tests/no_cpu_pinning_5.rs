@@ -38,37 +38,46 @@ fn the_removed_cpu_keys_fail_the_load() {
 }
 
 #[test]
-fn the_hub_takes_dlink_s_15_ms_default_budget_at_96_to_48() {
+fn the_hub_takes_dlink_s_default_latency_terms_at_96_to_48() {
     // Owner 4.11.2026 (dstack#1): robustness over low latency, no pinning. W must absorb a loaded
-    // box's preemption (strih-snv at load ~11: 2.7-3.6 ms), so the hub takes dlink's default.
+    // box's preemption (strih-snv at load ~11: 2.7-3.6 ms), so the hub takes dlink's defaults.
+    // dlink v0.6.106 (dstack#244) names the terms; neither is set, so P and W stay what the
+    // v0.6.78 hub's 15 ms budget gave (intercom#28: the numbers below are v0.6.78's).
     let d = load("").unwrap().dlink.unwrap();
-    assert_eq!(
-        u64::from(d.latency_ms) * 1_000_000,
-        dlink::BUDGET_NS,
-        "the hub's default budget is dlink's"
-    );
-    assert_eq!(dlink::BUDGET_NS, 15_000_000);
+    assert_eq!((d.network_latency_ms, d.receive_buffer_ms), (None, None));
+    assert_eq!(dlink::REFERENCE_PATH_NS, 15_000_000);
     let c = d.link_config(48_000);
     assert_eq!((c.device_rate(), c.converts()), (96_000, true));
     assert_eq!(c.directions(), dlink::Directions::Rx);
     let split = c.split().unwrap();
-    // RX-only: the RX path is the budget; the TX path is never run, so it may pass it (dlink docs).
-    assert!(split.rx_path_ns <= dlink::BUDGET_NS, "{split:?}");
+    // RX-only: the RX path is the reference path; the TX path is never run (dlink docs).
+    assert!(split.rx_path_ns <= dlink::REFERENCE_PATH_NS, "{split:?}");
     assert_eq!(
         split.latency_ns, 13_041_666,
-        "P, as dstack computed it: {split:?}"
+        "P, as dstack computed it on v0.6.78: {split:?}"
+    );
+    assert_eq!(
+        split.network_latency_ns,
+        dlink::NETWORK_LATENCY_NS,
+        "(a) dlink's 1 ms"
+    );
+    assert_eq!(
+        split.network_latency_ns + split.receive_buffer_ns,
+        split.latency_ns,
+        "P = (a) + (b), {split:?}"
     );
     assert_eq!(
         split.margin, 1440,
         "W: an RX-only device's is the whole 15 ms at 96 kHz (dlink v0.6.32), {split:?}"
     );
-    assert_eq!(
-        split.margin,
-        dlink::rx_work_margin(dlink::BUDGET_NS, 96_000, dlink::BLOCK),
-        "W is dlink's RX-only margin, {split:?}"
-    );
+    assert_eq!(split.work_margin_ns, dlink::RX_WORK_MARGIN_NS, "{split:?}");
     assert!(
         split.margin * 1_000_000_000 / 96_000 > 3_600_000,
         "W above the measured preemption"
+    );
+    // What `/api/state` shows is that split, computed once at load.
+    assert_eq!(
+        d.latency,
+        intercom_hub::dlink_leg::DlinkLatency::from(&split)
     );
 }

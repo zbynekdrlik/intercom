@@ -95,7 +95,9 @@ DLINK = {
     "cmc_port": 8801,
     "flows_port": 4456,
     "process_id": 1,
-    "rx_port_base": 30100,
+    # No rx_port_base (intercom#28): since dstack v0.6.117 a device's flow ports come from its slot
+    # (ARC 4441 = slot 1: RX 29864-29895, TX the next 32), inside the 29800-31847 range the generic
+    # Dante-leg filter accepts. The old 30100 was slots 4 and 5's block.
     # The FOH Dante sources send at 96 kHz and a Dante flow needs both ends at one rate (dstack
     # 3.11.2026): the device runs at it, dlink v0.5.20 halves it to the hub's 48 kHz.
     "network_rate": 96000,
@@ -397,7 +399,7 @@ def render(model):
     out.append(f'iface = "{DLINK["iface"]}"')
     joined = ", ".join(f'"{c}"' for c in DLINK["rx"])
     out.append(f"rx = [{joined}]")
-    for key in ("arc_port", "cmc_port", "flows_port", "process_id", "rx_port_base", "network_rate"):
+    for key in ("arc_port", "cmc_port", "flows_port", "process_id", "network_rate"):
         out.append(f"{key} = {DLINK[key]}")
     out.append("")
     for rx, tx_channel, tx_device in DLINK["subscribe"]:
