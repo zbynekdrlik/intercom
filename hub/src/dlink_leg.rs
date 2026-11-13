@@ -212,9 +212,7 @@ impl DlinkConfig {
         ] {
             if let Some(v) = ms {
                 if ms_to_ns(v).is_none() {
-                    out.push(format!(
-                        "{key}: a positive number of ms up to {MAX_TERM_MS}, got {v}"
-                    ));
+                    out.push(format!("{key}: ms from 0.000001 to {MAX_TERM_MS}, got {v}"));
                 }
             }
         }
