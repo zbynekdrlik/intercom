@@ -284,7 +284,7 @@ fn dstack_s_own_device_checks_refuse_a_bad_table_at_load() {
     let low = format!("{DLINK}network_latency_ms = 0.5\nreceive_buffer_ms = 0.5\n");
     let e = refusal(&format!("{HEAD}{low}{}", participant(1, 0)));
     assert!(e.contains("network_latency_ns + receive_buffer_ns"), "{e}");
-    for bad in ["0", "-1.5", "0.0000004", "1001", "nan", "inf"] {
+    for bad in ["0", "-1.5", "0.0000004", "0.0000009", "1001", "nan", "inf"] {
         let t = format!("{DLINK}network_latency_ms = {bad}\n");
         let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
         assert!(
