@@ -4,6 +4,7 @@ paths:
   - "hub/tests/dlink_5.rs"
   - "hub/src/inputs.rs"
   - "intercom.strih-snv.toml"
+  - "intercom.strih-pp.toml"
   - "hub/src/dante_guard.rs"
   - "hub/src/pktinfo.rs"
   - "hub/src/http_serve.rs"
@@ -15,7 +16,8 @@ paths:
 Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its own Dante device;
 no relaying between apps. The embeddable part is dstack's `dlink` crate at its default latency terms (the 15 ms
 reference path each way; owner 4.11.2026: robustness over low latency), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
-capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv only; strih-pp has no Dante network (owner 2.11.2026). Since the cut-over
+capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv, and since intercom#32 (18.11.2026, the PP rig upgrade) strih-pp: `strih-pp-intercom` on
+`enp5s0f1.70`, dsg `STREAM master L/R` (96 kHz) into the cutters' cans at -8 dB as `dsg_dante`. Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
@@ -30,7 +32,8 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   flow ports come from its slot (ARC port - 4440 = k: RX `29800 + 64k` .. +31, TX the next 32,
   inside 29800-31847, the range camera-box's generic Dante-leg filter accepts; camera-box#1519 deploys
   the v0.6.118 hub together with that filter, so the old 30100-30131 nft opening is never the only one); strih-snv's hub
-  device is slot 1 (RX 29864-29895), OBS's strih-obs slot 0. `rx_port_base` / `tx_port_base` fail
+  device is slot 1 (RX 29864-29895), strih-pp's slot 2 (ARC 4442 / cmc 8802 / flows 4457, RX
+  29928-29959), OBS's strih-obs slot 0 on each box. `rx_port_base` / `tx_port_base` fail
   the load. An ARC port outside 4440-4471 has no slot, and dstack refuses to start it: the tests' own
   devices use slots 29-31 (dev1 holds slot 0 on its routed address). `Matrix::from_toml` runs dstack's own
   `Config::device()` and `Config::split()` checks, so a bad table fails the load, and keeps the
@@ -172,7 +175,7 @@ and the box's nginx keeps `127.0.0.1:8790`.
   - `DANTE_SUBNET`, §4's per-app setting (env, CIDR, comma list). The site's subnet is never in
     this public repo.
 
-  Neither set means no filter (strih-pp). A malformed `DANTE_SUBNET` stops the hub at start. The
+  Neither set means no filter (stream-snv, stream-pp). A malformed `DANTE_SUBNET` stops the hub at start. The
   iface part counts only once the interface exists. strih-snv's NM VLAN is up before the hub
   starts; anywhere else, set `DANTE_SUBNET` for cover from the first second.
 - **TCP:** `http_serve::serve` is the hub's own accept loop. axum 0.7's `serve` has no accept hook:

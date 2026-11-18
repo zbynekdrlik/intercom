@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
     let mut local_audio = wire_local_audio(&matrix, &jitter);
 
     // --- The hub's own Dante device (intercom#5): dstack's dlink in this process, its RX pushed into
-    // the `dlink` participant's resampler leg. Absent `[dlink]` (strih-pp) = no device.
+    // the `dlink` participant's resampler leg. Absent `[dlink]` (stream-snv, stream-pp) = no device.
     let dlink_leg = matrix.dlink_participant().map(|(d, pid)| {
         let stats = Arc::new(DlinkStats::default());
         tracing::info!(

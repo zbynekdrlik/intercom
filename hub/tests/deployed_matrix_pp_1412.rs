@@ -179,7 +179,7 @@ fn strih_pp_hears_dsg_s_stream_master_over_its_own_dante_device() {
             ("STREAM R", "STREAM master R", "dsg"),
         ]
     );
-    let dante = m.id_of("foh_dante").expect("the dlink participant");
+    let dante = m.id_of("dsg_dante").expect("the dlink participant");
     let cutters = m.id_of("cutters").unwrap();
     let mut into_cans: Vec<(usize, usize, f32)> = m
         .points

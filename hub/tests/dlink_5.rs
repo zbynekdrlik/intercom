@@ -1148,7 +1148,8 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
 fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
     // camera-box#1519: one generic stateful Dante-leg filter on every PC accepts dstack's flow
     // range (29800-31847). The hub's device declares no base, so dstack binds its own slot's
-    // block (ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927), clear of OBS's strih-obs.
+    // block (strih-snv ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927; strih-pp ARC 4442 = slot
+    // 2: RX 29928-29959, TX 29960-29991), clear of OBS's strih-obs (slot 0).
     use dstack::device::ports::{flow_bases, FLOW_PORT_FIRST, FLOW_PORT_LAST, PORT_SLOTS};
     let mut devices = 0;
     for (name, toml) in [
