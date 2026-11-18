@@ -17,7 +17,7 @@ Owner ruling (dstack#20, 1.11.2026; dstack#68, 2.11.2026): every app carries its
 no relaying between apps. The embeddable part is dstack's `dlink` crate at its default latency terms (the 15 ms
 reference path each way; owner 4.11.2026: robustness over low latency), normal priority, no pinning, Dante PTP followed in process (UDP 319, the unit's one
 capability) with the dsync service as fallback (a loopback UDP poll, works under the sandbox). strih-snv, and since intercom#32 (18.11.2026, the PP rig upgrade) strih-pp: `strih-pp-intercom` on
-`enp5s0f1.70`, dsg `STREAM master L/R` (96 kHz) into the cutters' cans at -8 dB as `dsg_dante`. Since the cut-over
+`enp5s0f1.70`, dsg `STREAM master L/R` (96 kHz) as `dsg_dante`, the PP program feed. Since the cut-over
 (3.11.2026, FOH turned its VBAN `fohabl-strih` off) the Dante device is the FOH program feed.
 
 ## The pieces
@@ -51,7 +51,10 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   the FOH side must follow in the converter's `DLINK`. History: 2.11. the Yamaha card
   (`foh-abl-yamaha-accelerator` 07/08/09/32) via FOH VB-Matrix, silent since the move.
 - **strih-pp's mapping** (intercom#32, owner 18.11.2026, the PP rig upgrade): dsg's `STREAM master L` /
-  `STREAM master R` (96 kHz) as `dsg_dante` into the cutters' cans at -8 dB, next to lv1. The PP TOML
+  `STREAM master R` (96 kHz) as `dsg_dante`. Since LV1 stopped sending VBAN `strih` to strih-pp
+  (18.11.2026, the vestibule went silent) it took every lv1 point, the SNV cut-over pattern: the
+  vestibule HDMI at unity, the cutters' cans at -8 dB; lv1 stays declared and routed nowhere, so the
+  program never sounds twice. The PP TOML
   is hand-edited (the converter generates strih-snv only), so a dsg TX rename must follow in
   `intercom.strih-pp.toml` `[[dlink.subscribe]]`.
 - **A running flow of zeros is a SOURCE question, not ours:** 1.9.6 had status 9 and a granted

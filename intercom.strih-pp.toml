@@ -200,31 +200,34 @@ adapter = "dlink"
 in_channels = 2
 out_channels = 0
 
-# --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3)
+# --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3). Since intercom#32
+# (18.11.2026) the program comes from dsg over Dante: lv1 stopped sending VBAN `strih` here, so lv1
+# stays declared and routed nowhere (the SNV cut-over pattern, fohabl -> foh_dante).
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 1
 dst = "vestibule"
 out_ch = 1
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 2
 dst = "vestibule"
 out_ch = 2
 
-# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026: kept)
+# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026: kept;
+# from dsg over Dante since intercom#32)
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
 gain_db = -8.0
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
@@ -1195,19 +1198,3 @@ src = "phones"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
-
-# --- the dsg stream master over Dante into the cutters' cans, -8 dB like lv1 (intercom#32)
-
-[[point]]
-src = "dsg_dante"
-in_ch = 1
-dst = "cutters"
-out_ch = 1
-gain_db = -8.0
-
-[[point]]
-src = "dsg_dante"
-in_ch = 2
-dst = "cutters"
-out_ch = 2
-gain_db = -8.0

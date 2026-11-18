@@ -23,8 +23,9 @@ Design: issue 1424 comment 6151522810 (Approach 1).
 - **Matrix:** adapter `alsa_hdmi` + `hdmi_connector` = the X RandR output name (`HDMI-1`), never a
   card/device number. Output only (`in_channels = 0`), `out_channels` 2..=8 (an HDA HDMI PCM opens
   with 2..8), one participant per connector, `hdmi_connector` refused on every other adapter.
-  `Matrix::alsa_hdmi_outputs()`. strih-pp: `vestibule` (program_monitor) + lv1 ch1/ch2 -> ch1/ch2 at
-  unity.
+  `Matrix::alsa_hdmi_outputs()`. strih-pp: `vestibule` (program_monitor) + the program ch1/ch2 ->
+  ch1/ch2 at unity: lv1's VBAN until 18.11.2026, since then `dsg_dante` (dsg's stream master over
+  Dante, intercom#32; lv1 stopped sending).
 - **Resolve (`hdmi_audio.rs`):** the connector EDID from `xrandr --current --props` (NVIDIA puts no
   EDID in `/sys/class/drm`; `--current` never makes X re-probe every output), every HDMI PCM's ELD
   from `amixer -c N controls` + `cget iface=PCM,name=ELD,device=D`, each call under `timeout 5`. The
