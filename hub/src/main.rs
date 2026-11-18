@@ -984,7 +984,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
 
     // --- The hub's own HDMI audio legs (issue 1424 part 3): an `alsa_hdmi` participant's N-1 bus is
     // played straight into its NAMED connector's ALSA hw PCM by a supervised aplay (the strih-pp
-    // vestibule: lv1's program on HDMI-1), no PipeWire node and no OBS in between. The leg resolves
+    // vestibule: the program on HDMI-1), no PipeWire node and no OBS in between. The leg resolves
     // the connector itself and stays silent with one named log line while it cannot.
     let mut hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)> = Vec::new();
     for (pid, connector, chans) in matrix.alsa_hdmi_outputs() {

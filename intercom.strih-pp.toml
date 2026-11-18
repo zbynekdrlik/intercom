@@ -25,7 +25,7 @@
 # obs-vban source `ASIO zvuk` (scripts/strih-boxes/strih-pp.env), so the `program_out` participant
 # (adapter pipewire, the `strih-program` sink OBS captured) and its two lv1 points are gone, and with
 # them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on 6980 still feeds
-# the cans and the vestibule. Rollback: put the participant + the two points back from the previous
+# the cans and the vestibule (until 18.11.2026: dsg_dante since intercom#32, lv1 routed nowhere). Rollback: put the participant + the two points back from the previous
 # version of this file and set the four STRIH_PROGRAM_* facts back to none.
 # 29.10.2026 (issue 1431, a joint event): every camera cam1-7, so the strih behind strih.lan serves
 # the SNV cameras too. A camera sits at the same 10.77.9.6N at both venues; that address is only the
@@ -52,8 +52,9 @@ jpeg_quality = 70
 enabled = true
 
 # 18.11.2026 (intercom#32, owner: the PP rig upgrade, "PP on the SNV level"): the hub's own Dante
-# device, the strih-snv shape. dsg (96 kHz) sends the stream master mix; the cutters hear it next to
-# lv1, -8 dB like SNV's repro. Slot 2 (ARC 4442: RX 29928-29959), so it never shares strih-snv's
+# device, the strih-snv shape. dsg (96 kHz) sends the stream master mix; since lv1 stopped sending
+# (same day) it took all four lv1 points: the vestibule at unity, the cutters' cans at -8 dB like
+# SNV's repro. Slot 2 (ARC 4442: RX 29928-29959), so it never shares strih-snv's
 # slot 1 or strih-obs's slot 0; camera-box declares it in strih-pp's STRIH_DANTE_DEVICES (its peer
 # message 18.11.2026; setup-strih step 13 opens the slot's ports).
 [dlink]

@@ -11,9 +11,9 @@ paths:
 
 # The intercom hub's own HDMI audio leg: `alsa_hdmi` (issue 1424 part 3)
 
-Owner 13.10.2026: the PP vestibule TV (strih-pp HDMI-1 -> Blackmagic HDMI-to-SDI) hears the lv1
-program with zero added latency, never behind the picture. The hub receives lv1's VBAN `strih`
-earliest of any process on the box, so it plays the vestibule participant's N-1 bus straight into
+Owner 13.10.2026: the PP vestibule TV (strih-pp HDMI-1 -> Blackmagic HDMI-to-SDI) hears the
+program with zero added latency, never behind the picture. The hub receives the program (lv1's
+VBAN `strih` until 18.11.2026, dsg over Dante since intercom#32) earliest of any process on the box, so it plays the vestibule participant's N-1 bus straight into
 the connector's ALSA hw PCM. The picture stays the in-OBS fixed output on HDMI-1 (part 2); the OBS
 module must leave HDMI-1's PCM alone (per-output audio off, part 2's lane), or aplay finds it busy.
 Design: issue 1424 comment 6151522810 (Approach 1).
