@@ -156,16 +156,26 @@ jobs:
     # A bound, not a band-aid: the whole job takes 2-3 min. On 4.11.2026 `playwright install
     # --with-deps` hung 40 min on a GitHub runner with no limit (the default is 6 h).
     timeout-minutes: 20
+    # The official image of the pinned @playwright/test (tests/e2e/package-lock.json, 1.49.1)
+    # carries node, the browsers and every system library they need. `playwright install
+    # --with-deps` fetched ~120 MB from the Ubuntu mirror on every run, and on 18.11.2026 the mirror
+    # served it at ~110 kB/s: 18 min, the job's whole bound, twice. Bump the tag with the package.
+    container:
+      image: mcr.microsoft.com/playwright:v1.49.1-noble
+      options: --ipc=host
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install Playwright chromium + webkit
-        working-directory: tests/e2e
+      - name: python3 for the stub hub
         run: |
-          npm ci
-          npx playwright install --with-deps chromium webkit
+          set -euo pipefail
+          if ! command -v python3 >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends python3
+          fi
+          python3 --version
+      - name: npm ci
+        working-directory: tests/e2e
+        run: npm ci
       - name: Playwright
         working-directory: tests/e2e
         run: npx playwright test
