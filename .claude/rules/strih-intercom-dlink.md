@@ -135,6 +135,9 @@ as a dev-dependency at the SAME tag as `dlink` (one dstack in the lockfile).
 
 Both `dlink` and the `dstack` dev-dependency move together in `hub/Cargo.toml`; then
 `cargo update -p dstack`. A Dante need or bug goes to dstack over peer; intercom only moves the tag.
+**One dstack version for every app (owner, dstack#399, 18.11.2026):** dstack checks the pins once a
+week (Wednesday morning) and sends ONE upgrade ask with notes measured from our pin; take that tag
+then, release, and send dstack and camera-box the tag + sha256.
 Read dstack's CHANGELOG between the two tags first: a `Port:` line names an API that moved
 (v0.6.22: `Config::latency_ns` gone, `budget_ns` replaces it) and a test that pinned the old value.
 Then run the 96k test under CPU contention before pushing: CI's Coverage runner is slow enough to
