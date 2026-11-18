@@ -163,11 +163,14 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.49.1-noble
       options: --ipc=host
+    # A container step defaults to `sh -e` (dash, no pipefail); bash runs `-eo pipefail`.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: python3 for the stub hub
         run: |
-          set -euo pipefail
           if ! command -v python3 >/dev/null; then
             apt-get update
             apt-get install -y --no-install-recommends python3
