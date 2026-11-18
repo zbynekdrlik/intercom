@@ -1,14 +1,15 @@
 //! The hub's own Dante device (intercom#5): dstack's `dlink` embedded in this process.
 //!
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
-//! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
-//! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. strih-pp
-//! (intercom#32) receives dsg's `STREAM master L/R` into the vestibule HDMI and the cutters'
-//! cans the same way (it took every point of lv1's VBAN, which stopped on 18.11.2026). dstack owns
-//! the protocol, the subscriptions (kept in `state_file`), dlink's default latency terms (dlink
-//! v0.6.106: the 15 ms reference path each way, P = network latency + receive buffer) at normal priority and the media clock: Dante PTP followed in process,
-//! the dsync service as fallback (dstack#20, dstack#68, dstack#1). The hub only declares its wanted
-//! subscriptions (`[[dlink.subscribe]]`); one Dante Controller sets wins.
+//! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries
+//! every point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. strih-pp
+//! (intercom#32) receives dsg's `STREAM master L/R` into the vestibule HDMI and the cutters' cans
+//! the same way (it took every point of lv1's VBAN, which stopped on 18.11.2026). dstack owns the
+//! protocol, the subscriptions (kept in `state_file`), dlink's default latency terms (dlink
+//! v0.6.106: the 15 ms reference path each way, P = network latency + receive buffer) at normal
+//! priority and the media clock: Dante PTP followed in process, the dsync service as fallback
+//! (dstack#20, dstack#68, dstack#1). The hub only declares its wanted subscriptions
+//! (`[[dlink.subscribe]]`); one Dante Controller sets wins.
 //!
 //! The crossing into the hub:
 //!
