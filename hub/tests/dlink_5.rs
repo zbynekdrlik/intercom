@@ -284,17 +284,17 @@ fn dstack_s_own_device_checks_refuse_a_bad_table_at_load() {
     let low = format!("{DLINK}network_latency_ms = 0.5\nreceive_buffer_ms = 0.5\n");
     let e = refusal(&format!("{HEAD}{low}{}", participant(1, 0)));
     assert!(e.contains("network_latency_ns + receive_buffer_ns"), "{e}");
-    for bad in ["0", "-1.5", "0.0000004", "1001", "nan", "inf"] {
+    for bad in ["0", "-1.5", "0.0000004", "0.0000009", "1001", "nan", "inf"] {
         let t = format!("{DLINK}network_latency_ms = {bad}\n");
         let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
         assert!(
-            e.contains("network_latency_ms: a positive number"),
+            e.contains("network_latency_ms: ms from 0.000001 to"),
             "{bad}: {e}"
         );
         let t = format!("{DLINK}receive_buffer_ms = {bad}\n");
         let e = refusal(&format!("{HEAD}{t}{}", participant(1, 0)));
         assert!(
-            e.contains("receive_buffer_ms: a positive number"),
+            e.contains("receive_buffer_ms: ms from 0.000001 to"),
             "{bad}: {e}"
         );
     }
@@ -1189,4 +1189,18 @@ fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
         }
     }
     assert_eq!(devices, 1, "strih-snv's device was checked");
+}
+
+// The refusal's range is exactly what `ms_to_ns` takes: both ends are accepted (intercom#30).
+#[test]
+fn a_latency_term_at_either_end_of_the_range_is_accepted() {
+    use intercom_hub::dlink_leg::{ms_to_ns, MAX_TERM_MS, MIN_TERM_MS};
+    assert_eq!(MIN_TERM_MS, 0.000001);
+    assert_eq!(MAX_TERM_MS, 1000.0);
+    assert_eq!(ms_to_ns(0.000001), Some(1));
+    assert_eq!(ms_to_ns(0.0000011), Some(1));
+    assert_eq!(ms_to_ns(999.999999), Some(999_999_999));
+    assert_eq!(ms_to_ns(1000.0), Some(1_000_000_000));
+    assert_eq!(ms_to_ns(0.0000009), None);
+    assert_eq!(ms_to_ns(1000.000001), None);
 }

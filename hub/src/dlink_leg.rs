@@ -213,7 +213,7 @@ impl DlinkConfig {
             if let Some(v) = ms {
                 if ms_to_ns(v).is_none() {
                     out.push(format!(
-                        "{key}: a positive number of ms up to {MAX_TERM_MS}, got {v}"
+                        "{key}: ms from {MIN_TERM_MS} to {MAX_TERM_MS}, got {v}"
                     ));
                 }
             }
@@ -232,18 +232,21 @@ impl DlinkConfig {
     }
 }
 
+/// The smallest latency term the TOML takes, in ms: 1 ns.
+pub const MIN_TERM_MS: f64 = 0.000001;
+
 /// The largest latency term the TOML takes, in ms: far past any Dante latency (Dante's own menu
 /// ends at 10 ms).
 pub const MAX_TERM_MS: f64 = 1000.0;
 
-/// A TOML term in ms as whole ns (dstack's CLI takes up to 6 decimals, so ns are exact); `None`
-/// for one that is not a finite number up to [`MAX_TERM_MS`] of at least 1 ns once rounded.
+/// A TOML term in ms as whole ns (dstack's CLI takes up to 6 decimals; more are rounded to the
+/// nearest ns); `None` for one that is not a finite number from [`MIN_TERM_MS`] to
+/// [`MAX_TERM_MS`] (checked before rounding, so the refusal's range is exactly what is accepted).
 pub fn ms_to_ns(ms: f64) -> Option<u64> {
-    if !ms.is_finite() || ms > MAX_TERM_MS {
+    if !ms.is_finite() || !(MIN_TERM_MS..=MAX_TERM_MS).contains(&ms) {
         return None;
     }
-    let ns = (ms * 1_000_000.0).round();
-    (ns >= 1.0).then_some(ns as u64)
+    Some((ms * 1_000_000.0).round() as u64)
 }
 
 /// A float sample from the Dante engine as the hub's i16: rounded, saturating, NaN as 0.
