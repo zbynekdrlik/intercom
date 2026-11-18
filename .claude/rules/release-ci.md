@@ -40,6 +40,12 @@ paths:
 
 ## Local test notes (dev1)
 
+- **CI's E2E job runs in `mcr.microsoft.com/playwright:v<version>-noble`** (18.11.2026): the image
+  tag must equal `@playwright/test` in `tests/e2e/package-lock.json`, so bump both together. The old
+  `playwright install --with-deps` pulled ~120 MB from the Ubuntu mirror every run and timed the job
+  out twice when the mirror served ~110 kB/s.
+  A container job's `run:` steps default to `sh -e` (dash: `set -o pipefail` fails, exit 2), so
+  the job sets `defaults.run.shell: bash` (`bash -eo pipefail`).
 - E2E: `cd tests/e2e && npm ci && INTERKOM_E2E_PORT=18792 npx playwright test`. Port 8792 is held
   by another account. Playwright 1.49.1's WebKit (`webkit-2104`) is not in `/opt/ms-playwright`, so
   the three iPhone specs run on CI only (`playwright install` into this account is hook-blocked).

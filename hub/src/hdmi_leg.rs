@@ -1,5 +1,5 @@
 //! issue 1424 part 3: the hub's own HDMI audio leg, a supervised `aplay` on a named connector's hw
-//! PCM (the strih-pp vestibule: lv1's program on HDMI-1, straight from the hub).
+//! PCM (the strih-pp vestibule: the program on HDMI-1, straight from the hub).
 //!
 //! The same egress shape as the pw-cat playback legs ([`crate::local_audio`]): an OS thread owns the
 //! child, the block loop `try_send`s one interleaved PCM16 block per tick, and every write goes

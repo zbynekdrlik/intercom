@@ -27,8 +27,9 @@ fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
         m.participants.iter().all(|p| p.adapter != ADAPTER_PIPEWIRE),
         "no pipewire participant on strih-pp"
     );
-    // issue 1431: every camera cam1-7 (a joint event brings the SNV cameras here too).
-    assert_eq!((m.participants.len(), m.points.len()), (11, 164));
+    // issue 1431: every camera cam1-7 (a joint event brings the SNV cameras here too);
+    // intercom#32: + the Dante participant, which took lv1's four points (lv1 routed nowhere).
+    assert_eq!((m.participants.len(), m.points.len()), (12, 164));
     assert!(m.janus.is_some(), "the phones leg");
     assert_eq!(
         m.video.as_ref().map(|v| v.ndi_source_name.as_str()),
@@ -92,14 +93,15 @@ fn assert_program_only(toml: &str, stream: &str) {
     assert_eq!(streams, [stream.to_string()]);
 }
 
-/// issue 1424 part 3 (owner 13.10.2026, "mozme to tak spravit"): the PP vestibule TV hears the lv1
+/// issue 1424 part 3 (owner 13.10.2026, "mozme to tak spravit"): the PP vestibule TV hears the
 /// program straight from the hub on strih-pp's HDMI-1 (the Blackmagic HDMI-to-SDI converter), both
-/// channels at unity and nothing else; the connector is named, never a card/device number.
+/// channels at unity and nothing else; the connector is named, never a card/device number. Since
+/// intercom#32 (18.11.2026) the program is dsg's stream master over Dante: lv1 stopped sending.
 #[test]
-fn strih_pp_vestibule_hears_the_lv1_program_on_hdmi_1() {
+fn strih_pp_vestibule_hears_the_program_on_hdmi_1() {
     use intercom_hub::matrix::ADAPTER_ALSA_HDMI;
     let m = Matrix::from_toml(PP_TOML).expect("the PP matrix must load through Matrix::from_toml");
-    let lv1 = m.id_of("lv1").expect("lv1");
+    let dante = m.id_of("dsg_dante").expect("the Dante program");
     let ves = m.id_of("vestibule").expect("the vestibule participant");
     let p = &m.participants[ves];
     assert_eq!(p.adapter, ADAPTER_ALSA_HDMI);
@@ -114,7 +116,7 @@ fn strih_pp_vestibule_hears_the_lv1_program_on_hdmi_1() {
         .map(|pt| (pt.src, pt.in_ch, pt.out_ch, pt.gain_db))
         .collect();
     to_ves.sort_by_key(|r| r.1);
-    assert_eq!(to_ves, [(lv1, 1, 1, 0.0), (lv1, 2, 2, 0.0)]);
+    assert_eq!(to_ves, [(dante, 1, 1, 0.0), (dante, 2, 2, 0.0)]);
     assert!(
         m.points.iter().all(|pt| pt.src != ves),
         "the vestibule is an output only"
@@ -147,4 +149,59 @@ fn strih_pp_cutters_open_the_mg_xu_by_card_id_1438() {
     assert_eq!(c.out_map, [0, 1]);
     // Issue 1439 (24.10.2026): no program sink either; OBS takes lv1's `strih-obs` itself.
     assert!(m.program_out().is_none());
+}
+
+/// intercom#32 (owner 18.11.2026, the PP rig upgrade: "PP on the SNV level"): the strih-pp hub is
+/// its own Dante device, the strih-snv shape: dsg's stream master L/R at 96 kHz. It took every
+/// point lv1's VBAN had (the SNV cut-over pattern): the vestibule at unity, the cans at -8 dB; lv1
+/// stays declared and routed nowhere, so the program never sounds twice.
+#[test]
+fn strih_pp_hears_dsg_s_stream_master_over_its_own_dante_device() {
+    let m = Matrix::from_toml(PP_TOML).expect("the PP matrix must load");
+    let d = m
+        .dlink
+        .as_ref()
+        .expect("strih-pp runs the hub's Dante device");
+    assert_eq!(d.name, "strih-pp-intercom");
+    assert_eq!(
+        d.iface, "enp5s0f1.70",
+        "camera-box: the Dante VLAN on the X520 rig port"
+    );
+    assert_eq!(d.network_rate, Some(96_000), "dsg runs 96 kHz");
+    assert_eq!(d.rx, ["STREAM L", "STREAM R"]);
+    let subs: Vec<(&str, &str, &str)> = d
+        .subscribe
+        .iter()
+        .map(|s| (s.rx.as_str(), s.tx_channel.as_str(), s.tx_device.as_str()))
+        .collect();
+    assert_eq!(
+        subs,
+        [
+            ("STREAM L", "STREAM master L", "dsg"),
+            ("STREAM R", "STREAM master R", "dsg"),
+        ]
+    );
+    let dante = m.id_of("dsg_dante").expect("the dlink participant");
+    let name = |id: usize| m.participants[id].name.as_str();
+    let mut from_dante: Vec<(&str, usize, usize, f32)> = m
+        .points
+        .iter()
+        .filter(|p| p.src == dante)
+        .map(|p| (name(p.dst), p.in_ch, p.out_ch, p.gain_db))
+        .collect();
+    from_dante.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        from_dante,
+        [
+            ("cutters", 1, 1, -8.0),
+            ("cutters", 2, 2, -8.0),
+            ("vestibule", 1, 1, 0.0),
+            ("vestibule", 2, 2, 0.0),
+        ]
+    );
+    let lv1 = m.id_of("lv1").expect("lv1 stays declared");
+    assert!(
+        m.points.iter().all(|p| p.src != lv1),
+        "lv1 is routed nowhere: the program never sounds twice"
+    );
 }

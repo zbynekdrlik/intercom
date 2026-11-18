@@ -20,13 +20,17 @@
 # 24.10.2026 (issue 1461): every ingress leg crosses its sender's clock with the hub's resampler and holds a
 # FIXED target depth, `target_ms` rounded up to whole 256-frame blocks and read at start only: the cameras
 # 16 ms (3 blocks), lv1 37.33 ms (7 blocks), the MG-XU capture 42.67 ms (8 blocks).
-# 24.10.2026 (issue 1439 phase 2 on strih-pp, design 6385519443): the hub forwards nothing into OBS any
-# more. lv1 sends the program as its own VBAN stream `strih-obs` to UDP 6981 straight into the OBS
-# obs-vban source `ASIO zvuk` (scripts/strih-boxes/strih-pp.env), so the `program_out` participant
-# (adapter pipewire, the `strih-program` sink OBS captured) and its two lv1 points are gone, and with
-# them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on 6980 still feeds
-# the cans and the vestibule. Rollback: put the participant + the two points back from the previous
-# version of this file and set the four STRIH_PROGRAM_* facts back to none.
+# 24.10.2026 (issue 1439 phase 2 on strih-pp, design 6385519443): the hub forwards nothing into OBS
+# any more. lv1 sends the program as its own VBAN stream `strih-obs` to UDP 6981 straight into the
+# OBS obs-vban source `ASIO zvuk` (scripts/strih-boxes/strih-pp.env), so the `program_out`
+# participant (adapter pipewire, the `strih-program` sink OBS captured) and its two lv1 points are
+# gone, and with them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on
+# 6980 fed the cans and the vestibule until 18.11.2026. Rollback: put the participant + the two
+# points back from the previous version of this file and set the four STRIH_PROGRAM_* facts back to
+# none.
+# 18.11.2026 (intercom#32, the PP rig upgrade): lv1 stopped sending `strih` here; the hub's own
+# Dante device (the [dlink] block below) carries dsg's stream master into the cans and the
+# vestibule, lv1 is declared and routed nowhere.
 # 29.10.2026 (issue 1431, a joint event): every camera cam1-7, so the strih behind strih.lan serves
 # the SNV cameras too. A camera sits at the same 10.77.9.6N at both venues; that address is only the
 # start-up return address, the hub sends each camN its mix to wherever camN's own stream comes from.
@@ -50,6 +54,32 @@ ndi_source_name = "STRIH-PP (interkom)"
 fps = 10
 jpeg_quality = 70
 enabled = true
+
+# 18.11.2026 (intercom#32, owner: the PP rig upgrade, "PP on the SNV level"): the hub's own Dante
+# device, the strih-snv shape. dsg (96 kHz) sends the stream master mix; since lv1 stopped sending
+# (same day) it took all four lv1 points: the vestibule at unity, the cutters' cans at -8 dB like
+# SNV's repro. Slot 2 (ARC 4442: RX 29928-29959), so it never shares strih-snv's
+# slot 1 or strih-obs's slot 0; camera-box declares it in strih-pp's STRIH_DANTE_DEVICES (its peer
+# message 18.11.2026; setup-strih step 13 opens the slot's ports).
+[dlink]
+name = "strih-pp-intercom"
+iface = "enp5s0f1.70"
+rx = ["STREAM L", "STREAM R"]
+arc_port = 4442
+cmc_port = 8802
+flows_port = 4457
+process_id = 1
+network_rate = 96000
+
+[[dlink.subscribe]]
+rx = "STREAM L"
+tx_channel = "STREAM master L"
+tx_device = "dsg"
+
+[[dlink.subscribe]]
+rx = "STREAM R"
+tx_channel = "STREAM master R"
+tx_device = "dsg"
 
 [[participant]]
 name = "cam1"
@@ -168,31 +198,41 @@ hdmi_connector = "HDMI-1"
 in_channels = 0
 out_channels = 2
 
-# --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3)
+[[participant]]
+name = "dsg_dante"
+role = "program_ref"
+adapter = "dlink"
+in_channels = 2
+out_channels = 0
+
+# --- the program to the vestibule TV on HDMI-1, unity (issue 1424 part 3). Since intercom#32
+# (18.11.2026) the program comes from dsg over Dante: lv1 stopped sending VBAN `strih` here, so lv1
+# stays declared and routed nowhere (the SNV cut-over pattern, fohabl -> foh_dante).
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 1
 dst = "vestibule"
 out_ch = 1
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 2
 dst = "vestibule"
 out_ch = 2
 
-# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026: kept)
+# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026:
+# kept; from dsg over Dante since intercom#32)
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 1
 dst = "cutters"
 out_ch = 1
 gain_db = -8.0
 
 [[point]]
-src = "lv1"
+src = "dsg_dante"
 in_ch = 2
 dst = "cutters"
 out_ch = 2

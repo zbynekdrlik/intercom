@@ -1,7 +1,7 @@
 //! issue 1424 part 3: which ALSA hw PCM carries a NAMED HDMI connector's audio, for the hub's own
 //! HDMI leg (the strih-pp vestibule TV behind the Blackmagic HDMI-to-SDI converter on HDMI-1).
 //!
-//! The owner wants the vestibule to hear the lv1 program with no added delay (13.10.2026): the hub
+//! The owner wants the vestibule to hear the program with no added delay (13.10.2026): the hub
 //! already holds that feed earliest of any process on the box, so it plays the participant's N-1 bus
 //! straight into the connector's hw PCM through `aplay` ([`crate::hdmi_leg`]), with no PipeWire node
 //! and no OBS in between.

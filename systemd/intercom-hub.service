@@ -1,5 +1,5 @@
 [Unit]
-Description=strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
+Description=strih intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345)
 Documentation=https://github.com/zbynekdrlik/intercom
 # Ordered after the network is up so the VBAN receive socket (:6980) binds cleanly.
 After=network-online.target
@@ -7,8 +7,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# The hub loads its declarative matrix (generated from the VB-Matrix XML by
-# scripts/vbmatrix_to_intercom_toml.py) and fails loud on a malformed TOML or a bind failure.
+# The hub loads its declarative matrix (strih-snv's generated from the VB-Matrix XML by
+# scripts/vbmatrix_to_intercom_toml.py, the others hand-edited) and fails loud on a malformed TOML
+# or a bind failure.
 ExecStart=/usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.toml
 Restart=on-failure
 RestartSec=5

@@ -1148,7 +1148,8 @@ fn strih_snv_s_device_loads_over_the_phase_1_state_file() {
 fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
     // camera-box#1519: one generic stateful Dante-leg filter on every PC accepts dstack's flow
     // range (29800-31847). The hub's device declares no base, so dstack binds its own slot's
-    // block (ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927), clear of OBS's strih-obs.
+    // block (strih-snv ARC 4441 = slot 1: RX 29864-29895, TX 29896-29927; strih-pp ARC 4442 = slot
+    // 2: RX 29928-29959, TX 29960-29991), clear of OBS's strih-obs (slot 0).
     use dstack::device::ports::{flow_bases, FLOW_PORT_FIRST, FLOW_PORT_LAST, PORT_SLOTS};
     let mut devices = 0;
     for (name, toml) in [
@@ -1157,9 +1158,12 @@ fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
         ("stream-snv", include_str!("../../intercom.stream-snv.toml")),
         ("stream-pp", include_str!("../../intercom.stream-pp.toml")),
     ] {
-        // Only strih-snv has a Dante network (owner 2.11.2026).
+        // The two strih boxes have a Dante network (strih-pp since its rig upgrade, intercom#32).
         let Some(d) = Matrix::from_toml(toml).unwrap().dlink else {
-            assert_ne!(name, "strih-snv", "strih-snv runs the hub's Dante device");
+            assert!(
+                !name.starts_with("strih-"),
+                "{name} runs the hub's Dante device"
+            );
             continue;
         };
         devices += 1;
@@ -1184,11 +1188,15 @@ fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
                 "{name}: flow ports {ports:?} leave {FLOW_PORT_FIRST}-{FLOW_PORT_LAST}"
             );
         }
-        if name == "strih-snv" {
-            assert_eq!((bases.slot, bases.rx, bases.tx), (Some(1), 29_864, 29_896));
-        }
+        // Distinct slots: the two hubs never share a block if they ever meet on one network.
+        let want = match name {
+            "strih-snv" => (Some(1), 29_864, 29_896),
+            "strih-pp" => (Some(2), 29_928, 29_960),
+            _ => panic!("{name}: an unexpected Dante device"),
+        };
+        assert_eq!((bases.slot, bases.rx, bases.tx), want, "{name}");
     }
-    assert_eq!(devices, 1, "strih-snv's device was checked");
+    assert_eq!(devices, 2, "both strih hubs' devices were checked");
 }
 
 // The refusal's range is exactly what `ms_to_ns` takes: both ends are accepted (intercom#30).

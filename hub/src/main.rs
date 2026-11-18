@@ -248,8 +248,9 @@ async fn main() -> Result<()> {
     // talkback playback — see `wire_local_audio`.
     let mut local_audio = wire_local_audio(&matrix, &jitter);
 
-    // --- The hub's own Dante device (intercom#5): dstack's dlink in this process, its RX pushed into
-    // the `dlink` participant's resampler leg. Absent `[dlink]` (strih-pp) = no device.
+    // --- The hub's own Dante device (intercom#5): dstack's dlink in this process, its RX pushed
+    // into the `dlink` participant's resampler leg. Absent `[dlink]` (stream-snv, stream-pp) = no
+    // device.
     let dlink_leg = matrix.dlink_participant().map(|(d, pid)| {
         let stats = Arc::new(DlinkStats::default());
         tracing::info!(
@@ -984,7 +985,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
 
     // --- The hub's own HDMI audio legs (issue 1424 part 3): an `alsa_hdmi` participant's N-1 bus is
     // played straight into its NAMED connector's ALSA hw PCM by a supervised aplay (the strih-pp
-    // vestibule: lv1's program on HDMI-1), no PipeWire node and no OBS in between. The leg resolves
+    // vestibule: the program on HDMI-1), no PipeWire node and no OBS in between. The leg resolves
     // the connector itself and stays silent with one named log line while it cannot.
     let mut hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)> = Vec::new();
     for (pid, connector, chans) in matrix.alsa_hdmi_outputs() {
