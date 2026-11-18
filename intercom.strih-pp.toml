@@ -24,12 +24,12 @@
 # more. lv1 sends the program as its own VBAN stream `strih-obs` to UDP 6981 straight into the OBS
 # obs-vban source `ASIO zvuk` (scripts/strih-boxes/strih-pp.env), so the `program_out` participant
 # (adapter pipewire, the `strih-program` sink OBS captured) and its two lv1 points are gone, and with
-# them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on 6980 fed
-# the cans and the vestibule until 18.11.2026. Rollback: put the participant + the two points back from
-# the previous version of this file and set the four STRIH_PROGRAM_* facts back to none.
-# 18.11.2026 (intercom#32, the PP rig upgrade): LV1 stopped sending `strih` here; the hub's own Dante
-# device (the [dlink] block below) carries dsg's stream master into the cans and the vestibule, lv1 is
-# declared and routed nowhere.
+# them the last reason for PipeWire on this box (issue 1440). lv1's `strih` stream on 6980 fed the
+# cans and the vestibule until 18.11.2026. Rollback: put the participant + the two points back
+# from the previous version of this file and set the four STRIH_PROGRAM_* facts back to none.
+# 18.11.2026 (intercom#32, the PP rig upgrade): lv1 stopped sending `strih` here; the hub's own
+# Dante device (the [dlink] block below) carries dsg's stream master into the cans and the
+# vestibule, lv1 is declared and routed nowhere.
 # 29.10.2026 (issue 1431, a joint event): every camera cam1-7, so the strih behind strih.lan serves
 # the SNV cameras too. A camera sits at the same 10.77.9.6N at both venues; that address is only the
 # start-up return address, the hub sends each camN its mix to wherever camN's own stream comes from.
@@ -220,8 +220,8 @@ in_ch = 2
 dst = "vestibule"
 out_ch = 2
 
-# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026: kept;
-# from dsg over Dante since intercom#32)
+# --- the program to the cutters' ears, 8 dB down (the SNV lv1 -> cutters points; owner 21.10.2026:
+# kept; from dsg over Dante since intercom#32)
 
 [[point]]
 src = "dsg_dante"

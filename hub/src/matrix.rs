@@ -320,7 +320,8 @@ pub struct Matrix {
     pub hub: HubConfig,
     pub janus: Option<JanusConfig>,
     pub video: Option<VideoConfig>,
-    /// The hub's own Dante device (intercom#5), absent on a box without one (stream-snv, stream-pp).
+    /// The hub's own Dante device (intercom#5), absent on a box without one (stream-snv,
+    /// stream-pp).
     pub dlink: Option<DlinkConfig>,
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,

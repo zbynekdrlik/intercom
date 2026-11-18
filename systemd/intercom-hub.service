@@ -8,8 +8,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 # The hub loads its declarative matrix (strih-snv's generated from the VB-Matrix XML by
-# scripts/vbmatrix_to_intercom_toml.py, the others hand-edited) and fails loud on a malformed TOML or a
-# bind failure.
+# scripts/vbmatrix_to_intercom_toml.py, the others hand-edited) and fails loud on a malformed TOML
+# or a bind failure.
 ExecStart=/usr/local/bin/intercom-hub --config /etc/intercom-hub/intercom.toml
 Restart=on-failure
 RestartSec=5
