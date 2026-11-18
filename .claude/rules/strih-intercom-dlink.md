@@ -50,6 +50,10 @@ capability) with the dsync service as fallback (a loopback UDP poll, works under
   `Repro 0db L` / `Repro 0db R`, `band-asio-dante` `Click 3doba` / `Guide 2 iem`. A TX rename on
   the FOH side must follow in the converter's `DLINK`. History: 2.11. the Yamaha card
   (`foh-abl-yamaha-accelerator` 07/08/09/32) via FOH VB-Matrix, silent since the move.
+- **strih-pp's mapping** (intercom#32, owner 18.11.2026, the PP rig upgrade): dsg's `STREAM master L` /
+  `STREAM master R` (96 kHz) as `dsg_dante` into the cutters' cans at -8 dB, next to lv1. The PP TOML
+  is hand-edited (the converter generates strih-snv only), so a dsg TX rename must follow in
+  `intercom.strih-pp.toml` `[[dlink.subscribe]]`.
 - **A running flow of zeros is a SOURCE question, not ours:** 1.9.6 had status 9 and a granted
   flow from the card, yet -120 dBFS; the wire carried zero audio bytes because FOH had moved
   Ableton off the card. Ask dstack/dasio what feeds the TX channel now before touching the hub.
@@ -176,8 +180,9 @@ and the box's nginx keeps `127.0.0.1:8790`.
     this public repo.
 
   Neither set means no filter (stream-snv, stream-pp). A malformed `DANTE_SUBNET` stops the hub at start. The
-  iface part counts only once the interface exists. strih-snv's NM VLAN is up before the hub
-  starts; anywhere else, set `DANTE_SUBNET` for cover from the first second.
+  iface part counts only once the interface exists. strih-snv's and strih-pp's NM VLANs (strih-pp:
+  `vban-dante70`, camera-box 18.11.2026) are up before the hub starts (NM-wait-online + the
+  unit's `After=network-online.target`); anywhere else, set `DANTE_SUBNET` for cover from the first second.
 - **TCP:** `http_serve::serve` is the hub's own accept loop. axum 0.7's `serve` has no accept hook:
   its `make_service` future is `Infallible`. The loop drops a stream whose local **or peer**
   address is Dante before reading a byte. Linux accepts a packet for any local address on any
