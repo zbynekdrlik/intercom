@@ -239,9 +239,9 @@ pub const MIN_TERM_MS: f64 = 0.000001;
 /// ends at 10 ms).
 pub const MAX_TERM_MS: f64 = 1000.0;
 
-/// A TOML term in ms as whole ns (dstack's CLI takes up to 6 decimals, so ns are exact); `None`
-/// for one that is not a finite number from [`MIN_TERM_MS`] to [`MAX_TERM_MS`] (checked before
-/// rounding, so the refusal's range is exactly what is accepted).
+/// A TOML term in ms as whole ns (dstack's CLI takes up to 6 decimals; more are rounded to the
+/// nearest ns); `None` for one that is not a finite number from [`MIN_TERM_MS`] to
+/// [`MAX_TERM_MS`] (checked before rounding, so the refusal's range is exactly what is accepted).
 pub fn ms_to_ns(ms: f64) -> Option<u64> {
     if !ms.is_finite() || !(MIN_TERM_MS..=MAX_TERM_MS).contains(&ms) {
         return None;

@@ -1190,3 +1190,15 @@ fn every_deployed_device_takes_its_slot_s_flow_ports_inside_dstack_s_range() {
     }
     assert_eq!(devices, 1, "strih-snv's device was checked");
 }
+
+// The refusal's range is exactly what `ms_to_ns` takes: both ends are accepted (intercom#30).
+#[test]
+fn a_latency_term_at_either_end_of_the_range_is_accepted() {
+    use intercom_hub::dlink_leg::{ms_to_ns, MAX_TERM_MS, MIN_TERM_MS};
+    assert_eq!(ms_to_ns(MIN_TERM_MS), Some(1));
+    assert_eq!(ms_to_ns(0.000001), Some(1));
+    assert_eq!(ms_to_ns(MAX_TERM_MS), Some(1_000_000_000));
+    assert_eq!(ms_to_ns(1000.0), Some(1_000_000_000));
+    assert_eq!(ms_to_ns(0.0000009), None);
+    assert_eq!(ms_to_ns(1000.000001), None);
+}
