@@ -90,8 +90,8 @@ cameras on the SNV strih). The hub therefore sends each `camN` return leg to the
   unmute. Until then the start-up address is used, which is right as long as the camera keeps its
   fixed `10.77.9.6N` at both venues.
 - Tests: `hub/tests/return_addr_1431.rs` (the table, the filter, `/api/state`, both TOMLs'
-  legs, the PP mesh, the `main.rs` wiring anchor); the PP counts in `deployed_matrix_pp_1412.rs` and
-  `tests/python/test_strih_pp_box_1412.py` (11 participants / 164 points).
+  legs, the PP mesh, the `main.rs` wiring anchor); the PP counts in `deployed_matrix_pp_1412.rs` (12 participants / 164 points since intercom#32;
+  camera-box keeps its own `test_strih_pp_box_1412.py`).
 
 ## The N-1 (mix-minus) invariant — enforced structurally, not by config
 

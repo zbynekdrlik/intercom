@@ -3,7 +3,8 @@
 //! strih-snv receives dasio's Dante TX (the FOH master mix + the band's click/guide) as a Dante
 //! device of its own. Since the cut-over (3.11.2026, FOH turned `fohabl-strih` off) it carries every
 //! point the `fohabl` VBAN leg had; that leg stays declared and routed nowhere. strih-pp (intercom#32)
-//! receives dsg's `STREAM master L/R` into the cutters' cans the same way. dstack owns
+//! receives dsg's `STREAM master L/R` into the vestibule HDMI and the cutters' cans the same way
+//! (it took every point of lv1's VBAN, which stopped on 18.11.2026). dstack owns
 //! the protocol, the subscriptions (kept in `state_file`), dlink's default latency terms (dlink
 //! v0.6.106: the 15 ms reference path each way, P = network latency + receive buffer) at normal priority and the media clock: Dante PTP followed in process,
 //! the dsync service as fallback (dstack#20, dstack#68, dstack#1). The hub only declares its wanted
@@ -55,7 +56,8 @@ pub const STABLE_RUN: Duration = Duration::from_secs(10);
 pub struct DlinkConfig {
     /// The device name Dante Controller lists (1 to 31 of A-Z a-z 0-9 and '-').
     pub name: String,
-    /// The Dante-facing interface (strih-snv: `enp7s0.70`, strih-pp: `enp5s0f1.70`); its one IPv4 address is used.
+    /// The Dante-facing interface (strih-snv: `enp7s0.70`, strih-pp: `enp5s0f1.70`); its one IPv4
+    /// address is used.
     pub iface: String,
     /// The RX channel names, in channel order: the `dlink` participant's inputs, 1-based.
     pub rx: Vec<String>,
