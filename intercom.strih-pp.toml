@@ -1203,3 +1203,24 @@ src = "phones"
 in_ch = 2
 dst = "cutters"
 out_ch = 2
+
+# 19.11.2026 (intercom#34, owner: the cutter rebalances the cans): the cutters' level sliders, a trim on
+# top of each point's gain_db (0 dB = this file). The hub serves them on its loopback control page
+# (http://127.0.0.1:8791/ on this box). lv1 routes nowhere into the cans here, so Program is dsg alone.
+[[level]]
+name = "program"
+label = "Program"
+dst = "cutters"
+sources = ["dsg_dante"]
+
+[[level]]
+name = "kamery"
+label = "Kamery"
+dst = "cutters"
+sources = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+
+[[level]]
+name = "telefony"
+label = "Telefóny"
+dst = "cutters"
+sources = ["phones"]

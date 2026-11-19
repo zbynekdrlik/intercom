@@ -190,6 +190,9 @@ pub struct RuntimeStats {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The peak dBFS of the participant's mixed OUTPUT over the last second (intercom#34: the
+    /// cutters see their sliders' result). `None` until the block loop measured it.
+    pub out_level_dbfs: Option<f32>,
     /// The sample rate of the participant's last VBAN packet (issue 1345), `None` for a non-VBAN
     /// participant or before its first packet.
     pub sample_rate: Option<u32>,
@@ -257,6 +260,10 @@ pub struct ParticipantState {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The peak dBFS of the participant's mixed output over the last second, after the level
+    /// sliders (intercom#34). Present only for a participant with output channels, once measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub out_level_dbfs: Option<f32>,
     /// The input stream's VBAN sample rate in Hz (issue 1345: a 96 kHz source is decimated to the hub
     /// rate) — omitted for a non-VBAN participant or before its first packet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,6 +341,11 @@ pub struct HubState {
     /// that traffic out, so a count here means that line was not there. Set by the daemon.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub dante_refusals: BTreeMap<u16, u64>,
+    /// The cutters' level sliders (intercom#34), read-only here: name, label, dst, sources, dB,
+    /// muted, range. Omitted on a hub without `[[level]]`; changed only through the loopback
+    /// control listener.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<crate::levels::LevelState>,
 }
 
 impl HubState {
@@ -359,6 +371,7 @@ impl HubState {
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
                     level_dbfs: s.level_dbfs,
+                    out_level_dbfs: s.out_level_dbfs.filter(|_| p.out_channels > 0),
                     sample_rate: s.sample_rate.filter(|_| vban),
                     rate_rejects: vban.then_some(s.rate_rejects),
                     decode_rejects: vban.then_some(s.decode_rejects),
@@ -396,6 +409,7 @@ impl HubState {
             mix_thread_sched: None,
             memory_locked: None,
             dante_refusals: BTreeMap::new(),
+            levels: matrix.levels.states(),
         }
     }
 
@@ -624,6 +638,7 @@ out_channels = 4
                 overruns: 0,
                 last_rx_age_ms: Some(5),
                 level_dbfs: -12.0,
+                out_level_dbfs: None,
                 sample_rate: Some(48000),
                 rate_rejects: 0,
                 decode_rejects: 0,

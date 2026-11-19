@@ -179,6 +179,21 @@ pub struct HubConfig {
     pub sample_rate: u32,
     /// The fixed mix block size in frames (e.g. 256 = ~5.3 ms at 48 kHz).
     pub block_frames: usize,
+    /// The loopback-only listener of the cutters' level sliders (intercom#34), started only when
+    /// the matrix declares a `[[level]]`. A non-loopback address fails the load: the controls have
+    /// no login, so nothing outside the box may reach them.
+    #[serde(default = "default_control_bind")]
+    pub control_bind: String,
+    /// Where the sliders' values survive a restart (intercom#34): the unit's `StateDirectory`.
+    #[serde(default = "default_levels_file")]
+    pub levels_file: String,
+}
+
+fn default_control_bind() -> String {
+    crate::levels::DEFAULT_CONTROL_BIND.to_string()
+}
+fn default_levels_file() -> String {
+    crate::levels::DEFAULT_LEVELS_FILE.to_string()
 }
 
 /// One participant (a VB-Matrix slot mapped to a hub participant).
@@ -296,6 +311,9 @@ pub struct Point {
     pub gain_linear: f32,
     /// Whether this point is muted (excluded from the mix).
     pub mute: bool,
+    /// The `[[level]]` slider that trims this point (intercom#34), an index into
+    /// [`Matrix::levels`]; `None` = the fixed `gain_db` alone.
+    pub level: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +329,8 @@ struct MatrixToml {
     participants: Vec<Participant>,
     #[serde(default, rename = "point")]
     points: Vec<PointToml>,
+    #[serde(default, rename = "level")]
+    levels: Vec<crate::levels::LevelToml>,
 }
 
 /// The loaded routing matrix: hub config + the optional Janus edge config + participants + resolved
@@ -326,6 +346,9 @@ pub struct Matrix {
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
+    /// The cutters' level sliders (intercom#34): shared live values, so a clone of the matrix
+    /// (the engine's, the snapshot's) reads the same sliders.
+    pub levels: crate::levels::Levels,
     /// The card legs' resolved specs (issue 1438), resolved once at load.
     alsa_specs: Vec<AlsaCardSpec>,
 }
@@ -716,7 +739,29 @@ impl Matrix {
                 gain_db: pt.gain_db,
                 gain_linear: gain_linear(pt.gain_db),
                 mute: pt.mute,
+                level: None,
             });
+        }
+
+        // The cutters' sliders (intercom#34) claim their points; the control listener they are
+        // reached through is loopback only.
+        let levels = crate::levels::resolve(
+            std::mem::take(&mut raw.levels),
+            &raw.participants,
+            &index,
+            &mut points,
+        )?;
+        let control: std::net::SocketAddr = raw.hub.control_bind.parse().map_err(|_| {
+            anyhow!(
+                "hub.control_bind '{}' is not host:port",
+                raw.hub.control_bind
+            )
+        })?;
+        if !control.ip().is_loopback() {
+            bail!(
+                "hub.control_bind '{}' must be a loopback address (the level controls have no login)",
+                raw.hub.control_bind
+            );
         }
 
         Ok(Matrix {
@@ -727,6 +772,7 @@ impl Matrix {
             participants: raw.participants,
             index,
             points,
+            levels,
             alsa_specs,
         })
     }
