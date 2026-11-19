@@ -30,12 +30,12 @@ const RECONNECT_BASE_MS = 1000; // first retry delay; doubles per failed attempt
 const RECONNECT_MAX_MS = 4000;
 const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebuilt.
 const ICE_GRACE_MS = 5000; // a "disconnected" ICE state gets this long to recover by itself.
-const ANSWER_TIMEOUT_MS = 10000;
+const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebuilds the session.
 // issue 36: the room audio is checked every MEDIA_CHECK_MS; no new inbound packet for MEDIA_STALL_MS
 // while "connected" rebuilds the session. A tunnel that stalls without closing the socket gives no
 // WebSocket or ICE event for a long time, and Janus's audiobridge sends 50 packets/s, silence too.
 const MEDIA_CHECK_MS = 1000;
-const MEDIA_STALL_MS = 4000; // an offer Janus has not answered by then rebuilds the session.
+const MEDIA_STALL_MS = 4000;
 // issue 1453: the hub's TURN servers are fetched before each session; a slow hub never holds the
 // join longer than this (then the session starts with janus.js's default ICE servers). Longer than
 // the hub's own 5 s bound on a Cloudflare mint (hub/src/turn.rs TURN_MINT_TIMEOUT), so a
@@ -322,7 +322,8 @@ function reconnectNow() {
 function onConnected() {
   clearTimeout(watchdogTimer);
   clearTimeout(iceTimer);
-  reconnectAttempt = 0;
+  // The backoff resets only once the room audio really flows (checkMedia): a session that comes up
+  // without media must not reconnect every few seconds forever at the shortest delay.
   mediaSeen = { packets: -1, at: Date.now() };
   setConn("connected");
 }
@@ -332,7 +333,8 @@ let mediaSeen = { packets: -1, at: 0 };
 function inboundAudioPackets(report) {
   let packets = null;
   report.forEach((r) => {
-    if (r.type === "inbound-rtp" && r.kind === "audio") packets = (packets || 0) + (r.packetsReceived || 0);
+    // `mediaType` is what older WebKit reports instead of `kind`.
+    if (r.type === "inbound-rtp" && (r.kind || r.mediaType) === "audio") packets = (packets || 0) + (r.packetsReceived || 0);
   });
   return packets;
 }
@@ -345,7 +347,11 @@ function checkMedia() {
       if (my !== gen || !mediaUp) return;
       const now = Date.now();
       const packets = inboundAudioPackets(report);
-      if (packets !== null && packets !== mediaSeen.packets) {
+      // No inbound audio entry at all: this browser does not report it, so the check stays out
+      // (ICE, the connect timeout and the WebSocket still cover a session without media).
+      if (packets === null) return;
+      if (packets !== mediaSeen.packets) {
+        if (packets > 0) reconnectAttempt = 0; // the room audio flows: the backoff starts over
         mediaSeen = { packets, at: now };
       } else if (now - mediaSeen.at > MEDIA_STALL_MS) {
         setConn("reconnecting", "zvuk sa zastavil…");

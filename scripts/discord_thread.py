@@ -176,7 +176,7 @@ def cmd_post(token: str, channel: str, text: str, reply: str | None) -> int:
 def cmd_react(token: str, channel: str, msg_id: str, emoji: str) -> int:
     check_channel(channel)
     check_message_id(msg_id)
-    request("PUT", f"/channels/{channel}/messages/{msg_id}/reactions/{urllib.parse.quote(emoji)}/@me", token)
+    request("PUT", f"/channels/{channel}/messages/{msg_id}/reactions/{urllib.parse.quote(emoji, safe="")}/@me", token)
     print(f"reacted {emoji} on {msg_id}")
     return 0
 

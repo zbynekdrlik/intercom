@@ -60,3 +60,11 @@ def test_context_is_what_came_after_the_bots_last_message():
     ]
     assert [m["id"] for m in dt.since_last_bot(msgs)] == ["3"]
     assert [m["id"] for m in dt.since_last_bot([{"id": "5", "author": {"id": "1"}}])] == ["5"]
+
+
+def test_react_never_lets_the_emoji_leave_the_thread(monkeypatch):
+    seen = []
+    monkeypatch.setattr(dt, "request", lambda method, path, token, body=None: seen.append(path))
+    dt.cmd_react("t", dt.THREAD_ID, "123", "x/../../../guilds/1")
+    assert seen[0].startswith(f"/channels/{dt.THREAD_ID}/messages/123/reactions/")
+    assert "/../" not in seen[0] and seen[0].endswith("/@me")
