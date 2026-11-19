@@ -26,8 +26,10 @@ paths:
   (`--fail-under-lines 67`, measured 69.48 % on 2026-11-01; ratchet up only).
 - **`tray/` is its own Cargo workspace** (root `exclude = ["tray"]`, its own `Cargo.lock`): its GTK
   tree (glib-macros -> proc-macro-crate) pins `toml_datetime =0.6.3`, which in one lockfile pulled
-  the hub's `toml` from 0.8.23 down to 0.8.2. Keep `tray/Cargo.toml`'s `version` equal to the root
-  one (its test `the_tray_version_equals_the_workspace_version` and the release both check it); the
+  the hub's `toml` from 0.8.23 down to 0.8.2. Every bump changes three files: the root
+  `Cargo.toml`, `tray/Cargo.toml` and the `intercom-tray` entry in `tray/Cargo.lock` (the tray job
+  builds `--locked`); its test `the_tray_version_equals_the_workspace_version` and the release both
+  check the two versions match. The
   CI `tray` job (GTK + AppIndicator -dev packages, fmt / clippy / test / 80 % library coverage,
   release build) is a `release-tag` need.
 

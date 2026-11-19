@@ -362,17 +362,6 @@ impl Levels {
             .collect()
     }
 
-    /// The output participants the sliders trim (ids, deduplicated, in slider order).
-    pub fn dsts(&self) -> Vec<usize> {
-        let mut out: Vec<usize> = Vec::new();
-        for s in self.specs.iter() {
-            if !out.contains(&s.dst) {
-                out.push(s.dst);
-            }
-        }
-        out
-    }
-
     /// One info line per slider: what it trims (the load log).
     pub fn log_resolved(&self) {
         for s in self.specs.iter() {

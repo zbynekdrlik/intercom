@@ -114,6 +114,31 @@ test("the cutter drags, steps and mutes the sliders; the hub applies and stores 
   expect(consoleSeen).toEqual([]);
 });
 
+test("a change the hub cannot store still applies and the page says it was not saved", async ({ page, request }) => {
+  const consoleSeen = watchConsole(page);
+  await page.goto("/");
+  await expect(page.locator('[data-role="strip"]')).toHaveCount(2);
+  // The state file's path turned into a non-empty directory: the hub's rename onto it fails (as
+  // root too, which the CI container runs as), so the write fails like a full or read-only disk.
+  const keep = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : null;
+  fs.rmSync(STATE_FILE, { recursive: true, force: true });
+  fs.mkdirSync(path.join(STATE_FILE, "blocker"), { recursive: true });
+  try {
+    const slider = strip(page, "click").locator('[data-role="slider"]');
+    await slider.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(strip(page, "click")).toHaveAttribute("data-saved", "false");
+    await expect(page.locator('[data-role="status"]')).toHaveAttribute("data-state", "warn");
+    await expect(page.locator('[data-role="status"]')).toContainText("neuložilo sa");
+    // The hub applies it anyway (the mix follows the slider until the next restart).
+    await expect.poll(async () => (await apiLevel(request, "click")).db).toBe(-0.5);
+  } finally {
+    fs.rmSync(STATE_FILE, { recursive: true, force: true });
+    if (keep) fs.writeFileSync(STATE_FILE, keep);
+  }
+  expect(consoleSeen).toEqual([]);
+});
+
 test("a value the hub refuses changes nothing the page shows", async ({ page, request }) => {
   const consoleSeen = watchConsole(page);
   await page.goto("/");
