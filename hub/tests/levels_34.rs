@@ -985,8 +985,9 @@ async fn a_taken_control_port_leaves_the_hub_running_without_sliders() {
         dir.path().join("levels.toml"),
         std::future::pending(),
     )
-    .await;
-    assert_eq!(up, None, "no sliders, and no error that would stop the hub");
+    .await
+    .expect("a taken port is no error that would stop the hub");
+    assert_eq!(up, None, "no sliders");
 }
 
 #[tokio::test]
@@ -1003,7 +1004,8 @@ async fn a_free_control_port_serves_the_sliders() {
         dir.path().join("levels.toml"),
         std::future::pending(),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(up, Some(addr));
     let v: serde_json::Value = reqwest::get(format!("http://{addr}/api/levels"))
         .await
@@ -1012,4 +1014,26 @@ async fn a_free_control_port_serves_the_sliders() {
         .await
         .unwrap();
     assert!(!v["levels"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[tokio::test]
+async fn a_control_bind_the_dante_guard_refuses_still_stops_the_hub() {
+    // A config error, not a busy port: with a Dante leg the hub binds IPv4 only (intercom#25).
+    let m = matrix_on("[::1]:8791".parse().unwrap());
+    let guard = DanteGuard::new(
+        None,
+        vec![intercom_hub::dante_guard::Ipv4Net::new("10.77.7.0".parse().unwrap(), 24).unwrap()],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let e = start_level_controls(
+        &m,
+        &guard,
+        live(&m),
+        dir.path().join("l.toml"),
+        std::future::pending(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("control_bind [::1]:8791 is IPv6"), "{e}");
 }

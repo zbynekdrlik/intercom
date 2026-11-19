@@ -53,18 +53,20 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
   controls have no login). The box's nginx and the public phone front proxy only `:8790`, so no
   phone and no internet client reaches it. Started only when the matrix has a `[[level]]`
   (`levels_http::start_level_controls`, called from `main.rs`), through the same
-  `http_serve::serve` + Dante guard + `check_bind`. A bind failure (a taken port) is an error line
-  and the hub runs on without sliders, never stopping the audio (review finding, pinned in
-  `levels_34.rs`). The stream boxes have no sliders and no :8791.
+  `http_serve::serve` + Dante guard + `check_bind`. A taken port is an error line and the hub runs
+  on without sliders, never stopping the audio; a `control_bind` the Dante guard refuses still
+  stops it at start (review findings, pinned in `levels_34.rs`). The stream boxes have no sliders
+  and no :8791.
 - **DNS rebinding guard:** loopback stops other machines, not a web page in the notebook's own
   browser that re-binds its name to 127.0.0.1. A middleware (`loopback_host_only`) answers 403 unless
   the `Host` (or the HTTP/2 authority) is `127.0.0.1` / `localhost` / `[::1]` (`is_loopback_host`) and
   an `Origin`, when sent, is `http://` one of those. A PUT with JSON also needs a CORS preflight,
   which the routes never answer.
 - **The cutter opens the page from the tray icon** (`intercom-tray`, below: "Otvoriť hlasitosti");
-  it is `http://127.0.0.1:8791/` on the strih notebook (their cans hang on its card). The page:
-  one vertical slider (0.5 dB steps, arrows work) + mute per slider with its dB, the hub version (`v<semver>`), and a 1 Hz meter of the trimmed output (the cutters' peak
-  dBFS after the sliders). It never writes to the console: failures are the status line.
+  it is `http://127.0.0.1:8791/` on the strih notebook (their cans hang on its card). The page: one
+  vertical slider (0.5 dB steps, arrows work) + mute per slider with its dB, the hub version
+  (`v<semver>`), and a 1 Hz meter of the trimmed output (the cutters' peak dBFS after the sliders).
+  It never writes to the console: failures are the status line.
 - Routes: `GET /`, `/levels.js`, `/levels.css`, `/favicon.svg`, `/api/version`, `GET /api/levels`
   (`{version, levels: [{name, label, dst, sources, db, muted, min_db, max_db, points}], outputs:
   [{participant, out_level_dbfs}]}`), `PUT /api/levels/{name}` with exactly `{"db": f32, "muted":

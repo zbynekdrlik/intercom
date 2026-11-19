@@ -15,7 +15,7 @@ name = "intercom-tray"
 path = "src/main.rs"
 
 [dependencies]
-# The hub's /api/version answer: with tracing, the only non-GTK dependencies in tray/Cargo.lock.
+# The hub's /api/version answer; with tracing(-subscriber), the only non-GTK direct dependencies.
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

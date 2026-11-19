@@ -150,41 +150,43 @@ async fn loopback_host_only(req: Request, next: Next) -> Response {
         .into_response()
 }
 
-/// Start the loopback level controls, or log why not and go on: the sliders are a convenience,
-/// the audio is not, so a taken or refused control port never stops the hub (review finding,
-/// intercom#34). The address it serves on, or `None`.
+/// Start the loopback level controls. A wrong `control_bind` (the Dante guard refuses it) is a
+/// config error and stops the hub at start, like every other bind's; a port another process holds
+/// is logged and the hub runs on without sliders: the sliders are a convenience, the audio is not
+/// (review finding, intercom#34). `Ok(Some(addr))` serving, `Ok(None)` not started.
 pub async fn start_level_controls(
     matrix: &Matrix,
     dante_guard: &Arc<DanteGuard>,
     live: watch::Receiver<Arc<HubState>>,
     levels_file: PathBuf,
     shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Option<SocketAddr> {
-    match spawn_level_controls(matrix, dante_guard, live, levels_file, shutdown).await {
-        Ok(addr) => Some(addr),
+) -> anyhow::Result<Option<SocketAddr>> {
+    let addr = crate::levels::check_control_bind(&matrix.hub.control_bind)?;
+    check_bind(dante_guard, "control_bind", addr)?;
+    match spawn_level_controls(addr, matrix, dante_guard, live, levels_file, shutdown).await {
+        Ok(()) => Ok(Some(addr)),
         Err(e) => {
             tracing::error!(
                 error = format!("{e:#}"),
-                control_bind = %matrix.hub.control_bind,
+                %addr,
                 "level controls NOT started: the hub runs on without the cutters' sliders"
             );
-            None
+            Ok(None)
         }
     }
 }
 
-/// Bind and serve the loopback level controls beside the main listener, through the same
-/// Dante-guarded accept loop; the address bound. [`start_level_controls`] is the caller that
-/// keeps the hub running when this fails.
-pub async fn spawn_level_controls(
+/// Bind `addr` and serve the loopback level controls beside the main listener, through the same
+/// Dante-guarded accept loop. [`start_level_controls`] checks the address first and keeps the hub
+/// running when the bind fails.
+async fn spawn_level_controls(
+    addr: SocketAddr,
     matrix: &Matrix,
     dante_guard: &Arc<DanteGuard>,
     live: watch::Receiver<Arc<HubState>>,
     levels_file: PathBuf,
     shutdown: impl Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<SocketAddr> {
-    let addr = crate::levels::check_control_bind(&matrix.hub.control_bind)?;
-    check_bind(dante_guard, "control_bind", addr)?;
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind the level controls {addr}"))?;
@@ -205,7 +207,7 @@ pub async fn spawn_level_controls(
             tracing::warn!(error = %e, "level controls: the listener ended");
         }
     });
-    Ok(addr)
+    Ok(())
 }
 
 async fn index() -> impl IntoResponse {

@@ -417,7 +417,7 @@ async fn main() -> Result<()> {
             levels_file,
             shutdown_signal(),
         )
-        .await;
+        .await?;
     }
 
     let turn = Arc::new(TurnMinter::load(
