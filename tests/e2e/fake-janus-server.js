@@ -13,7 +13,9 @@
 //   the frames the hub's /janus allowlist forwards),
 //   failConnects (the next N sockets fail to open), dropConnection() (the server drops the live
 //   socket), rejectNextConfigures (the next N configure-with-offer get an error event and no
-//   answer), inboundAudioBytes() (what the "server" received from the phone's mic).
+//   answer), inboundAudioBytes() (what the "server" received from the phone's mic),
+//   stallMedia() (issue 36: the room audio stops while the socket stays open and keeps acking —
+//   the silent tunnel stall the cameramen hit on 19.11.2026).
 // It never writes to the console.
 (function () {
   const NativeWebSocket = window.WebSocket;
@@ -237,6 +239,17 @@
     s.readyState = 3;
     s.shutdown();
     s.dispatchEvent(new CloseEvent("close", { code: 1006 }));
+    return true;
+  };
+
+  // issue 36: the newest PeerConnection stops sending the room audio (no RTP at all), while the
+  // WebSocket stays open and answers keepalives — no close, no ICE change the page could see.
+  state.stallMedia = async function () {
+    const h = state.handles.filter((x) => x.pc && x.pc.connectionState !== "closed").pop();
+    if (!h) return false;
+    for (const tr of h.pc.getTransceivers()) {
+      if (tr.sender.track) await tr.sender.replaceTrack(null);
+    }
     return true;
   };
 

@@ -45,6 +45,75 @@ pub const MJPEG_CONTENT_TYPE: &str = "multipart/x-mixed-replace; boundary=frame"
 /// `onerror` placeholder + retry kicks in) — never a hung connection.
 pub const MJPEG_MAX_AGE_MS: u64 = 5000;
 
+// issue 36 (19.11.2026): the picture through the Cloudflare tunnel ran at 2-7 Mbit/s next to the
+// live stream on strih-snv's uplink, and the tunnel kept timing out, taking the phones' audio
+// signalling with it. A client through Cloudflare gets the picture paced by a byte budget.
+/// The picture budget of a client through Cloudflare: 40 KB/s (~320 kbit/s, ~1.5 fps at the
+/// ~25 KB frames measured on 19.11.).
+pub const TUNNEL_MJPEG_BYTES_PER_S: u64 = 40_000;
+/// How much of the budget may be spent at once (two seconds' worth).
+pub const TUNNEL_MJPEG_BURST_BYTES: u64 = 2 * TUNNEL_MJPEG_BYTES_PER_S;
+
+/// A request that came through Cloudflare (the tunnel for phones on mobile data). Cloudflare adds
+/// `cf-connecting-ip` to every proxied request; a LAN client never carries it.
+pub fn is_tunnel_client(headers: &HeaderMap) -> bool {
+    headers.contains_key("cf-connecting-ip")
+}
+
+/// A token bucket over MJPEG bytes: a frame is sent only when the budget allows it, else it is
+/// SKIPPED (never queued), so a slow link always gets the newest picture, never a backlog.
+#[derive(Debug, Clone)]
+pub struct MjpegPacer {
+    /// `None` = no limit (a LAN client).
+    rate_bytes_per_s: Option<u64>,
+    burst: i64,
+    tokens: i64,
+    last_ms: Option<u64>,
+}
+
+impl MjpegPacer {
+    /// Every frame goes out (a LAN client).
+    pub fn unlimited() -> Self {
+        Self {
+            rate_bytes_per_s: None,
+            burst: 0,
+            tokens: 0,
+            last_ms: None,
+        }
+    }
+
+    /// The budget of a client through Cloudflare.
+    pub fn tunnel() -> Self {
+        let burst = TUNNEL_MJPEG_BURST_BYTES as i64;
+        Self {
+            rate_bytes_per_s: Some(TUNNEL_MJPEG_BYTES_PER_S),
+            burst,
+            tokens: burst,
+            last_ms: None,
+        }
+    }
+
+    /// May a frame of `bytes` go out at `now_ms`? A yes spends it. A frame larger than the burst
+    /// passes once the bucket is full (the balance then goes negative and refills), so a busy
+    /// picture is slowed down, never frozen.
+    pub fn allow(&mut self, now_ms: u64, bytes: usize) -> bool {
+        let Some(rate) = self.rate_bytes_per_s else {
+            return true;
+        };
+        if let Some(last) = self.last_ms {
+            let refill = now_ms.saturating_sub(last).saturating_mul(rate) / 1000;
+            self.tokens = self.tokens.saturating_add(refill as i64).min(self.burst);
+        }
+        self.last_ms = Some(now_ms);
+        let need = (bytes as i64).min(self.burst);
+        if self.tokens < need {
+            return false;
+        }
+        self.tokens -= bytes as i64;
+        true
+    }
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // issue 1345 M3b: the Interkom phone PWA, embedded so the hub binary stays self-contained on
@@ -350,12 +419,21 @@ fn mjpeg_poll_interval(target_fps: u32) -> Duration {
 /// `GET /interkom.mjpeg` — stream `multipart/x-mixed-replace` parts as the slot's frame counter
 /// advances (poll ~fps × 2, never a busy-loop). A client with no new frame for > 5 s gets the stream
 /// ENDED so the PWA's `<img>` `onerror` placeholder + retry kicks in. 503 when video is disabled.
-async fn interkom_mjpeg(State(state): State<AppState>) -> Response {
+async fn interkom_mjpeg(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(video) = state.video.clone() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "interkom video disabled").into_response();
     };
+    let pacer = if is_tunnel_client(&headers) {
+        tracing::info!(
+            "interkom picture: a client through Cloudflare, paced to {} B/s",
+            TUNNEL_MJPEG_BYTES_PER_S
+        );
+        MjpegPacer::tunnel()
+    } else {
+        MjpegPacer::unlimited()
+    };
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
-    tokio::spawn(mjpeg_pump(video, tx));
+    tokio::spawn(mjpeg_pump(video, tx, pacer));
     let body = Body::from_stream(ReceiverStream::new(rx));
     (
         [
@@ -370,8 +448,14 @@ async fn interkom_mjpeg(State(state): State<AppState>) -> Response {
 /// Push MJPEG parts to one client: on every poll, send a new part iff the slot's counter advanced;
 /// end (drop the sender → stream closes) once no new frame has arrived for [`MJPEG_MAX_AGE_MS`]. Ends
 /// immediately when the client disconnects (a failed `send`).
-async fn mjpeg_pump(video: Arc<VideoState>, tx: mpsc::Sender<Result<Bytes, std::io::Error>>) {
+async fn mjpeg_pump(
+    video: Arc<VideoState>,
+    tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    mut pacer: MjpegPacer,
+) {
     let poll = mjpeg_poll_interval(video.target_fps());
+    // The last frame counter SEEN: a frame the pacer skips still counts as a live picture (the
+    // stale check below), and is never offered twice.
     let mut last_sent: Option<u64> = None;
     // Reference time for the stale check: the connection start, then each frame we send. A client
     // therefore waits up to MJPEG_MAX_AGE_MS for the FIRST frame before the stream ends.
@@ -383,11 +467,14 @@ async fn mjpeg_pump(video: Arc<VideoState>, tx: mpsc::Sender<Result<Bytes, std::
         // record always matches the frame we sent — avoids re-sending a frame as a duplicate part.
         if let Some((jpeg, counter)) = video.latest() {
             if last_sent != Some(counter) {
+                last_sent = Some(counter);
+                last_activity = now;
+                if !pacer.allow(now, jpeg.len()) {
+                    continue; // over the tunnel budget: skip this frame, the next is newer
+                }
                 if tx.send(Ok(Bytes::from(mjpeg_part(&jpeg)))).await.is_err() {
                     return; // client gone
                 }
-                last_sent = Some(counter);
-                last_activity = now;
                 continue;
             }
         }
