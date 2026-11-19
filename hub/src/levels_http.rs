@@ -150,10 +150,10 @@ async fn loopback_host_only(req: Request, next: Next) -> Response {
         .into_response()
 }
 
-/// Start the loopback level controls. A wrong `control_bind` (the Dante guard refuses it) is a
-/// config error and stops the hub at start, like every other bind's; a failed bind (e.g. a port
-/// another process holds) is logged and the hub runs on without sliders: the sliders are a
-/// convenience, the audio is not (review finding, intercom#34). `Ok(Some(addr))` serving,
+/// Start the loopback level controls. A wrong `control_bind` (not loopback, or refused by the Dante
+/// guard) is a config error and stops the hub at start, like every other bind's; a failed bind
+/// (e.g. a port another process holds) is logged and the hub runs on without sliders: the sliders
+/// are a convenience, the audio is not (review finding, intercom#34). `Ok(Some(addr))` serving,
 /// `Ok(None)` not started.
 pub async fn start_level_controls(
     matrix: &Matrix,
