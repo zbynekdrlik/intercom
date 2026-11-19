@@ -382,6 +382,47 @@ test("a dropped connection shows the reconnect state and reconnects with the mic
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
+// issue 36 (19.11.2026): the tunnel stalled without closing the socket, the room audio stopped and
+// the page kept showing "Pripojené" until the cameraman reloaded it. The page must notice the dead
+// media by itself and rebuild the session.
+test("a silent media stall with the socket still open rebuilds the session on its own", async ({ page }) => {
+  const seen = watchConsole(page);
+  await presetName(page, "Kamera 2");
+  await page.goto("/");
+  await expectConnected(page);
+  await page.waitForTimeout(1500); // the room audio flows
+  const before = await fake(page);
+  expect(await page.evaluate(() => window.__fakeJanus.stallMedia())).toBe(true);
+  const conn = page.locator('[data-role="conn"]');
+  await expect(conn, "the dead media is noticed within seconds").not.toHaveAttribute("data-state", "connected", {
+    timeout: 8000,
+  });
+  await expectConnected(page);
+  const after = await fake(page);
+  expect(after.joins.length, "the page joined again without a reload").toBe(before.joins.length + 1);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
+// issue 36: the measured outages lasted 9-17 s; a backoff that grows to 15 s kept the phone silent
+// long after the network was back. Five failed attempts in a row must still reconnect within 20 s.
+test("a long outage reconnects within seconds of the network coming back (capped backoff)", async ({ page }) => {
+  test.setTimeout(60000);
+  const seen = watchConsole(page);
+  await presetName(page, "Kamera 3");
+  await page.goto("/");
+  await expectConnected(page);
+  await page.evaluate(() => {
+    window.__fakeJanus.failConnects = 5;
+    window.__fakeJanus.dropConnection();
+  });
+  const conn = page.locator('[data-role="conn"]');
+  await expect(conn).toHaveAttribute("data-state", "reconnecting");
+  const t0 = Date.now();
+  await expect(conn).toHaveAttribute("data-state", "connected", { timeout: 20000 });
+  expect(Date.now() - t0, "back within 20 s after five failed attempts").toBeLessThan(20000);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("the name is asked once and remembered", async ({ page }) => {
   const seen = watchConsole(page);
   await page.goto("/");
