@@ -30,6 +30,9 @@ fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
     // issue 1431: every camera cam1-7 (a joint event brings the SNV cameras here too);
     // intercom#32: + the Dante participant, which took lv1's four points (lv1 routed nowhere).
     assert_eq!((m.participants.len(), m.points.len()), (12, 164));
+    // intercom#34: the cutters' three level sliders (no click at PP; tests/levels_34.rs).
+    let sliders: Vec<&str> = m.levels.specs().iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(sliders, ["program", "kamery", "telefony"]);
     assert!(m.janus.is_some(), "the phones leg");
     assert_eq!(
         m.video.as_ref().map(|v| v.ndi_source_name.as_str()),

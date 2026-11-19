@@ -121,6 +121,18 @@ DLINK_PARTICIPANT = {
     "out_channels": 0,
 }
 
+# The cutters' level sliders (intercom#34, owner 19.11.2026: the cutter rebalances the cans now
+# that FOH sends REPRO at 0 dB). Each `[[level]]` trims every point from its sources into `dst` on
+# top of the point's own gain_db (0 dB = this routing as generated); the hub serves them on its
+# loopback control page. A source is a participant (every channel) or `name:channel`. Names are
+# the API path (a-z 0-9 _ -), labels are what the cutter reads.
+LEVELS = [
+    {"name": "program", "label": "Program", "dst": "cutters", "sources": ["foh_dante:1", "foh_dante:2", "lv1"]},
+    {"name": "click", "label": "Click", "dst": "cutters", "sources": ["foh_dante:3"]},
+    {"name": "kamery", "label": "Kamery", "dst": "cutters", "sources": [f"cam{i}" for i in range(1, 8)]},
+    {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]},
+]
+
 # Participant emit order: camboxes, then the program references, then the interface participants.
 _ROLE_ORDER = {
     "cambox": 0,
@@ -357,6 +369,20 @@ def _fmt_gain(g):
     return s
 
 
+def _check_level(level, points):
+    """Fail the generation when a slider source routes nothing into its dst (the hub would refuse
+    the TOML at load; the converter says it first, naming the slider)."""
+    for src in level["sources"]:
+        name, _, ch = src.partition(":")
+        hits = [
+            pt
+            for pt in points
+            if pt["src"] == name and pt["dst"] == level["dst"] and (not ch or pt["in_ch"] == int(ch))
+        ]
+        if not hits:
+            raise ValueError(f"level {level['name']!r}: source {src!r} has no point into {level['dst']!r}")
+
+
 def render(model):
     """Render (hub, participants, points) into the intercom.toml text (deterministic)."""
     hub, participants, points = model
@@ -457,6 +483,16 @@ def render(model):
             out.append(f"gain_db = {_fmt_gain(pt['gain_db'])}")
         if pt["mute"]:
             out.append("mute = true")
+        out.append("")
+
+    for level in LEVELS:
+        _check_level(level, points)
+        out.append("[[level]]")
+        out.append(f"name = {json.dumps(level['name'])}")
+        out.append(f"label = {json.dumps(level['label'], ensure_ascii=False)}")
+        out.append(f"dst = {json.dumps(level['dst'])}")
+        joined = ", ".join(json.dumps(src) for src in level["sources"])
+        out.append(f"sources = [{joined}]")
         out.append("")
 
     return "\n".join(out) + "\n"

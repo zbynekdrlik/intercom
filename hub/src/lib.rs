@@ -39,6 +39,8 @@ pub mod janus_relay;
 pub mod janus_rtp;
 pub mod janus_sender;
 pub mod janus_ws_guard;
+pub mod levels;
+pub mod levels_http;
 pub mod local_audio;
 pub mod matrix;
 pub mod mix_thread;

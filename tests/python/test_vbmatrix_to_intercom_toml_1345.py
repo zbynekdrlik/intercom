@@ -296,3 +296,32 @@ def test_dlink_names_with_quotes_and_backslashes_stay_valid_toml(monkeypatch):
     monkeypatch.setattr(conv, "DLINK", sub)
     data = tomllib.loads(conv.convert(_xml()))
     assert data["dlink"]["subscribe"] == [{"rx": "GUIDE", "tx_channel": odd, "tx_device": "caf\u00e9-dev"}]
+
+
+def test_the_cutters_level_sliders_are_emitted_34():
+    # intercom#34: four sliders into the cutters' cans, every cutters point trimmed by exactly one.
+    data = tomllib.loads(conv.convert(_xml()))
+    levels = {lv["name"]: lv for lv in data["level"]}
+    assert list(levels) == ["program", "click", "kamery", "telefony"]
+    assert levels["program"]["sources"] == ["foh_dante:1", "foh_dante:2", "lv1"]
+    assert levels["click"]["sources"] == ["foh_dante:3"]
+    assert levels["kamery"]["sources"] == [f"cam{i}" for i in range(1, 8)]
+    assert levels["telefony"] == {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]}
+    claimed = {}
+    for lv in data["level"]:
+        for src in lv["sources"]:
+            name, _, ch = src.partition(":")
+            for pt in data["point"]:
+                if pt["dst"] == lv["dst"] and pt["src"] == name and (not ch or pt["in_ch"] == int(ch)):
+                    key = (pt["src"], pt["in_ch"], pt["out_ch"])
+                    assert key not in claimed, f"{key} trimmed twice"
+                    claimed[key] = lv["name"]
+    into_cutters = {(pt["src"], pt["in_ch"], pt["out_ch"]) for pt in data["point"] if pt["dst"] == "cutters"}
+    assert set(claimed) == into_cutters
+
+
+def test_a_level_source_without_a_point_into_its_dst_fails_the_generation_34(monkeypatch):
+    bad = [{"name": "x", "label": "X", "dst": "cutters", "sources": ["foh_dante:4"]}]
+    monkeypatch.setattr(conv, "LEVELS", bad)
+    with pytest.raises(ValueError, match="'foh_dante:4' has no point into 'cutters'"):
+        conv.convert(_xml())

@@ -7,7 +7,8 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 ## Release contract with camera-box
 
 - One workspace version (`Cargo.toml` `[workspace.package]`); every dev->main merge tags `vX.Y.Z`.
-  After every merge the FIRST dev commit bumps it (CI's version gate fails otherwise).
+  After every merge the FIRST dev commit bumps it (CI's version gate fails otherwise), in three
+  files: root `Cargo.toml`, `tray/Cargo.toml` and `tray/Cargo.lock` (the tray is its own workspace).
 - That tag pins camera-box's `intercom-vban` git dependency and the hub release
   `intercom-hub-linux-amd64.tar.gz` (+ `.sha256`): binary, `intercom-hub.service`, the four TOMLs.
 - camera-box provisions the boxes (`setup-strih`, `verify-strih` and their `scripts/lib` glue).
@@ -19,5 +20,6 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 - CI / release / version / local test notes -> `.claude/rules/release-ci.md`
 - hub mix / VBAN / Janus / egress -> `.claude/rules/strih-intercom.md`, `strih-intercom-hub-mix.md`
 - HDMI audio leg -> `.claude/rules/strih-intercom-hdmi-leg.md`
+- the cutters' level sliders (loopback `:8791`, `[[level]]`, `levels_file`) -> `.claude/rules/strih-intercom-levels.md`
 - card (ALSA) leg -> `.claude/rules/strih-intercom-alsa-leg.md`
 - the hub's Dante device (dstack dlink) -> `.claude/rules/strih-intercom-dlink.md`

@@ -103,6 +103,70 @@ jobs:
           if-no-files-found: error
           path: target/release/intercom-hub
 
+  tray:
+    name: Tray (intercom-tray, its own workspace)
+    # intercom#34: the cutters' tray icon. Its own workspace and lockfile (tray/), so the hub never
+    # builds against its GTK tree (that tree pins toml_datetime =0.6.3, which would pull the hub's
+    # toml down to 0.8.2). Built and linted here only; the release ships its binary next to the hub.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tray
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-16
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tray
+
+      # tray-icon's GTK backend (dstack's dtray installs the same two -dev packages). apt retries a
+      # failed fetch: on 19.11.2026 security.ubuntu.com answered 503 for two mesa .debs and the
+      # whole job failed on them (run 44532412756).
+      - name: GTK + AppIndicator headers
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Install coverage tool (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # New code: >= 80 % of the library's lines. The GTK shell (linux.rs, main.rs) needs a desktop
+      # and stays thin; everything it decides is in lib.rs and tested.
+      - name: Coverage (the library)
+        run: cargo llvm-cov --locked --ignore-filename-regex 'src/(linux|main)\.rs' --fail-under-lines 80
+
+      - name: Build deployable binary (intercom-tray)
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          target/release/intercom-tray --version
+
+      - name: Upload intercom-tray binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: intercom-tray-linux-amd64
+          if-no-files-found: error
+          path: tray/target/release/intercom-tray
+
   coverage:
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-24.04
@@ -151,7 +215,9 @@ jobs:
     name: Phone PWA E2E (Playwright)
     # The real web/ client served by the stdlib stub hub (tests/e2e/stub_hub.py) with a Janus test
     # double. Chromium at a phone viewport, and WebKit (the iPhone engine) for the service-worker
-    # picture specs (issue 1379). Every test asserts an empty browser console.
+    # picture specs (issue 1379). Every test asserts an empty browser console. The cutter's level
+    # page (intercom#34) runs on the REAL hub: the release binary the rust job built and uploaded.
+    needs: rust
     runs-on: ubuntu-24.04
     # A bound, not a band-aid: the whole job takes 2-3 min. On 4.11.2026 `playwright install
     # --with-deps` hung 40 min on a GitHub runner with no limit (the default is 6 h).
@@ -169,6 +235,17 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Download the intercom-hub binary (the rust job's release build)
+        uses: actions/download-artifact@v4
+        with:
+          name: intercom-hub-linux-amd64
+          path: target/release
+      # An artifact does not keep the file mode.
+      - name: Make the hub binary executable
+        run: |
+          set -euo pipefail
+          chmod 0755 target/release/intercom-hub
+          target/release/intercom-hub --version
       - name: python3 for the stub hub
         run: |
           set -euo pipefail
@@ -187,7 +264,7 @@ jobs:
   release-tag:
     name: Tag vX.Y.Z
     if: github.ref == 'refs/heads/main'
-    needs: [version-check, rust, coverage, python, web-e2e]
+    needs: [version-check, rust, tray, coverage, python, web-e2e]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

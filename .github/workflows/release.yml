@@ -1,7 +1,8 @@
 name: Release
 
 # Publishes the GitHub Release vX.Y.Z that camera-box pins (intercom#1):
-#   intercom-hub-linux-amd64.tar.gz         the hub binary, its systemd unit and the routing TOMLs
+#   intercom-hub-linux-amd64.tar.gz         the hub binary, its systemd unit, the routing TOMLs and the
+#                                           cutters' tray icon `intercom-tray` (intercom#34)
 #   intercom-hub-linux-amd64.tar.gz.sha256  `sha256sum` of the tarball
 # camera-box fetches these by exact tag, never "latest" (issue 1467: a stale hub dropped the FOH).
 #
@@ -42,6 +43,12 @@ jobs:
           name: intercom-hub-linux-amd64
           path: target/release
 
+      - name: Download the caller run's intercom-tray build
+        uses: actions/download-artifact@v4
+        with:
+          name: intercom-tray-linux-amd64
+          path: target/release
+
       - name: The binary reports the tag's version and loads every TOML
         env:
           TAG: ${{ inputs.tag }}
@@ -52,6 +59,13 @@ jobs:
           echo "tag ${TAG}, intercom-hub --version ${got}"
           if [ "v${got}" != "${TAG}" ]; then
             echo "::error::the binary for ${TAG} reports ${got} -- refusing to publish it"
+            exit 1
+          fi
+          chmod +x target/release/intercom-tray
+          tray="$(target/release/intercom-tray --version | awk '{print $NF}')"
+          echo "tag ${TAG}, intercom-tray --version ${tray}"
+          if [ "v${tray}" != "${TAG}" ]; then
+            echo "::error::intercom-tray for ${TAG} reports ${tray} -- refusing to publish it"
             exit 1
           fi
           # The shipped list is fixed (camera-box installs exactly these); a new TOML must be added here.
@@ -67,17 +81,20 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/release/intercom-hub dist/
+          cp target/release/intercom-tray dist/
           cp systemd/intercom-hub.service dist/
           cp intercom.strih-snv.toml intercom.strih-pp.toml intercom.stream-snv.toml intercom.stream-pp.toml dist/
           tar -czvf intercom-hub-linux-amd64.tar.gz -C dist .
           # The member list camera-box installs from: exactly these, flat, the binary executable.
-          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml | sort)"
+          want="$(printf '%s\n' ./intercom-hub ./intercom-hub.service ./intercom-tray ./intercom.stream-pp.toml ./intercom.stream-snv.toml ./intercom.strih-pp.toml ./intercom.strih-snv.toml | sort)"
           got="$(tar -tzf intercom-hub-linux-amd64.tar.gz | grep -v '^\./$' | sort)"
           if [ "$got" != "$want" ]; then
             echo "::error::tarball members differ"; diff <(echo "$want") <(echo "$got") || true; exit 1
           fi
           tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-hub > hub-entry.txt
           grep -q '^-rwx' hub-entry.txt || { echo "::error::intercom-hub is not executable in the tarball"; exit 1; }
+          tar -tvzf intercom-hub-linux-amd64.tar.gz ./intercom-tray > tray-entry.txt
+          grep -q '^-rwx' tray-entry.txt || { echo "::error::intercom-tray is not executable in the tarball"; exit 1; }
           sha256sum intercom-hub-linux-amd64.tar.gz > intercom-hub-linux-amd64.tar.gz.sha256
           cat intercom-hub-linux-amd64.tar.gz.sha256
 

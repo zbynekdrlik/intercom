@@ -8,10 +8,13 @@
 # sees its hub version go down.
 [workspace]
 members = ["vban", "hub"]
+# The tray (intercom#34) is its own workspace with its own lockfile: its GTK tree (glib-macros ->
+# proc-macro-crate) pins toml_datetime =0.6.3, which would pull the hub's own `toml` down to 0.8.2.
+exclude = ["tray"]
 resolver = "2"
 
 [workspace.package]
-version = "1.9.25"
+version = "1.9.26"
 
 # The dlink device's rate converter (dstack-resample -> rubato) runs on its real-time pump. Built
 # unoptimised (cargo test, CI's llvm-cov) a 96 -> 48 kHz block took 2.3-3.3 ms against its 1.33 ms

@@ -1487,3 +1487,27 @@ dst = "cutters"
 out_ch = 4
 gain_db = -8.0
 
+[[level]]
+name = "program"
+label = "Program"
+dst = "cutters"
+sources = ["foh_dante:1", "foh_dante:2", "lv1"]
+
+[[level]]
+name = "click"
+label = "Click"
+dst = "cutters"
+sources = ["foh_dante:3"]
+
+[[level]]
+name = "kamery"
+label = "Kamery"
+dst = "cutters"
+sources = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+
+[[level]]
+name = "telefony"
+label = "Telefóny"
+dst = "cutters"
+sources = ["phones"]
+

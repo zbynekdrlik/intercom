@@ -16,13 +16,22 @@ paths:
 - A main run: all gates -> `release-tag` pushes `vX.Y.Z` (refuses a tag already on another commit)
   -> `release.yml` (workflow_call only) publishes `intercom-hub-linux-amd64.tar.gz` + `.sha256`
   with the binary that run built. Flat members, exactly: `intercom-hub` (0755),
-  `intercom-hub.service`, the four `intercom.*.toml`. A new TOML must be added to the shipped list
-  in `release.yml` (the release fails when the repo's TOMLs differ from it).
+  `intercom-hub.service`, the four `intercom.*.toml`, `intercom-tray` (0755, intercom#34). A new
+  TOML must be added to the shipped list in `release.yml` (the release fails when the repo's TOMLs
+  differ from it).
 - Published assets never change: both assets present = left alone, one = fail, none = publish
   (`overwrite_files: false` as a backstop). Only gh's literal `release not found` means "no
   release"; any other gh error fails the step.
 - CI pins rustc (`toolchain:` on `dtolnay/rust-toolchain`, SHA-pinned) and the coverage gate
   (`--fail-under-lines 67`, measured 69.48 % on 2026-11-01; ratchet up only).
+- **`tray/` is its own Cargo workspace** (root `exclude = ["tray"]`, its own `Cargo.lock`): its GTK
+  tree (glib-macros -> proc-macro-crate) pins `toml_datetime =0.6.3`, which in one lockfile pulled
+  the hub's `toml` from 0.8.23 down to 0.8.2. Every bump changes three files: the root
+  `Cargo.toml`, `tray/Cargo.toml` and the `intercom-tray` entry in `tray/Cargo.lock` (the tray job
+  builds `--locked`); its test `the_tray_version_equals_the_workspace_version` and the release both
+  check the two versions match. The
+  CI `tray` job (GTK + AppIndicator -dev packages, fmt / clippy / test / 80 % library coverage,
+  release build) is a `release-tag` need.
 
 ## Gotchas
 
@@ -49,3 +58,7 @@ paths:
 - E2E: `cd tests/e2e && npm ci && INTERKOM_E2E_PORT=18792 npx playwright test`. Port 8792 is held
   by another account. Playwright 1.49.1's WebKit (`webkit-2104`) is not in `/opt/ms-playwright`, so
   the three iPhone specs run on CI only (`playwright install` into this account is hook-blocked).
+- Since intercom#34 the E2E run also starts the REAL hub (`start-levels-hub.js`, the `levels`
+  project): build `cargo build --release -p intercom-hub` first, or set `INTERCOM_HUB_BIN`, also for
+  a `--project=phone` run (Playwright starts every webServer). On CI the `web-e2e` job `needs: rust`
+  and downloads its `intercom-hub-linux-amd64` artifact (chmod 0755). It uses the base port + 1..3.

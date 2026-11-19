@@ -31,6 +31,7 @@ use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
 use intercom_hub::janus_relay::JanusWsRelay;
+use intercom_hub::levels_http::start_level_controls;
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
@@ -45,8 +46,8 @@ use intercom_hub::return_addr::{LearnFilter, ReturnAddrs};
 use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
-    classify_packet, note_decoded, note_undecodable, resolve_vban_addr, to_hub_rate, DecodeRejects,
-    JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
+    classify_packet, note_decoded, note_undecodable, peak_dbfs, resolve_vban_addr, to_hub_rate,
+    DecodeRejects, JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
@@ -108,6 +109,13 @@ async fn main() -> Result<()> {
             matrix.points.len()
         );
         return Ok(());
+    }
+    // The cutters' level sliders (intercom#34): what each one trims, then the values the last run
+    // stored (a missing or broken file keeps 0 dB, never fatal).
+    let levels_file = PathBuf::from(&matrix.hub.levels_file);
+    if !matrix.levels.is_empty() {
+        matrix.levels.log_resolved();
+        matrix.levels.load_file(&levels_file);
     }
 
     let http_bind = args.bind.clone().unwrap_or_else(|| matrix.hub.bind.clone());
@@ -401,6 +409,17 @@ async fn main() -> Result<()> {
         "intercom-hub starting"
     );
 
+    if !matrix.levels.is_empty() {
+        start_level_controls(
+            &matrix,
+            &dante_guard,
+            live_rx.clone(),
+            levels_file,
+            shutdown_signal(),
+        )
+        .await?;
+    }
+
     let turn = Arc::new(TurnMinter::load(
         std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
         &args.turn_config,
@@ -663,6 +682,8 @@ fn run_block_loop(bl: BlockLoop) {
     let mut tx_packets = vec![0u64; n];
     let mut tx_dropped = vec![0u64; n];
     let mut frame_counter = vec![0u32; n];
+    // Each participant's output peak over the status second (intercom#34, `out_level_dbfs`).
+    let mut out_peak = vec![0i16; n];
     let mut cycle: u64 = 0;
     let mut caught_up_total: u64 = 0;
     let mut lost_total: u64 = 0;
@@ -722,6 +743,9 @@ fn run_block_loop(bl: BlockLoop) {
             }
 
             let output = engine.mix_block(&input, block_frames);
+            for (id, peak) in out_peak.iter_mut().enumerate() {
+                *peak = (*peak).max(output.peak_abs(id));
+            }
 
             // Feed the phones participant's mixed output (down-mixed to mono) into the Janus
             // ring. The paced sender thread pops it on its own 20 ms clock (issue 1345); the
@@ -799,6 +823,8 @@ fn run_block_loop(bl: BlockLoop) {
                 for (id, s) in rx_stats.iter_mut().enumerate() {
                     s.tx_packets = tx_packets[id];
                     s.tx_dropped = tx_dropped[id];
+                    s.out_level_dbfs = Some(peak_dbfs(out_peak[id]));
+                    out_peak[id] = 0;
                 }
                 // Attach the Janus facet to the phones participant's stats (M3a).
                 if let Some((pid, jstats)) = &janus_report {

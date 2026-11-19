@@ -65,7 +65,13 @@ pub async fn serve(
             drop(stream);
             continue;
         }
-        let service = TowerToHyperService::new(router.clone());
+        // The peer reaches the handlers as `ConnectInfo` (intercom#34: a level change logs who
+        // made it), as `axum::serve`'s `into_make_service_with_connect_info` would attach it.
+        let service = TowerToHyperService::new(
+            router
+                .clone()
+                .layer(axum::Extension(axum::extract::ConnectInfo(peer))),
+        );
         let conn = builder
             .serve_connection_with_upgrades(TokioIo::new(stream), service)
             .into_owned();

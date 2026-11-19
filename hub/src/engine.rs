@@ -60,6 +60,20 @@ impl OutputBlock {
             .map(|v| v.as_slice())
     }
 
+    /// The largest absolute sample of a participant's output this block (every channel), 0 for a
+    /// participant with no output. The `/api/state` `out_level_dbfs` meter (intercom#34) keeps the
+    /// max of these over a second; no allocation, safe on the hub-mix thread.
+    pub fn peak_abs(&self, participant_id: usize) -> i16 {
+        self.per_participant.get(participant_id).map_or(0, |chans| {
+            chans
+                .iter()
+                .flat_map(|ch| ch.iter())
+                .map(|s| s.saturating_abs())
+                .max()
+                .unwrap_or(0)
+        })
+    }
+
     /// A participant's output as interleaved PCM16 (channels interleaved per frame), for the VBAN
     /// sender. Returns an empty vec for a participant with no output channels.
     pub fn interleaved(&self, participant_id: usize, frames: usize) -> Vec<i16> {
@@ -110,14 +124,25 @@ impl Engine {
             .map(|p| vec![vec![0f32; frames]; p.out_channels])
             .collect();
 
+        let levels = &self.matrix.levels;
         for point in &self.matrix.points {
             if point.mute {
+                continue;
+            }
+            // The TOML's gain is the base; a cutter's slider (intercom#34) trims it: one relaxed
+            // atomic load per point per block, no lock. At 0 dB the factor is exactly 1.0, so the
+            // product is the base gain bit for bit; muted it is 0.0 and the point is skipped.
+            let gain = match point.level {
+                Some(i) => point.gain_linear * levels.linear(i),
+                None => point.gain_linear,
+            };
+            if gain == 0.0 {
                 continue;
             }
             let dst_plane = &mut acc[point.dst][point.out_ch - 1];
             for (i, slot) in dst_plane.iter_mut().enumerate().take(frames) {
                 let s = input.sample(point.src, point.in_ch, i);
-                *slot += s as f32 * point.gain_linear;
+                *slot += s as f32 * gain;
             }
         }
 
