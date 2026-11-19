@@ -1,0 +1,34 @@
+[package]
+name = "intercom-tray"
+# Kept equal to the root [workspace.package] version (CI checks it; the release ships both).
+version = "1.9.26"
+edition = "2021"
+publish = false
+description = "The strih notebook's tray icon for the intercom hub: its status and the cutters' level page (intercom#34)"
+
+[lib]
+name = "intercom_tray"
+path = "src/lib.rs"
+
+[[bin]]
+name = "intercom-tray"
+path = "src/main.rs"
+
+[dependencies]
+# The hub's /api/version answer (already in the lockfile through the hub).
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The tray icon and its menu: dstack's dtray pins (crates/dtray/Cargo.toml), which show in the
+# strih boxes' tint2 systray today. Without the default libxdo (muda's predefined Copy/Paste
+# items, unused here). tray-icon 0.21.2 published 2025-10-20.
+tray-icon = { version = "=0.21.2", default-features = false }
+# GTK's main loop, its timeouts and the clipboard: the versions tray-icon 0.21.2 uses. Builds
+# against libgtk-3-dev; the icon needs libayatana-appindicator3 at run time.
+gtk = "=0.18.2"
+glib = "=0.18.5"
+
+# Its own workspace (see the root Cargo.toml `exclude`): the hub's lockfile never sees GTK.
+[workspace]

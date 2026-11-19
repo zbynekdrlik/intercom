@@ -11,6 +11,7 @@ paths:
   - "intercom.strih-snv.toml"
   - "intercom.strih-pp.toml"
   - "scripts/vbmatrix_to_intercom_toml.py"
+  - "tray/**"
 ---
 
 # The cutters' level sliders (intercom#34)
@@ -113,3 +114,24 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
 - Gotcha: a vertical range (`writing-mode: vertical-lr; direction: rtl`) puts max at the top; a
   Playwright drag from the bottom edge first lands mid-range (the first `input` read about -28 dB on
   Chromium 131), so assert the end value, not the path.
+
+## The tray icon `intercom-tray` (owner 19.11.2026: "ikonka na otvorenie dole v bare")
+
+- **What:** `tray/` (its own Cargo workspace, see `.claude/rules/release-ci.md`), dstack's dtray
+  pattern: `tray-icon` =0.21.2 without default features + `gtk` =0.18.2 / `glib` =0.18.5. The strih
+  boxes run Xorg + openbox with tint2's systray, where dtray's icon already shows (camera-box
+  19.11.2026). AppIndicator gives no click on the icon itself, so the page opens from the menu.
+- **Menu:** the status line (`Hub v<x> beží` / `Hub nedostupný (<why>)`, read from the control
+  listener's `/api/version` every 2 s on its own thread, with a loopback `Host` for the rebinding
+  guard), **Otvoriť hlasitosti**, **Kopírovať URL**, **Ukončiť ikonu (hub beží ďalej)**. The icon is
+  drawn in code: headphones, green while the hub answers, grey otherwise.
+- **Open:** `lib::choose_launch`: Firefox `--new-window` first (the boxes' only browser is the snap
+  `/snap/bin/firefox`; `/snap/bin` is searched even off `PATH`), then Chrome / Chromium `--app=`,
+  then `xdg-open`. The choice and the launcher's exit are logged.
+- **URL:** `--url` (default `http://127.0.0.1:8791/`), refused unless `http://<loopback>:<port>`.
+  One tray per session (`$XDG_RUNTIME_DIR/intercom-tray.lock`).
+- **Ships** in the hub tarball; camera-box installs and starts it as a session app like
+  `dtray.service` (its `strih-session-apps.sh`).
+- **Tests:** `tray/tests/tray_34.rs` (the URL, the browser order on the boxes' real layout, the
+  status read against a local listener, the icon, the lock path, the version equal to the root's).
+

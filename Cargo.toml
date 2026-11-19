@@ -8,6 +8,9 @@
 # sees its hub version go down.
 [workspace]
 members = ["vban", "hub"]
+# The tray (intercom#34) is its own workspace with its own lockfile: its GTK tree (glib-macros ->
+# proc-macro-crate) pins toml_datetime =0.6.3, which would pull the hub's own `toml` down to 0.8.2.
+exclude = ["tray"]
 resolver = "2"
 
 [workspace.package]

@@ -16,13 +16,20 @@ paths:
 - A main run: all gates -> `release-tag` pushes `vX.Y.Z` (refuses a tag already on another commit)
   -> `release.yml` (workflow_call only) publishes `intercom-hub-linux-amd64.tar.gz` + `.sha256`
   with the binary that run built. Flat members, exactly: `intercom-hub` (0755),
-  `intercom-hub.service`, the four `intercom.*.toml`. A new TOML must be added to the shipped list
-  in `release.yml` (the release fails when the repo's TOMLs differ from it).
+  `intercom-hub.service`, the four `intercom.*.toml`, `intercom-tray` (0755, intercom#34). A new
+  TOML must be added to the shipped list in `release.yml` (the release fails when the repo's TOMLs
+  differ from it).
 - Published assets never change: both assets present = left alone, one = fail, none = publish
   (`overwrite_files: false` as a backstop). Only gh's literal `release not found` means "no
   release"; any other gh error fails the step.
 - CI pins rustc (`toolchain:` on `dtolnay/rust-toolchain`, SHA-pinned) and the coverage gate
   (`--fail-under-lines 67`, measured 69.48 % on 2026-11-01; ratchet up only).
+- **`tray/` is its own Cargo workspace** (root `exclude = ["tray"]`, its own `Cargo.lock`): its GTK
+  tree (glib-macros -> proc-macro-crate) pins `toml_datetime =0.6.3`, which in one lockfile pulled
+  the hub's `toml` from 0.8.23 down to 0.8.2. Keep `tray/Cargo.toml`'s `version` equal to the root
+  one (its test `the_tray_version_equals_the_workspace_version` and the release both check it); the
+  CI `tray` job (GTK + AppIndicator -dev packages, fmt / clippy / test / 80 % library coverage,
+  release build) is a `release-tag` need.
 
 ## Gotchas
 
