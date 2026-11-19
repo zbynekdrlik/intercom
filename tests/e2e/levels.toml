@@ -1,0 +1,67 @@
+# The level-sliders E2E hub (intercom#34): a minimal routing on loopback ports, two sliders into the
+# cutters. start-levels-hub.js fills the @...@ placeholders (ports, the state file in a fresh
+# scratch dir) and starts the real intercom-hub on the result. No VBAN leg sends anywhere (no
+# participant has a VBAN output), no Janus, no picture, no Dante device.
+
+[hub]
+bind = "127.0.0.1:@HTTP_PORT@"
+vban_bind = "127.0.0.1:@VBAN_PORT@"
+control_bind = "127.0.0.1:@CONTROL_PORT@"
+levels_file = "@LEVELS_FILE@"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "prog"
+role = "program_ref"
+adapter = "vban"
+in_stream = "prog"
+in_channels = 3
+out_channels = 0
+
+[[participant]]
+name = "cutters"
+role = "cutters"
+adapter = "none"
+in_channels = 0
+out_channels = 2
+
+[[point]]
+src = "prog"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+gain_db = -8.0
+
+[[point]]
+src = "prog"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+gain_db = -8.0
+
+[[point]]
+src = "prog"
+in_ch = 3
+dst = "cutters"
+out_ch = 1
+gain_db = -10.0
+
+[[point]]
+src = "prog"
+in_ch = 3
+dst = "cutters"
+out_ch = 2
+gain_db = -10.0
+
+[[level]]
+name = "program"
+label = "Program"
+dst = "cutters"
+sources = ["prog:1", "prog:2"]
+
+[[level]]
+name = "click"
+label = "Click"
+dst = "cutters"
+sources = ["prog:3"]
