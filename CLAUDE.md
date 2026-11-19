@@ -23,3 +23,4 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 - the cutters' level sliders (loopback `:8791`, `[[level]]`, `levels_file`) -> `.claude/rules/strih-intercom-levels.md`
 - card (ALSA) leg -> `.claude/rules/strih-intercom-alsa-leg.md`
 - the hub's Dante device (dstack dlink) -> `.claude/rules/strih-intercom-dlink.md`
+- the cameramen's Discord thread (`scripts/discord_thread.py`, mention-only, owner's rule) -> `.claude/rules/discord-thread.md`
