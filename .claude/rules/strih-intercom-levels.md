@@ -52,11 +52,11 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
 - `[hub] control_bind` (default `127.0.0.1:8791`); a non-loopback address fails the load (the
   controls have no login). The box's nginx and the public phone front proxy only `:8790`, so no
   phone and no internet client reaches it. Started only when the matrix has a `[[level]]`
-  (`levels_http::start_level_controls`, called from `main.rs`), through the same
-  `http_serve::serve` + Dante guard + `check_bind`. A taken port is an error line and the hub runs
-  on without sliders, never stopping the audio; a `control_bind` the Dante guard refuses still
-  stops it at start (review findings, pinned in `levels_34.rs`). The stream boxes have no sliders
-  and no :8791.
+  (`levels_http::start_level_controls`, called from `main.rs`), through the same `http_serve::serve`
+  + Dante guard + `check_bind`. A failed bind (e.g. a taken port) is an error line and the hub runs
+  on without sliders, never stopping the audio; a `control_bind` the Dante guard refuses still stops
+  it at start (review findings, pinned in `levels_34.rs`). The stream boxes have no sliders and no
+  :8791.
 - **DNS rebinding guard:** loopback stops other machines, not a web page in the notebook's own
   browser that re-binds its name to 127.0.0.1. A middleware (`loopback_host_only`) answers 403 unless
   the `Host` (or the HTTP/2 authority) is `127.0.0.1` / `localhost` / `[::1]` (`is_loopback_host`) and
