@@ -35,8 +35,14 @@ fn a_tunnel_client_never_gets_more_than_the_budget() {
 #[test]
 fn the_budget_is_well_under_the_rate_that_broke_the_tunnel() {
     // 2 Mbit/s = 250 KB/s was the gentlest rate measured on 19.11.; the budget is a fraction of it.
-    assert!(TUNNEL_MJPEG_BYTES_PER_S * 4 <= 250_000);
-    assert!(TUNNEL_MJPEG_BYTES_PER_S >= 25_000, "at least one measured frame per second");
+    // Checked at compile time (clippy: assertions_on_constants).
+    const { assert!(TUNNEL_MJPEG_BYTES_PER_S * 4 <= 250_000) };
+    const {
+        assert!(
+            TUNNEL_MJPEG_BYTES_PER_S >= 25_000,
+            "at least one measured frame per second"
+        )
+    };
 }
 
 #[test]
@@ -70,9 +76,15 @@ fn a_skipped_frame_is_dropped_not_queued() {
 #[test]
 fn only_a_request_through_cloudflare_is_a_tunnel_client() {
     let mut h = HeaderMap::new();
-    assert!(!is_tunnel_client(&h), "the LAN (no Cloudflare header) keeps the full rate");
+    assert!(
+        !is_tunnel_client(&h),
+        "the LAN (no Cloudflare header) keeps the full rate"
+    );
     h.insert("x-forwarded-for", HeaderValue::from_static("192.168.1.20"));
     assert!(!is_tunnel_client(&h));
-    h.insert("cf-connecting-ip", HeaderValue::from_static("85.248.11.235"));
+    h.insert(
+        "cf-connecting-ip",
+        HeaderValue::from_static("85.248.11.235"),
+    );
     assert!(is_tunnel_client(&h));
 }

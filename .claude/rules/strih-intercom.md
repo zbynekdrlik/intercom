@@ -1022,7 +1022,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   - **Connection** — one bar `data-role="conn"`: `Pripojené` (green) / `Pripájam…` (amber) /
     `Odpojené – skúšam znova` (red + a countdown). "Connected" = `webrtcState(true)`, not just the
     join reply. A lost WS, an ICE `failed`, a join error, `oncleanup`, or a session with no media
-    after 15 s → `scheduleReconnect()` with a 1 s → 15 s backoff (`RECONNECT_MAX_MS`); `online` and
+    after 15 s, or no room-audio packet for 4 s while connected (issue 36, `MEDIA_STALL_MS`, a `getStats` watchdog) → `scheduleReconnect()` with a 1 s → 4 s backoff (`RECONNECT_MAX_MS`, 15 s before issue 36); `online` and
     "page visible again" retry at once. Every Janus callback checks a session generation counter,
     so a torn-down session never acts.
   - **Incoming** — `data-role="meter-in"` labelled "Strihač / réžia": a WebAudio `AnalyserNode` on
@@ -1243,7 +1243,11 @@ validated **30..=95**), `enabled` (default true). `Matrix::from_toml` validates 
 defaults; the byte-parity fixture test is regenerated in the SAME commit (never hand-edit the TOML).
 **Until issue 1347 builds the `STRIH-SNV (interkom)` NDI republish output, the supervisor points
 `ndi_source_name` at `CAM1 (usb)`** (a config edit on the box — no code change, no re-generate).
-Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
+Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame) on the LAN. **A client through
+Cloudflare (`cf-connecting-ip`, the tunnel for mobile data) is paced to 40 KB/s** (`MjpegPacer`,
+`TUNNEL_MJPEG_BYTES_PER_S`, issue 36): unpaced it ran 2-7 Mbit/s on 19.11.2026 next to the live
+stream, the tunnel timed out ("no recent network activity") and the phones lost the audio
+signalling with it. A skipped frame is dropped, never queued. Tests: `hub/tests/mjpeg_pacer_36.rs`.
 
 ### How to verify
 

@@ -25,10 +25,17 @@ const PICTURE_RETRY_MS = 5000; // retry the MJPEG picture while the hub is up bu
 const NATIVE_IDLE_MS = 500;
 const NATIVE_LIVE_MS = 40;
 const RECONNECT_BASE_MS = 1000; // first retry delay; doubles per failed attempt …
-const RECONNECT_MAX_MS = 15000; // … up to this cap.
+// … up to this cap. issue 36: 4 s, not 15 s — the measured outages (19.11.2026) lasted 9-17 s, and a
+// 15 s step kept the phone silent long after the network was back.
+const RECONNECT_MAX_MS = 4000;
 const CONNECT_TIMEOUT_MS = 15000; // a session that never gets media up is rebuilt.
 const ICE_GRACE_MS = 5000; // a "disconnected" ICE state gets this long to recover by itself.
-const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebuilds the session.
+const ANSWER_TIMEOUT_MS = 10000;
+// issue 36: the room audio is checked every MEDIA_CHECK_MS; no new inbound packet for MEDIA_STALL_MS
+// while "connected" rebuilds the session. A tunnel that stalls without closing the socket gives no
+// WebSocket or ICE event for a long time, and Janus's audiobridge sends 50 packets/s, silence too.
+const MEDIA_CHECK_MS = 1000;
+const MEDIA_STALL_MS = 4000; // an offer Janus has not answered by then rebuilds the session.
 // issue 1453: the hub's TURN servers are fetched before each session; a slow hub never holds the
 // join longer than this (then the session starts with janus.js's default ICE servers). Longer than
 // the hub's own 5 s bound on a Cloudflare mint (hub/src/turn.rs TURN_MINT_TIMEOUT), so a
@@ -316,8 +323,40 @@ function onConnected() {
   clearTimeout(watchdogTimer);
   clearTimeout(iceTimer);
   reconnectAttempt = 0;
+  mediaSeen = { packets: -1, at: Date.now() };
   setConn("connected");
 }
+
+// ---- The media watchdog (issue 36) ---------------------------------------------------------
+let mediaSeen = { packets: -1, at: 0 };
+function inboundAudioPackets(report) {
+  let packets = null;
+  report.forEach((r) => {
+    if (r.type === "inbound-rtp" && r.kind === "audio") packets = (packets || 0) + (r.packetsReceived || 0);
+  });
+  return packets;
+}
+function checkMedia() {
+  const pc = bridge && bridge.webrtcStuff && bridge.webrtcStuff.pc;
+  if (!pc || !mediaUp || connEl.dataset.state !== "connected") return;
+  const my = gen;
+  pc.getStats()
+    .then((report) => {
+      if (my !== gen || !mediaUp) return;
+      const now = Date.now();
+      const packets = inboundAudioPackets(report);
+      if (packets !== null && packets !== mediaSeen.packets) {
+        mediaSeen = { packets, at: now };
+      } else if (now - mediaSeen.at > MEDIA_STALL_MS) {
+        setConn("reconnecting", "zvuk sa zastavil…");
+        scheduleReconnect();
+      }
+    })
+    .catch(() => {
+      // a closed PeerConnection: its own state callbacks rebuild the session.
+    });
+}
+setInterval(checkMedia, MEDIA_CHECK_MS);
 
 function attachBridge(my) {
   janus.attach({
