@@ -8,7 +8,8 @@ use intercom_hub::dante_guard::DanteGuard;
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::levels::{write_atomic, DEFAULT_CONTROL_BIND, DEFAULT_LEVELS_FILE};
 use intercom_hub::levels_http::{
-    control_router, levels_body, levels_css_asset, levels_index, levels_js_asset, ControlState,
+    control_router, levels_body, levels_css_asset, levels_index, levels_js_asset,
+    start_level_controls, ControlState,
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
@@ -954,4 +955,61 @@ fn the_snapshot_carries_the_sliders_and_reads_them_when_serialized() {
     let v = serde_json::to_value(&snap).unwrap();
     assert_eq!(v["levels"][1]["db"], -12.0);
     assert_eq!(v["levels"][1]["muted"], true);
+}
+
+/// The matrix with its control listener on `addr`.
+fn matrix_on(addr: std::net::SocketAddr) -> Matrix {
+    let head = HEAD.replace(
+        "block_frames = 4\n",
+        &format!("block_frames = 4\ncontrol_bind = \"{addr}\"\n"),
+    );
+    Matrix::from_toml(&format!("{head}{SLIDERS}")).unwrap()
+}
+
+fn live(m: &Matrix) -> tokio::sync::watch::Receiver<Arc<HubState>> {
+    let stats = vec![RuntimeStats::default(); m.participants.len()];
+    tokio::sync::watch::channel(Arc::new(HubState::snapshot(m, "t", &stats))).1
+}
+
+// Review finding (intercom#34): the sliders are a convenience, the audio is not. A taken control
+// port must leave the hub running without sliders, never stop every camera, phone and cans leg.
+#[tokio::test]
+async fn a_taken_control_port_leaves_the_hub_running_without_sliders() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let m = matrix_on(taken.local_addr().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let up = start_level_controls(
+        &m,
+        &DanteGuard::new(None, Vec::new()),
+        live(&m),
+        dir.path().join("levels.toml"),
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!(up, None, "no sliders, and no error that would stop the hub");
+}
+
+#[tokio::test]
+async fn a_free_control_port_serves_the_sliders() {
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = free.local_addr().unwrap();
+    drop(free);
+    let m = matrix_on(addr);
+    let dir = tempfile::tempdir().unwrap();
+    let up = start_level_controls(
+        &m,
+        &DanteGuard::new(None, Vec::new()),
+        live(&m),
+        dir.path().join("levels.toml"),
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!(up, Some(addr));
+    let v: serde_json::Value = reqwest::get(format!("http://{addr}/api/levels"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!v["levels"].as_array().unwrap().is_empty(), "{v}");
 }
