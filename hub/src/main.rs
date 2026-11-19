@@ -31,7 +31,7 @@ use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
 use intercom_hub::janus_relay::JanusWsRelay;
-use intercom_hub::levels_http::spawn_level_controls;
+use intercom_hub::levels_http::start_level_controls;
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
@@ -410,14 +410,14 @@ async fn main() -> Result<()> {
     );
 
     if !matrix.levels.is_empty() {
-        spawn_level_controls(
+        start_level_controls(
             &matrix,
             &dante_guard,
             live_rx.clone(),
             levels_file,
             shutdown_signal(),
         )
-        .await?;
+        .await;
     }
 
     let turn = Arc::new(TurnMinter::load(
