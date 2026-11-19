@@ -34,7 +34,11 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
   0.0 and the point is skipped. Never add a lock or a log to that read.
 - **`Matrix::levels` is an `Arc`:** every clone of the matrix (the engine's, the block loop's, the
   snapshot's) reads the same live values. The writer lock (`Levels::writer`) orders a change with its
-  file write; only the HTTP side takes it.
+  file write; only the HTTP side takes it. The dB and the mute share ONE `AtomicU64` (f32 bits + bit
+  32), so `/api/levels` never shows a new mute with an old dB; `linear` is its own `AtomicU32`.
+- **`HubState.levels` is the `Levels` itself** (an `Arc` clone on the hub-mix thread, no
+  allocation); its `Serialize` reads the values when `/api/state` or `/ws` serializes, off the
+  real-time thread. Never put `levels.states()` back into `HubState::snapshot`.
 - **The deployed sliders:** strih-snv Program = `foh_dante:1`, `foh_dante:2`, `lv1` (8 points) ·
   Click = `foh_dante:3` (4) · Kamery = cam1..cam7 (28) · Telefóny = `phones` (4); strih-pp Program =
   `dsg_dante` (2) · Kamery (14) · Telefóny (2). Every cutters point on both boxes is trimmed by exactly
@@ -49,6 +53,11 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
   phone and no internet client reaches it. Started only when the matrix has a `[[level]]`
   (`spawn_level_controls` in `main.rs`), through the same `http_serve::serve` + Dante guard +
   `check_bind`. The stream boxes have no sliders and no :8791.
+- **DNS rebinding guard:** loopback stops other machines, not a web page in the notebook's own
+  browser that re-binds its name to 127.0.0.1. A middleware (`loopback_host_only`) answers 403 unless
+  the `Host` (or the HTTP/2 authority) is `127.0.0.1` / `localhost` / `[::1]` (`is_loopback_host`) and
+  an `Origin`, when sent, is `http://` one of those. A PUT with JSON also needs a CORS preflight,
+  which the routes never answer.
 - **The cutter opens `http://127.0.0.1:8791/` in the browser on the strih notebook** (their cans
   hang on its card). The page: one vertical slider (0.5 dB steps, arrows work) + mute per slider with
   its dB, the hub version (`v<semver>`), and a 1 Hz meter of the trimmed output (the cutters' peak
@@ -61,7 +70,8 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
   from <peer>`; `http_serve` attaches the peer as `ConnectInfo` on every connection for that.
 - `/api/state` (main listener) gains, additively, a read-only `levels` array (omitted without
   sliders) and per participant with outputs `out_level_dbfs` (the max of `OutputBlock::peak_abs`
-  over the status second, on the hub-mix thread, no allocation). No existing field changed.
+  over the status second, on the hub-mix thread, into a vector allocated once). No existing field
+  changed.
 
 ## The state file
 
@@ -71,9 +81,11 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
 - Read once at start (`Levels::load_file`): known names take their value clamped into the range
   (warned); unknown names, a parse error, an unreadable file are warned and ignored; a missing file
   keeps 0 dB. Never fatal. `--check-config` never touches it.
-- Written on every change by `write_atomic` (`.<name>.tmp` beside it, fsync, rename) in
+- Written on every change by `write_atomic` (`.<name>.tmp` beside it, fsync, rename, fsync the
+  directory) in
   `spawn_blocking` under the writer lock. A failed write is a warn naming the path; the value still
-  holds until the next restart and the answer says `saved: false` (the page shows it).
+  holds until the next restart and the answer says `saved: false` (the page shows it). The dB is
+  stored as the f32's shortest decimal (`-7.3`, not toml's f64 widening).
 
 ## Tests
 
@@ -87,11 +99,17 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
   renders `levels.toml` (loopback ports from `levels-env.js`, `INTERKOM_E2E_PORT` + 1..3, the state
   file in a fresh `$TMPDIR/intercom-levels-e2e-<port>`) and runs `target/release/intercom-hub`
   (`INTERCOM_HUB_BIN` overrides). The spec drags a slider, steps it with the keyboard, toggles a
-  mute, reads `/api/levels` and the state file back, checks the version shown and a clean console.
+  mute, reads `/api/levels` and the state file back, checks the version shown and a clean console;
+  a third test feeds the hub's `prog` leg a real VBAN tone (`vban-tone.js`, the header as
+  `VbanHeader::encode` writes it, paced on the wall clock) and watches the page's meter rise, go to
+  `ticho` when both sliders are muted, and rise again. One hub serves all tests, so a `beforeEach`
+  resets both sliders to 0 dB (without it a `--repeat-each` run fails on the previous test's mute).
   CI: `web-e2e` `needs: rust` and downloads its `intercom-hub-linux-amd64` artifact (chmod 0755: an
   artifact drops the mode).
 - Local: `cargo build --release -p intercom-hub`, then `cd tests/e2e && INTERKOM_E2E_PORT=18792 npx
-  playwright test --project=levels` (from a script file).
+  playwright test --project=levels` (from a script file). Playwright starts EVERY `webServer` for
+  any `--project`, so even a `--project=phone` run needs the release binary (or
+  `INTERCOM_HUB_BIN`); a missing one fails the run loudly, never skips.
 - Gotcha: a vertical range (`writing-mode: vertical-lr; direction: rtl`) puts max at the top; a
   Playwright drag from the bottom edge first lands mid-range (the first `input` read about -28 dB on
   Chromium 131), so assert the end value, not the path.

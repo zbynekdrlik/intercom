@@ -16,9 +16,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use std::future::Future;
+
+use anyhow::Context as _;
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::{header, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
@@ -26,7 +30,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::levels::{LevelState, Levels};
+use crate::dante_guard::{check_bind, DanteGuard};
+use crate::levels::{is_loopback_host, LevelState, Levels};
+use crate::matrix::Matrix;
 use crate::state::HubState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -104,7 +110,78 @@ pub fn control_router(state: ControlState) -> Router {
         .route("/api/version", get(version))
         .route("/api/levels", get(get_levels))
         .route("/api/levels/:name", axum::routing::put(put_level))
+        .layer(middleware::from_fn(loopback_host_only))
         .with_state(state)
+}
+
+/// Refuse (403) a request whose `Host` / authority, or `Origin` when it has one, is not the
+/// loopback itself. Loopback binding keeps other machines out; this keeps out a web page in the
+/// notebook's own browser that re-binds its DNS name to 127.0.0.1 (DNS rebinding) and would
+/// otherwise be same-origin with the sliders.
+async fn loopback_host_only(req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    let host_ok = host.as_deref().is_some_and(is_loopback_host);
+    let origin_ok = match req.headers().get(header::ORIGIN) {
+        None => true,
+        Some(o) => o
+            .to_str()
+            .ok()
+            .and_then(|o| o.strip_prefix("http://"))
+            .is_some_and(is_loopback_host),
+    };
+    if host_ok && origin_ok {
+        return next.run(req).await;
+    }
+    tracing::warn!(
+        host = host.as_deref().unwrap_or("-"),
+        origin = ?req.headers().get(header::ORIGIN),
+        path = %req.uri().path(),
+        "level controls: refused a request not addressed to the loopback"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        "the level controls answer only http://127.0.0.1 / localhost",
+    )
+        .into_response()
+}
+
+/// Bind and serve the loopback level controls beside the main listener, through the same
+/// Dante-guarded accept loop. A bind failure stops the hub, like the main listener's.
+pub async fn spawn_level_controls(
+    matrix: &Matrix,
+    dante_guard: &Arc<DanteGuard>,
+    live: watch::Receiver<Arc<HubState>>,
+    levels_file: PathBuf,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let addr = crate::levels::check_control_bind(&matrix.hub.control_bind)?;
+    check_bind(dante_guard, "control_bind", addr)?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind the level controls {addr}"))?;
+    tracing::info!(
+        %addr,
+        sliders = matrix.levels.len(),
+        levels_file = %levels_file.display(),
+        "level controls listening (loopback only)"
+    );
+    let router = control_router(ControlState {
+        levels: matrix.levels.clone(),
+        live,
+        levels_file,
+    });
+    let guard = dante_guard.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::http_serve::serve(listener, router, guard, shutdown).await {
+            tracing::warn!(error = %e, "level controls: the listener ended");
+        }
+    });
+    Ok(())
 }
 
 async fn index() -> impl IntoResponse {

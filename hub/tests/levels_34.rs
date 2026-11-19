@@ -854,3 +854,104 @@ async fn a_failed_state_write_keeps_the_value_and_says_so() {
     assert_eq!(v["saved"], false);
     assert_eq!(m.levels.states()[0].db, 2.0);
 }
+
+// ---- review round 1: DNS rebinding, the stored decimal ---------------------------------------
+
+#[test]
+fn only_a_loopback_host_name_is_accepted() {
+    use intercom_hub::levels::is_loopback_host;
+    for ok in [
+        "127.0.0.1:8791",
+        "127.0.0.1",
+        "localhost:8791",
+        "LocalHost",
+        "[::1]:8791",
+        "[::1]",
+    ] {
+        assert!(is_loopback_host(ok), "{ok}");
+    }
+    for bad in [
+        "evil.example",
+        "evil.example:8791",
+        "127.0.0.1.evil.example:8791",
+        "localhost.evil:8791",
+        "[::1]x",
+        "127.0.0.2:8791",
+        "127.0.0.1:80a",
+        "",
+    ] {
+        assert!(!is_loopback_host(bad), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn a_request_for_another_host_name_or_origin_is_refused() {
+    let m = matrix();
+    let c = control(&m).await;
+    let client = reqwest::Client::new();
+    // A page that re-bound evil.example to 127.0.0.1: its requests carry its own Host.
+    let r = client
+        .get(format!("{}/api/levels", c.base))
+        .header("host", "evil.example:8791")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let r = client
+        .put(format!("{}/api/levels/program", c.base))
+        .header("host", "evil.example")
+        .json(&serde_json::json!({"db": 12.0, "muted": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    // A foreign Origin on a loopback Host.
+    let r = client
+        .put(format!("{}/api/levels/program", c.base))
+        .header("origin", "http://evil.example")
+        .json(&serde_json::json!({"db": 12.0, "muted": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert_eq!(c.levels.states()[0].db, 0.0, "nothing changed");
+    // The page's own origin passes.
+    let own = c.base.clone();
+    let r = client
+        .put(format!("{}/api/levels/program", c.base))
+        .header("origin", own)
+        .json(&serde_json::json!({"db": 1.5, "muted": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let r = client
+        .get(format!("{}/", c.base))
+        .header("host", "localhost:8791")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+}
+
+#[test]
+fn the_state_file_keeps_the_short_decimal() {
+    let m = matrix();
+    m.levels.set(0, -7.3, false).unwrap();
+    let text = m.levels.render_stored().unwrap();
+    assert!(text.contains("db = -7.3\n"), "{text}");
+    let fresh = matrix();
+    fresh.levels.apply_stored(&text).unwrap();
+    assert_eq!(fresh.levels.states()[0].db, -7.3f32);
+}
+
+#[test]
+fn the_snapshot_carries_the_sliders_and_reads_them_when_serialized() {
+    // The hub-mix thread builds the snapshot; a change after that still shows when it is served.
+    let m = matrix();
+    let snap = HubState::snapshot(&m, "t", &[]);
+    m.levels.set(1, -12.0, true).unwrap();
+    let v = serde_json::to_value(&snap).unwrap();
+    assert_eq!(v["levels"][1]["db"], -12.0);
+    assert_eq!(v["levels"][1]["muted"], true);
+}

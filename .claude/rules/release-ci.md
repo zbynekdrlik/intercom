@@ -49,3 +49,7 @@ paths:
 - E2E: `cd tests/e2e && npm ci && INTERKOM_E2E_PORT=18792 npx playwright test`. Port 8792 is held
   by another account. Playwright 1.49.1's WebKit (`webkit-2104`) is not in `/opt/ms-playwright`, so
   the three iPhone specs run on CI only (`playwright install` into this account is hook-blocked).
+- Since intercom#34 the E2E run also starts the REAL hub (`start-levels-hub.js`, the `levels`
+  project): build `cargo build --release -p intercom-hub` first, or set `INTERCOM_HUB_BIN`, also for
+  a `--project=phone` run (Playwright starts every webServer). On CI the `web-e2e` job `needs: rust`
+  and downloads its `intercom-hub-linux-amd64` artifact (chmod 0755). It uses the base port + 1..3.

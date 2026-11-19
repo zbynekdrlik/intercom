@@ -751,18 +751,7 @@ impl Matrix {
             &index,
             &mut points,
         )?;
-        let control: std::net::SocketAddr = raw.hub.control_bind.parse().map_err(|_| {
-            anyhow!(
-                "hub.control_bind '{}' is not host:port",
-                raw.hub.control_bind
-            )
-        })?;
-        if !control.ip().is_loopback() {
-            bail!(
-                "hub.control_bind '{}' must be a loopback address (the level controls have no login)",
-                raw.hub.control_bind
-            );
-        }
+        crate::levels::check_control_bind(&raw.hub.control_bind)?;
 
         Ok(Matrix {
             hub: raw.hub,

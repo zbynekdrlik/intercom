@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const { test, expect } = require("@playwright/test");
 const env = require("./levels-env");
+const { startTone } = require("./vban-tone");
 
 const STATE_FILE = path.join(env.RUN_DIR, "state.toml");
 const WORKSPACE_VERSION = /\[workspace\.package\]\s*\nversion = "([^"]+)"/.exec(
@@ -37,6 +38,14 @@ function storedLevel(name) {
 }
 
 const strip = (page, name) => page.locator(`[data-role="strip"][data-name="${name}"]`);
+
+// One hub serves every test: each starts from the shipped 0 dB, unmuted.
+test.beforeEach(async ({ request }) => {
+  for (const name of ["program", "click"]) {
+    const r = await request.put(`/api/levels/${name}`, { data: { db: 0, muted: false } });
+    expect(r.ok()).toBe(true);
+  }
+});
 
 test("the cutter drags, steps and mutes the sliders; the hub applies and stores them", async ({ page, request }) => {
   const consoleSeen = watchConsole(page);
@@ -121,5 +130,34 @@ test("a value the hub refuses changes nothing the page shows", async ({ page, re
   await expect(strip(page, "click")).toHaveAttribute("data-db", String(before.db));
   await expect(strip(page, "click")).toHaveAttribute("data-muted", String(before.muted));
 
+  expect(consoleSeen).toEqual([]);
+});
+
+test("the cans' meter reads the hub's live output and follows the sliders", async ({ page }) => {
+  const consoleSeen = watchConsole(page);
+  // The hub's `prog` leg gets a real VBAN tone (all three channels: program L/R + click).
+  const stop = startTone({ port: env.VBAN_PORT, stream: "prog", channels: 3 });
+  try {
+    await page.goto("/");
+    await expect(page.locator('[data-role="strip"]')).toHaveCount(2);
+    const meterDb = async () => Number(await page.locator('[data-role="meter"]').getAttribute("data-db"));
+    await expect.poll(meterDb, { timeout: 15000 }).toBeGreaterThan(-40);
+    await expect(page.locator('[data-role="meter-value"]')).not.toHaveText("ticho");
+
+    // Both sliders muted from the page: the cans go silent.
+    for (const name of ["program", "click"]) {
+      const mute = strip(page, name).locator('[data-role="mute"]');
+      if ((await mute.getAttribute("aria-pressed")) !== "true") await mute.click();
+      await expect(mute).toHaveAttribute("aria-pressed", "true");
+    }
+    await expect.poll(meterDb, { timeout: 10000 }).toBe(-120);
+    await expect(page.locator('[data-role="meter-value"]')).toHaveText("ticho");
+
+    // Click alone back on: the meter rises again.
+    await strip(page, "click").locator('[data-role="mute"]').click();
+    await expect.poll(meterDb, { timeout: 10000 }).toBeGreaterThan(-40);
+  } finally {
+    stop();
+  }
   expect(consoleSeen).toEqual([]);
 });

@@ -344,8 +344,10 @@ pub struct HubState {
     /// The cutters' level sliders (intercom#34), read-only here: name, label, dst, sources, dB,
     /// muted, range. Omitted on a hub without `[[level]]`; changed only through the loopback
     /// control listener.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub levels: Vec<crate::levels::LevelState>,
+    /// The hub-mix thread only clones the `Arc` into the snapshot; the values are read when the
+    /// snapshot is serialized (off the real-time thread).
+    #[serde(skip_serializing_if = "crate::levels::Levels::is_empty")]
+    pub levels: crate::levels::Levels,
 }
 
 impl HubState {
@@ -409,7 +411,7 @@ impl HubState {
             mix_thread_sched: None,
             memory_locked: None,
             dante_refusals: BTreeMap::new(),
-            levels: matrix.levels.states(),
+            levels: matrix.levels.clone(),
         }
     }
 

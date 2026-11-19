@@ -31,7 +31,7 @@ use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
 use intercom_hub::janus_relay::JanusWsRelay;
-use intercom_hub::levels_http::{control_router, ControlState};
+use intercom_hub::levels_http::spawn_level_controls;
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
@@ -410,7 +410,14 @@ async fn main() -> Result<()> {
     );
 
     if !matrix.levels.is_empty() {
-        spawn_level_controls(&matrix, &dante_guard, live_rx.clone(), levels_file).await?;
+        spawn_level_controls(
+            &matrix,
+            &dante_guard,
+            live_rx.clone(),
+            levels_file,
+            shutdown_signal(),
+        )
+        .await?;
     }
 
     let turn = Arc::new(TurnMinter::load(
@@ -1090,45 +1097,6 @@ fn janus_display_name() -> String {
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
         .map_or_else(|| "intercom-hub".to_string(), |h| format!("{h}-hub"))
-}
-
-/// Bind and serve the loopback level controls (intercom#34) beside the main listener, through the
-/// same Dante-guarded accept loop. A bind failure stops the hub, like the main listener's.
-async fn spawn_level_controls(
-    matrix: &Matrix,
-    dante_guard: &Arc<DanteGuard>,
-    live: tokio::sync::watch::Receiver<Arc<HubState>>,
-    levels_file: PathBuf,
-) -> Result<()> {
-    let addr: SocketAddr = matrix
-        .hub
-        .control_bind
-        .parse()
-        .with_context(|| format!("invalid control_bind '{}'", matrix.hub.control_bind))?;
-    check_bind(dante_guard, "control_bind", addr)?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind the level controls {addr}"))?;
-    tracing::info!(
-        %addr,
-        sliders = matrix.levels.len(),
-        levels_file = %levels_file.display(),
-        "level controls listening (loopback only)"
-    );
-    let router = control_router(ControlState {
-        levels: matrix.levels.clone(),
-        live,
-        levels_file,
-    });
-    let guard = dante_guard.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            intercom_hub::http_serve::serve(listener, router, guard, shutdown_signal()).await
-        {
-            tracing::warn!(error = %e, "level controls: the listener ended");
-        }
-    });
-    Ok(())
 }
 
 async fn shutdown_signal() {

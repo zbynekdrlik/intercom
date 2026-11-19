@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -82,17 +82,26 @@ pub struct LevelSpec {
 struct LevelValue {
     /// f32 bits: `10^(db/20)`, or 0 while muted.
     linear: AtomicU32,
-    /// f32 bits of the dB the cutter set (kept while muted).
-    db: AtomicU32,
-    muted: AtomicBool,
+    /// The dB the cutter set (f32 bits, low 32) and the mute (bit 32), in ONE atomic so a reader
+    /// never sees a new mute with an old dB.
+    setting: AtomicU64,
+}
+
+const MUTED_BIT: u64 = 1 << 32;
+
+fn pack(db: f32, muted: bool) -> u64 {
+    u64::from(db.to_bits()) | if muted { MUTED_BIT } else { 0 }
+}
+
+fn unpack(v: u64) -> (f32, bool) {
+    (f32::from_bits(v as u32), v & MUTED_BIT != 0)
 }
 
 impl LevelValue {
     fn unity() -> Self {
         LevelValue {
             linear: AtomicU32::new(1f32.to_bits()),
-            db: AtomicU32::new(0f32.to_bits()),
-            muted: AtomicBool::new(false),
+            setting: AtomicU64::new(pack(0.0, false)),
         }
     }
 }
@@ -105,6 +114,18 @@ pub struct Levels {
     values: Arc<[LevelValue]>,
     /// Orders the changes and their file writes. Never taken on the hub-mix thread.
     writer: Arc<Mutex<()>>,
+}
+
+/// Serialized as its sliders' [`LevelState`]s, read when serde runs: a snapshot built on the
+/// hub-mix thread carries only this `Arc` clone (no allocation there), and the HTTP side renders
+/// the values when it serves `/api/state` or a `/ws` push.
+impl Serialize for Levels {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.states().serialize(serializer)
+    }
 }
 
 /// A slider's value as the API and `/api/state` show it.
@@ -285,18 +306,13 @@ impl Levels {
 
     fn store(&self, i: usize, db: f32, muted: bool) {
         let v = &self.values[i];
-        v.db.store(db.to_bits(), Ordering::Relaxed);
-        v.muted.store(muted, Ordering::Relaxed);
+        v.setting.store(pack(db, muted), Ordering::Relaxed);
         let lin = if muted { 0.0 } else { gain_linear(db) };
         v.linear.store(lin.to_bits(), Ordering::Relaxed);
     }
 
     fn current(&self, i: usize) -> (f32, bool) {
-        let v = &self.values[i];
-        (
-            f32::from_bits(v.db.load(Ordering::Relaxed)),
-            v.muted.load(Ordering::Relaxed),
-        )
+        unpack(self.values[i].setting.load(Ordering::Relaxed))
     }
 
     /// Set slider `i`. Refuses a value that is not finite or lies outside the slider's range. The
@@ -384,9 +400,10 @@ impl Levels {
                 continue;
             };
             let spec = &self.specs[i];
-            let db = if v.db.is_finite() { v.db } else { 0.0 };
+            let stored = v.db as f32;
+            let db = if stored.is_finite() { stored } else { 0.0 };
             let clamped = db.clamp(spec.min_db, spec.max_db);
-            if clamped != v.db {
+            if clamped != stored {
                 report.clamped.push(name.clone());
             }
             self.store(i, clamped, v.muted);
@@ -431,19 +448,28 @@ impl Levels {
     }
 
     /// The state file's text for the current values.
-    pub fn render_stored(&self) -> String {
+    pub fn render_stored(&self) -> Result<String> {
         let mut levels = BTreeMap::new();
         for (i, s) in self.specs.iter().enumerate() {
             let (db, muted) = self.current(i);
+            // The f32's shortest decimal (`-7.3`, not toml's f64 widening `-7.300000190734863`);
+            // it parses back to the same f32.
+            let db: f64 = format!("{db}").parse().unwrap_or(0.0);
             levels.insert(s.name.clone(), StoredLevel { db, muted });
         }
-        let body = toml::to_string(&StoredFile { levels }).unwrap_or_default();
-        format!("# intercom-hub level sliders (intercom#34); written by the hub on every change.\n{body}")
+        let body = toml::to_string(&StoredFile { levels }).context("render the levels state")?;
+        Ok(format!(
+            "# intercom-hub level sliders (intercom#34); written by the hub on every change.\n{body}"
+        ))
     }
 
-    /// Write the state file atomically: a temp file beside it, fsync, rename over it.
+    /// Write the state file atomically: a temp file beside it, fsync, rename over it, fsync the
+    /// directory.
     pub fn save_file(&self, path: &Path) -> std::io::Result<()> {
-        write_atomic(path, &self.render_stored())
+        let text = self
+            .render_stored()
+            .map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+        write_atomic(path, &text)
     }
 }
 
@@ -457,7 +483,7 @@ pub struct StoredReport {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredLevel {
-    db: f32,
+    db: f64,
     #[serde(default)]
     muted: bool,
 }
@@ -482,5 +508,44 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    // The rename itself survives a power cut only once the directory is on disk.
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Whether a request's `Host` (or HTTP/2 authority) names the loopback itself: `127.0.0.1`,
+/// `localhost` or `[::1]`, any port. The control listener refuses every other name, so a web page
+/// that re-binds its own DNS name to 127.0.0.1 (DNS rebinding) never reaches the sliders.
+pub fn is_loopback_host(host: &str) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, tail)) if tail.is_empty() || tail.starts_with(':') => inner,
+            _ => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((n, port)) if port.bytes().all(|b| b.is_ascii_digit()) => n,
+            Some(_) => return false,
+            None => host,
+        }
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// Check `[hub] control_bind` at load: a `host:port` on the loopback (the controls have no login).
+pub fn check_control_bind(bind: &str) -> Result<std::net::SocketAddr> {
+    let addr: std::net::SocketAddr = bind
+        .parse()
+        .map_err(|_| anyhow!("hub.control_bind '{bind}' is not host:port"))?;
+    if !addr.ip().is_loopback() {
+        bail!("hub.control_bind '{bind}' must be a loopback address (the level controls have no login)");
+    }
+    Ok(addr)
 }
