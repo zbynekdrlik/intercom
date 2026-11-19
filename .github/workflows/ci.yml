@@ -126,9 +126,14 @@ jobs:
         with:
           workspaces: tray
 
-      # tray-icon's GTK backend (dstack's dtray installs the same two -dev packages).
+      # tray-icon's GTK backend (dstack's dtray installs the same two -dev packages). apt retries a
+      # failed fetch: on 19.11.2026 security.ubuntu.com answered 503 for two mesa .debs and the
+      # whole job failed on them (run 44532412756).
       - name: GTK + AppIndicator headers
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-3-dev libayatana-appindicator3-dev
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends libgtk-3-dev libayatana-appindicator3-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
