@@ -345,6 +345,79 @@ async fn a_phone_reaches_the_hub_only_through_the_hubs_relay_and_the_tone_round_
     assert!(t.rx_packets > 50 && t.tx_packets > 50, "{t:?}");
 }
 
+/// Only the network task, on `udp_bind`, with `creds` handed over; returns its facet source.
+async fn start_leg_on(bind: SocketAddr, creds: TurnCreds) -> Arc<WebrtcShared> {
+    let socket = UdpSocket::bind(bind).unwrap();
+    let shared = Arc::new(WebrtcShared::new(
+        bind.to_string(),
+        vec![bind.to_string()],
+        4,
+    ));
+    let (handle, _packets) = start_webrtc_turn(
+        WebrtcLegConfig {
+            socket,
+            host_ips: vec![bind.ip()],
+            max_phones: 4,
+            slots: Arc::new(RoomSlots::new(4)),
+            shared: shared.clone(),
+            dante_guard: DanteGuard::new(None, vec![]),
+        },
+        TurnFeed::Manual,
+        TurnOptions::for_phones(4),
+    )
+    .unwrap();
+    handle.set_turn_credentials(creds).await.unwrap();
+    shared
+}
+
+/// Poll `shared` until allocated (true) or `within` passed (false).
+async fn allocated_within(shared: &WebrtcShared, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if let Some(f) = shared.snapshot().turn {
+            if f.state == "allocated" && f.relayed.is_some() {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// A hub restart (a crash, a deploy: the old process never released its allocation, which coturn
+/// keeps for its whole lifetime) on the SAME `[webrtc].udp_bind`: the new hub's relay must be up
+/// within seconds. The TURN traffic leaves from its own ephemeral socket, so every process is a new
+/// 5-tuple; on the phones' fixed socket the new Allocate got 437 until the old one expired (~10 min).
+#[test]
+fn a_restarted_hub_allocates_at_once_while_the_old_allocation_still_lives() {
+    let turn = Coturn::start(&[("hub", "hub-pw")]);
+    let bind: SocketAddr = format!("127.0.0.1:{}", {
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.local_addr().unwrap().port()
+    })
+    .parse()
+    .unwrap();
+    // The first hub allocates, then dies without a word (its runtime and socket are dropped).
+    let first = tokio::runtime::Runtime::new().unwrap();
+    first.block_on(async {
+        let shared = start_leg_on(bind, creds(&turn, "hub", "hub-pw")).await;
+        assert!(
+            allocated_within(&shared, Duration::from_secs(10)).await,
+            "the first hub allocated"
+        );
+    });
+    drop(first);
+    // The second hub, same udp_bind, same credential: allocated within a few seconds.
+    let second = tokio::runtime::Runtime::new().unwrap();
+    second.block_on(async {
+        let shared = start_leg_on(bind, creds(&turn, "hub", "hub-pw")).await;
+        let up = allocated_within(&shared, Duration::from_secs(4)).await;
+        let f = shared.snapshot().turn.unwrap();
+        assert!(up, "the restarted hub's relay is up at once: {f:?}");
+        assert_eq!(f.failures, 0, "no 437 from the old allocation: {f:?}");
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_allocation_refreshes_and_rotates_its_credential_against_coturn() {
     let turn = Coturn::start(&[("hub-a", "pw-a"), ("hub-b", "pw-b")]);
