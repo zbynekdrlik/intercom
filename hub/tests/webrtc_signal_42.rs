@@ -139,6 +139,11 @@ fn the_webrtc_table_is_validated_at_load() {
             "reserved for the hub-side TURN relay",
         ),
         ("[webrtc]\nunknown_key = 1\n", "unknown field"),
+        // [::] would deliver v4-mapped sources (review round 2).
+        (
+            "[webrtc]\nudp_bind = \"[::]:6992\"\n",
+            "must be an IPv4 address",
+        ),
     ] {
         let e = load(&hub_toml("phones", "webrtc", (2, 2), extra)).unwrap_err();
         assert!(e.contains(needle), "{extra}: {e}");
@@ -397,19 +402,81 @@ fn the_rate_limit_is_a_token_bucket_per_client() {
 }
 
 #[test]
-fn the_rate_limit_key_is_cloudflares_client_then_nginxs_hop_then_the_peer() {
-    let peer: Option<IpAddr> = Some("10.77.9.1".parse().unwrap());
+fn the_client_key_trusts_headers_only_from_the_boxs_own_nginx_and_cloudflared() {
+    let ip = |s: &str| -> Option<IpAddr> { Some(s.parse().unwrap()) };
+    let lan = ip("10.77.9.1");
+    let lo = ip("127.0.0.1");
+    // A LAN client that skips nginx (the hub listens on 0.0.0.0:8790) cannot pick its key: its
+    // headers are ignored, its own address counts (review round 2 🟡1).
     assert_eq!(
-        client_key(Some(" 203.0.113.9 "), Some("1.2.3.4"), peer),
-        "cf:203.0.113.9"
+        client_key(Some("203.0.113.9"), Some("127.0.0.1"), lan),
+        "10.77.9.1"
+    );
+    assert_eq!(client_key(None, Some("6.6.6.6"), lan), "10.77.9.1");
+    // Through the box's nginx (peer loopback): nginx's X-Forwarded-For $remote_addr.
+    assert_eq!(client_key(None, Some("10.77.9.50"), lo), "10.77.9.50");
+    assert_eq!(
+        client_key(Some("203.0.113.9"), Some("10.77.9.50"), lo),
+        "10.77.9.50"
     );
     // A client cannot pick its key by prepending to X-Forwarded-For: the last hop counts.
     assert_eq!(
-        client_key(None, Some("6.6.6.6, 10.77.9.50"), peer),
-        "xff:10.77.9.50"
+        client_key(None, Some("6.6.6.6, 10.77.9.50"), lo),
+        "10.77.9.50"
     );
-    assert_eq!(client_key(Some(""), None, peer), "peer:10.77.9.1");
-    assert_eq!(client_key(None, None, None), "peer:unknown");
+    // cloudflared -> nginx -> hub: nginx saw 127.0.0.1, so CF-Connecting-IP is the phone.
+    assert_eq!(
+        client_key(Some(" 203.0.113.9 "), Some("127.0.0.1"), lo),
+        "203.0.113.9"
+    );
+    // Garbage in a header is no key: the peer (or nginx's hop) counts.
+    assert_eq!(client_key(Some("evil"), Some("127.0.0.1"), lo), "127.0.0.1");
+    assert_eq!(client_key(None, Some("not-an-ip"), lo), "127.0.0.1");
+    assert_eq!(client_key(None, None, None), "unknown");
+    // IPv6 is keyed by its /64: rotating inside the prefix is the same client.
+    assert_eq!(
+        client_key(None, None, ip("2001:db8:1:2:aaaa::1")),
+        client_key(None, None, ip("2001:db8:1:2:bbbb:cccc:dddd:eeee"))
+    );
+    assert_eq!(
+        client_key(None, None, ip("2001:db8:1:2::1")),
+        "2001:db8:1:2::/64"
+    );
+    assert_ne!(
+        client_key(None, None, ip("2001:db8:1:2::1")),
+        client_key(None, None, ip("2001:db8:1:3::1"))
+    );
+    assert_eq!(
+        client_key(Some("2001:db8:9:9::42"), Some("127.0.0.1"), lo),
+        "2001:db8:9:9::/64"
+    );
+    // A v4-mapped peer is its IPv4 address.
+    assert_eq!(client_key(None, None, ip("::ffff:10.77.9.7")), "10.77.9.7");
+}
+
+#[test]
+fn a_full_rate_limiter_evicts_the_least_recently_used_bucket_never_shares_one() {
+    let t0 = Instant::now();
+    let mut r = RateLimiter::with_capacity(2.0, 0.001, 3);
+    // "a" spends its bucket; "b" and "c" are seen later.
+    assert!(r.allow("a", t0));
+    assert!(r.allow("a", t0));
+    assert!(!r.allow("a", t0));
+    assert!(r.allow("b", t0 + Duration::from_millis(1)));
+    assert!(r.allow("c", t0 + Duration::from_millis(2)));
+    // "a" is touched again (refused, still drained): now "b" is the least recently used.
+    assert!(!r.allow("a", t0 + Duration::from_millis(3)));
+    // A new client gets a full bucket of its own, never a shared one; "b" is evicted.
+    for _ in 0..2 {
+        assert!(r.allow("d", t0 + Duration::from_millis(4)));
+    }
+    assert!(!r.allow("d", t0 + Duration::from_millis(4)));
+    assert_eq!(r.len(), 3);
+    // Every new client keeps getting its own bucket, however many there are.
+    for i in 0..100 {
+        assert!(r.allow(&format!("n{i}"), t0 + Duration::from_millis(10 + i)));
+    }
+    assert_eq!(r.len(), 3);
 }
 
 #[test]

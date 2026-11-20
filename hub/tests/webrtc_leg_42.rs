@@ -115,7 +115,13 @@ async fn start_hub_rated(max_phones: usize, rate: Option<RateLimiter>) -> Hub {
             Some(r) => PhoneApi::with_rate(Some(handle), r),
             None => PhoneApi::new(Some(handle)),
         };
-        axum::serve(listener, phone_router(api)).await.unwrap();
+        // With the peer address, as the hub's own accept loop hands it to the routes.
+        axum::serve(
+            listener,
+            phone_router(api).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     Hub {
         base: format!("http://{addr}"),
@@ -479,6 +485,8 @@ fn silent_offer() -> String {
 async fn post_as(base: &str, client_ip: &str, body: serde_json::Value) -> u16 {
     ::reqwest::Client::new()
         .post(format!("{base}/api/phone/offer"))
+        // As cloudflared -> the box's nginx -> the hub delivers a phone on mobile data.
+        .header("x-forwarded-for", "127.0.0.1")
         .header("cf-connecting-ip", client_ip)
         .json(&body)
         .send()
@@ -692,4 +700,181 @@ fn stun_messages_are_told_apart_from_dtls_and_rtp() {
     let mut no_cookie = stun.clone();
     no_cookie[4] = 0;
     assert!(!is_stun(&no_cookie));
+}
+
+/// A running test phone: its stop flag, its id once answered, its task.
+type RunningPhone = (
+    Arc<AtomicBool>,
+    Arc<Mutex<Option<String>>>,
+    tokio::task::JoinHandle<(String, ClientRun)>,
+);
+
+/// Run a phone that connects and stays until `stop`; its id once answered.
+fn spawn_phone(base: &str, display: &str, replaces: Option<String>) -> RunningPhone {
+    let stop = Arc::new(AtomicBool::new(false));
+    let id_out = Arc::new(Mutex::new(None));
+    let h = tokio::task::spawn_blocking({
+        let (base, display, stop, id_out) = (
+            base.to_string(),
+            display.to_string(),
+            stop.clone(),
+            id_out.clone(),
+        );
+        move || {
+            run_client_with(ClientOpts {
+                base,
+                display,
+                replaces,
+                extra_candidates: Vec::new(),
+                run_for: Duration::from_secs(30),
+                stop,
+                id_out,
+            })
+        }
+    });
+    (stop, id_out, h)
+}
+
+async fn fill_pending(hub: &Hub, from: u8) {
+    // Two never-connecting offers from two Cloudflare clients: the pending cap of 4 slots.
+    for i in 0..2 {
+        let ip = format!("198.51.100.{}", from + i);
+        assert_eq!(
+            post_as(&hub.base, &ip, serde_json::json!({"sdp": silent_offer()})).await,
+            200
+        );
+    }
+    assert_eq!(hub.shared.snapshot().phones_pending, 2);
+}
+
+// Review round 2 🟡2: a reconnect claim is spent by its use, whether it named a live phone or a
+// recently connected one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reconnect_claim_is_spent_once() {
+    let hub = start_hub(4).await; // pending cap 2
+    let base = hub.base.clone();
+
+    // A recent claim: phone A connects and leaves.
+    let (stop, id, h) = spawn_phone(&base, "A", None);
+    wait_for("A connected", 5, || {
+        hub.shared.snapshot().phones_connected == 1
+    })
+    .await;
+    let a_id = id.lock().unwrap().clone().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    h.await.unwrap();
+    let c = ::reqwest::Client::new();
+    let r = c
+        .delete(format!("{base}/api/phone/{a_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 204);
+    wait_for("A gone", 3, || hub.shared.snapshot().phones.is_empty()).await;
+
+    fill_pending(&hub, 10).await;
+    let claim = serde_json::json!({"sdp": silent_offer(), "replaces": a_id});
+    assert_eq!(
+        post_as(&base, "198.51.100.40", claim.clone()).await,
+        200,
+        "the claim admits once"
+    );
+    assert_eq!(
+        post_as(&base, "198.51.100.41", claim).await,
+        503,
+        "the same claim again is an ordinary offer, held to the pending cap"
+    );
+
+    // A live claim: phone B connects; its id replaces it once, and the replaced id is no claim.
+    wait_for("the pending slots expire", 5, || {
+        hub.shared.snapshot().phones_pending == 0
+    })
+    .await;
+    let (stop_b, id_b, hb) = spawn_phone(&base, "B", None);
+    wait_for("B connected", 5, || {
+        hub.shared.snapshot().phones_connected == 1
+    })
+    .await;
+    let b_id = id_b.lock().unwrap().clone().unwrap();
+    fill_pending(&hub, 20).await;
+    let claim = serde_json::json!({"sdp": silent_offer(), "replaces": b_id});
+    assert_eq!(post_as(&base, "198.51.100.50", claim.clone()).await, 200);
+    assert_eq!(hub.shared.snapshot().phones_connected, 0, "B was replaced");
+    assert_eq!(post_as(&base, "198.51.100.51", claim).await, 503);
+    stop_b.store(true, Ordering::Relaxed);
+    hb.await.unwrap();
+}
+
+// Review round 2 🟡3: one client (one key) holds at most 3 live or pending sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_client_holds_at_most_three_sessions() {
+    let hub = start_hub(16).await; // pending cap 8: only the per-client cap stops this client
+    let base = hub.base.clone();
+    let mut codes = Vec::new();
+    for _ in 0..4 {
+        codes.push(
+            post_as(
+                &base,
+                "203.0.113.77",
+                serde_json::json!({"sdp": silent_offer()}),
+            )
+            .await,
+        );
+    }
+    assert_eq!(codes, vec![200, 200, 200, 429]);
+    // Another client is not affected.
+    assert_eq!(
+        post_as(
+            &base,
+            "203.0.113.78",
+            serde_json::json!({"sdp": silent_offer()})
+        )
+        .await,
+        200
+    );
+    // A LAN client that skips nginx cannot pose as someone else: its forged headers are ignored,
+    // so its offers all count on its own address (here the test's loopback peer, as nginx would be
+    // with no X-Forwarded-For of its own).
+    let c = ::reqwest::Client::new();
+    let mut forged = Vec::new();
+    for i in 0..4 {
+        let r = c
+            .post(format!("{base}/api/phone/offer"))
+            .header("x-forwarded-for", format!("10.0.0.{i}, junk"))
+            .json(&serde_json::json!({"sdp": silent_offer()}))
+            .send()
+            .await
+            .unwrap();
+        forged.push(r.status().as_u16());
+    }
+    assert_eq!(forged, vec![200, 200, 200, 429], "{forged:?}");
+    // Once the never-connecting offers expire, the client may offer again.
+    wait_for("the pending slots expire", 5, || {
+        hub.shared.snapshot().phones_pending == 0
+    })
+    .await;
+    let f = hub.shared.snapshot();
+    assert_eq!(f.sessions_never_connected, 7, "{f:?}");
+    assert_eq!(
+        post_as(
+            &base,
+            "203.0.113.77",
+            serde_json::json!({"sdp": silent_offer()})
+        )
+        .await,
+        200
+    );
+}
+
+#[test]
+fn a_failing_send_warns_once_per_run_and_notes_the_recovery() {
+    use intercom_hub::webrtc_leg::SendFailures;
+    let mut f = SendFailures::default();
+    assert_eq!(f.ok(), None, "nothing to recover from");
+    assert_eq!(f.fail(), Some(1), "the first failure warns");
+    assert_eq!(f.fail(), None);
+    assert_eq!(f.fail(), None);
+    assert_eq!(f.ok(), Some(3), "the recovery names the count");
+    assert_eq!(f.ok(), None);
+    assert_eq!(f.fail(), Some(4), "a new failing run warns again");
 }
