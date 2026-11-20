@@ -144,7 +144,7 @@ fn a_window_left_on_an_unplugged_monitor_comes_back_centred_on_a_visible_one() {
 #[test]
 fn a_window_hanging_over_the_edge_is_pulled_fully_onto_its_monitor() {
     // Its centre is on the monitor, its right and bottom edges are not.
-    let p = place(Some(r(1500, 800, 800, 600)), &[FULL_HD]);
+    let p = place(Some(r(1500, 700, 800, 600)), &[FULL_HD]);
     assert_eq!(p, r(1120, 480, 800, 600));
     let q = place(Some(r(-300, -100, 800, 600)), &[FULL_HD]);
     assert_eq!(q, r(0, 0, 800, 600));
