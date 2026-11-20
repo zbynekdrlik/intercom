@@ -1,7 +1,7 @@
 [package]
 name = "intercom-tray"
 # Kept equal to the root [workspace.package] version (CI checks it; the release ships both).
-version = "1.9.30"
+version = "1.9.31"
 edition = "2021"
 publish = false
 description = "The strih notebook's tray icon for the intercom hub: its status and the cutters' level page (intercom#34)"
