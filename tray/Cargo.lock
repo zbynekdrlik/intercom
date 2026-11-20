@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "intercom-tray"
-version = "1.9.27"
+version = "1.9.28"
 dependencies = [
  "glib",
  "gtk",
