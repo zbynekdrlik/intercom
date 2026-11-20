@@ -1261,6 +1261,22 @@ signalling with it. A skipped frame is dropped, never queued. Tests: `hub/tests/
   source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
   in when the source drops.
 
+## Diagnosing phone dropouts from the box logs (issue 36, 20.11.2026)
+
+- **nginx logs a request when it ENDS**, so a `/janus 101` line is the time its WebSocket closed and
+  an `/interkom.mjpeg` line carries the whole stream's bytes: divide by the time since the previous
+  picture line for the rate. `GET /` from the same client = a manual reload (the page never reloads
+  itself).
+- Line them up with `journalctl -u cloudflared-interkom | grep 'no recent network activity'`
+  (both tunnel connections timing out together = the uplink or the tunnel was saturated) and the
+  hub's `janus relay: phone disconnected`.
+- 19.11. that showed the picture at 2-7 Mbit/s ending exactly at each tunnel drop, and a reload 2 s
+  after each WebSocket close. Hence the tunnel pacing above and the PWA's media watchdog
+  (`MEDIA_STALL_MS`, a `getStats` inbound-rtp packet check) with the 4 s backoff cap.
+- Live check of the pacing: `curl --max-time 10 https://interkom.newlevel.media/interkom.mjpeg`
+  must land near 40 KB/s (+ the 80 KB burst), the same on the box's `127.0.0.1:8790` at the full
+  rate; the hub logs `interkom picture: a client through Cloudflare, paced to 40000 B/s`.
+
 ## The service worker must never proxy the picture stream (issue 1379, 27.9.2026)
 
 - **What broke.** `web/sw.js` answered every fetch with `respondWith(fetch(event.request))`,
