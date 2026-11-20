@@ -1607,7 +1607,22 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
 - **The hub's own TURN relay (phase 3, `webrtc_turn.rs`).** The venue uplink is CGNAT: a phone on
   mobile data reaches no host candidate, not even through its own relay. With `[webrtc].turn =
   "cloudflare"` the network task holds ONE allocation on Cloudflare's TURN (UDP to the `turn:` url
-  without `transport=tcp`, `turn_udp_server`, resolved to IPv4) on the leg's ONE socket.
+  without `transport=tcp`, `turn_udp_server`, resolved to IPv4).
+  - **Two sockets.** The phones' host candidates stay on `[webrtc].udp_bind` (fixed port,
+    IP_PKTINFO source-addressed sends, unchanged). The relay talks to the TURN server from its OWN
+    socket, `bind_turn_socket`: IPv4 `0.0.0.0:0`, an EPHEMERAL port, so every hub process is a new
+    5-tuple at the TURN server. Why: a hub that dies without releasing (a crash, a kill, a deploy's
+    restart) leaves its allocation on the server for its whole lifetime (~10 min), and on the
+    phones' fixed port the next process's Allocate got 437 "Mismatched allocation" for all that
+    time (`a_restarted_hub_allocates_at_once_while_the_old_allocation_still_lives`, RED on the
+    one-socket design: backoff, 3 failures). The TURN socket sends plain `send_to`, no source
+    address: the kernel picks it by route (the TURN server is on the internet, so the default
+    route's address), which stays the allocation's 5-tuple while the route holds. It has
+    `IP_PKTINFO` + the Dante guard like every hub UDP socket (intercom#25) and accepts only the
+    TURN server's exact address (anything else counts in `rx_refused`). Its local address is the
+    journal line `the relay's own UDP socket`. The relayed candidate's port is the server's, so
+    the box firewall needs nothing new: the TURN socket only talks out to the server and gets its
+    answers back on the same 5-tuple.
   - **Credentials:** `feed_turn_credentials` asks the same `TurnMinter` `/api/ice` serves (its
     cache, its refresher), hands every NEW username/server over (`Command::TurnCredentials`), a
     failure once per change as the reason (`TurnUnavailable`: the facet reads `off` with it when
@@ -1628,19 +1643,21 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
     credential's expiry (the minter renews at 2/3 of 24 h, so 8 h of slack). **coturn drops a
     released allocation on its next timer pass, not at once:** the Allocate right after a release
     got 437 "Mismatched allocation" (1-3 s on dev1), so a 437 within 10 s of a release waits 0.5 s
-    and tries again (`releasing`), never counted as a failure. A 437 at any other time (the previous
-    hub process's allocation, kept until its lifetime ends) backs off like any failure.
+    and tries again (`releasing`), never counted as a failure. Still needed with the ephemeral
+    socket: a rotation releases and allocates on the SAME socket (the coturn rotation test reads 0
+    failures only with it). A 437 at any other time backs off like any failure (a new process
+    never meets its predecessor's allocation any more: new port, new 5-tuple).
   - **ICE-lite takes host candidates only** (`is` 0.12 `agent.rs` `add_local_candidate`: "Reject
     non-host candidate due to ice-lite mode"). So the relayed address is added as
     `Candidate::host` (a lite agent only matches the destination a check came to and answers from
     it), and `advertise_relayed` rewrites exactly that SDP line to `typ relay raddr 0.0.0.0 rport
     0` with priority (65535 << 8) | 255: below every host candidate, so a phone on the venue Wi-Fi
     nominates the host pair, never the relay.
-  - **Demux (`NetTask::receive`):** a datagram from the TURN server's exact address goes to the
-    relay; a Data indication / ChannelData comes out as (peer, payload) and is fed to str0m from the
-    peer TO the relayed address (`deliver`). A transmit whose `source` is the relayed address is
-    wrapped (`send_to`) and sent to the server from the IP the server's answers arrive on
-    (`turn_local`, IP_PKTINFO). The rest is phase 2 unchanged. Every phone records whether its last
+  - **Demux:** a datagram on the TURN socket from the TURN server's exact address goes to the
+    relay (`NetTask::receive_turn`); a Data indication / ChannelData comes out as (peer, payload)
+    and is fed to str0m from the peer TO the relayed address (`deliver`). A transmit whose
+    `source` is the relayed address is wrapped (`send_to`) and sent to the server from the TURN
+    socket (`after_turn`). The phones' socket is phase 2 unchanged. Every phone records whether its last
     datagram came through the relay: `/api/state` `phones[].pair` = `host` / `relay`.
   - **Permissions** per IP: the IPv4 addresses of the live phones' kept offer candidates
     (`offer_candidate_ips`, `set_wanted` on adopt and sweep), at most `8 x max_phones` (counted in

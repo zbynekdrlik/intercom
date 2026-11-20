@@ -15,10 +15,12 @@
 //!   leaves; and publishes the `/api/state` `webrtc` facet once a second.
 //!
 //! Phase 3: with `[webrtc].turn = "cloudflare"` the task also owns the hub's own TURN allocation
-//! ([`crate::webrtc_turn::TurnRelay`], credentials from the box's [`TurnMinter`]) on the SAME
-//! socket: datagrams from the TURN server are unwrapped and fed to str0m from the peer to the
-//! relayed address; str0m's transmits from the relayed address are wrapped and sent to the TURN
-//! server. Every answer then carries the relayed candidate next to the host ones, and each offer's
+//! ([`crate::webrtc_turn::TurnRelay`], credentials from the box's [`TurnMinter`]) on a SECOND,
+//! ephemeral UDP socket (0.0.0.0:0): every hub process talks to the TURN server from a new
+//! 5-tuple, so a restarted hub allocates at once instead of meeting its predecessor's unreleased
+//! allocation (437 for up to its lifetime). Datagrams from the TURN server are unwrapped and fed to
+//! str0m from the peer to the relayed address; str0m's transmits from the relayed address are
+//! wrapped and sent to the TURN server from that socket. Every answer then carries the relayed candidate next to the host ones, and each offer's
 //! plausible addresses get a TURN permission while its phone lives. ICE-lite is unchanged: the hub
 //! only answers checks. Logging: one line per session start / end, ICE state change, TURN state
 //! change and error, never one per packet.
@@ -566,10 +568,11 @@ pub fn start_webrtc_turn(
         .collect();
     let factory = Arc::new(RtcFactory::new(candidates.clone()));
     let relay_candidate = factory.relay.clone();
-    let turn = match &feed {
-        TurnFeed::Off => None,
+    let (turn, turn_socket) = match &feed {
+        TurnFeed::Off => (None, None),
         TurnFeed::Cloudflare(_) | TurnFeed::Manual => {
-            Some(TurnRelay::new(opts).map_err(anyhow::Error::msg)?)
+            let relay = TurnRelay::new(opts).map_err(anyhow::Error::msg)?;
+            (Some(relay), Some(bind_turn_socket(&cfg.dante_guard)?))
         }
     };
     if let TurnFeed::Cloudflare(minter) = feed {
@@ -593,7 +596,7 @@ pub fn start_webrtc_turn(
         shared: cfg.shared,
         guard: cfg.dante_guard,
         turn,
-        turn_local: None,
+        turn_socket,
         turn_send_fail: SendFailures::default(),
         relay_candidate,
         relay_published: None,
@@ -601,6 +604,32 @@ pub fn start_webrtc_turn(
     task.publish();
     tokio::spawn(task.run(cmd_rx, pkt_rx));
     Ok((handle, pkt_tx))
+}
+
+/// The TURN relay's own socket: IPv4, an EPHEMERAL port, every interface. A new port per hub
+/// process is a new 5-tuple at the TURN server, so the predecessor's allocation (never released
+/// after a crash or a kill, kept for its lifetime) cannot answer this process's Allocate with 437.
+/// The kernel picks the source address by route (the TURN server is on the internet, so the
+/// default route's address); that stays the allocation's 5-tuple while the route holds. Datagrams
+/// arriving on the Dante leg are dropped like on the phones' socket (intercom#25).
+fn bind_turn_socket(guard: &DanteGuard) -> anyhow::Result<tokio::net::UdpSocket> {
+    let std_sock = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    std_sock.set_nonblocking(true)?;
+    let sock = tokio::net::UdpSocket::from_std(std_sock)?;
+    crate::pktinfo::enable_guarded(&sock, guard, "webrtc turn socket")?;
+    tracing::info!(local = %sock.local_addr()?, "webrtc turn: the relay's own UDP socket (ephemeral port, a new 5-tuple per hub process)");
+    Ok(sock)
+}
+
+/// One datagram on the TURN socket, or never without one.
+async fn recv_turn(
+    sock: Option<&tokio::net::UdpSocket>,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, Option<crate::dante_guard::PacketInfo>)> {
+    match sock {
+        Some(s) => crate::pktinfo::recv_from_with_info(s, buf).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The TURN server a minted credential set names: its UDP `turn:` url, resolved to IPv4.
@@ -803,9 +832,8 @@ struct NetTask {
     unconnected_log: RefusalLog,
     /// The hub's own TURN relay (phase 3), `None` with `[webrtc].turn` off.
     turn: Option<TurnRelay>,
-    /// The local address the TURN server's datagrams arrive on (IP_PKTINFO): the relay's own
-    /// traffic leaves from it, so the allocation's 5-tuple holds on a 0.0.0.0 bind.
-    turn_local: Option<Ipv4Addr>,
+    /// The relay's own socket (ephemeral port, see [`bind_turn_socket`]); `Some` iff `turn`.
+    turn_socket: Option<tokio::net::UdpSocket>,
     /// The sends to the TURN server: a warning when they start to fail, a line when they work.
     turn_send_fail: SendFailures,
     /// The relayed candidate the answers carry (shared with the [`RtcFactory`]).
@@ -835,6 +863,13 @@ impl NetTask {
         mut pkt_rx: mpsc::Receiver<TxPacket>,
     ) {
         let mut buf = vec![0u8; RECV_BUF];
+        let mut turn_buf = vec![0u8; RECV_BUF];
+        // The relay socket's port, for the Dante guard's per-port refusal counts.
+        let turn_port = self
+            .turn_socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map_or(0, |a| a.port());
         let mut publish = tokio::time::interval(Duration::from_secs(1));
         publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
@@ -862,6 +897,18 @@ impl NetTask {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 },
+                r = recv_turn(self.turn_socket.as_ref(), &mut turn_buf) => match r {
+                    Ok((n, from, info)) => {
+                        if self.guard.check_datagram(turn_port, info, from) {
+                            continue;
+                        }
+                        self.receive_turn(&turn_buf[..n], from);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "webrtc turn: socket receive failed");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                },
                 Some(cmd) = cmd_rx.recv() => self.command(cmd),
                 Some(pkt) = pkt_rx.recv() => self.write_packet(&pkt),
                 _ = sleep => {}
@@ -881,23 +928,25 @@ impl NetTask {
     }
 
     fn receive(&mut self, data: &[u8], from: SocketAddr, dst_ip: Option<IpAddr>) {
-        let now = Instant::now();
-        if let Some(turn) = self.turn.as_mut().filter(|t| t.is_server(from)) {
-            // The TURN server's datagram: a response for the relay, or a phone's datagram
-            // unwrapped, which str0m sees from the phone to the hub's relayed address.
-            let got = turn.handle_datagram(data, now);
-            let relayed = turn.relayed();
-            if let Some(IpAddr::V4(v4)) = dst_ip {
-                self.turn_local = Some(v4);
-            }
-            if let (Some((peer, payload)), Some(relayed)) = (got, relayed) {
-                self.deliver(&payload, peer, relayed, true, now);
-            }
-            self.after_turn();
-            return;
-        }
         let destination = self.destination(dst_ip);
-        self.deliver(data, from, destination, false, now);
+        self.deliver(data, from, destination, false, Instant::now());
+    }
+
+    /// A datagram on the TURN socket: only the TURN server's exact address counts (anything else
+    /// is dropped and counted). A response moves the relay; a phone's datagram comes out
+    /// unwrapped and str0m sees it from the phone to the hub's relayed address.
+    fn receive_turn(&mut self, data: &[u8], from: SocketAddr) {
+        let now = Instant::now();
+        let Some(turn) = self.turn.as_mut().filter(|t| t.is_server(from)) else {
+            self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let got = turn.handle_datagram(data, now);
+        let relayed = turn.relayed();
+        if let (Some((peer, payload)), Some(relayed)) = (got, relayed) {
+            self.deliver(&payload, peer, relayed, true, now);
+        }
+        self.after_turn();
     }
 
     /// One datagram for the phones: `from` the phone (or the peer the relay unwrapped) to
@@ -1375,16 +1424,16 @@ impl NetTask {
         self.after_turn();
     }
 
-    /// Send what the relay queued (to the TURN server, from the address its answers arrive on) and
-    /// keep the answers' relayed candidate current.
+    /// Send what the relay queued (to the TURN server, from the relay's own socket) and keep the
+    /// answers' relayed candidate current.
     fn after_turn(&mut self) {
-        let Some(turn) = self.turn.as_mut() else {
+        let (Some(turn), Some(sock)) = (self.turn.as_mut(), self.turn_socket.as_ref()) else {
             return;
         };
         let server = turn.server();
         while let Some(d) = turn.poll_transmit() {
             let Some(server) = server else { continue };
-            match crate::pktinfo::try_send_from(&self.socket, &d, server, self.turn_local) {
+            match sock.try_send_to(&d, server) {
                 Ok(_) => {
                     if let Some(count) = self.turn_send_fail.ok() {
                         tracing::info!(

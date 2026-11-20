@@ -5,7 +5,8 @@
 //! [`crate::turn::TurnMinter`]) and offers it in every answer next to the host candidates.
 //!
 //! [`TurnRelay`] is sans-IO, owned by the network task ([`crate::webrtc_leg`]), and talks to the
-//! TURN server over the leg's ONE UDP socket:
+//! TURN server over its OWN ephemeral UDP socket (`webrtc_leg::bind_turn_socket`: a new 5-tuple
+//! per hub process, so a restarted hub never meets its predecessor's unreleased allocation):
 //!
 //! - **One allocation** (UDP over UDP, the long-term credential: an unsigned Allocate gets 401 with
 //!   REALM + NONCE, the signed one the relayed address), refreshed at half its lifetime (or
