@@ -66,6 +66,16 @@ module.exports = defineConfig({
         launchOptions: { executablePath: process.env.INTERKOM_E2E_CHROMIUM || undefined },
       },
     },
+    {
+      name: "levels-webkit",
+      testMatch: /levels\.spec\.js$/,
+      // The tray's mix window is WebKitGTK (intercom#39): the fader geometry runs in WebKit too.
+      grep: /every engine/,
+      use: {
+        ...devices["Desktop Safari"],
+        baseURL: levelsEnv.CONTROL_URL,
+      },
+    },
   ],
   webServer: [
     {
