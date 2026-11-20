@@ -956,3 +956,98 @@ fn a_phone_counts_as_on_the_relay_while_relay_datagrams_are_recent() {
         now
     ));
 }
+
+/// Drive `relay` against `srv` in 100 ms steps from `from` until `until`; returns the end time.
+fn run_until(relay: &mut TurnRelay, srv: &mut FakeTurn, from: Instant, until: Instant) -> Instant {
+    let mut t = from;
+    while t < until {
+        t += Duration::from_millis(100);
+        relay.handle_timeout(t, false);
+        pump(relay, srv, t);
+    }
+    t
+}
+
+#[test]
+fn a_held_allocation_is_refreshed_back_with_its_relayed_address_after_a_passing_outage() {
+    // A passing outage: the keepalive goes unanswered, the hub takes the allocation for lost, but
+    // the server never lost it. The re-Allocate from the same 5-tuple gets 437; the hub then
+    // refreshes the held allocation (Readopt) and carries on with the SAME relayed address, no
+    // new allocation, no back-off.
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    let relayed = relay.relayed().unwrap();
+    srv.silent = true;
+    let t = run_until(
+        &mut relay,
+        &mut srv,
+        t0,
+        t0 + TURN_KEEPALIVE + TURN_TX_TIMEOUT,
+    );
+    assert_eq!(relay.phase(), TurnPhase::Allocating, "taken for lost");
+    assert_eq!(relay.facet(t).failures, 1);
+    srv.silent = false;
+    let refreshes_before = srv.count("refresh");
+    let t = run_until(&mut relay, &mut srv, t, t + Duration::from_millis(600));
+    assert_eq!(relay.phase(), TurnPhase::Allocated);
+    assert_eq!(relay.relayed(), Some(relayed), "the same relayed address");
+    let f = relay.facet(t);
+    assert_eq!(f.allocations, 1, "no new allocation: {f:?}");
+    assert_eq!(f.failures, 1, "the loss only, no back-off failure: {f:?}");
+    assert_eq!(f.refreshes, 1, "the held allocation was refreshed: {f:?}");
+    assert_eq!(srv.count("refresh"), refreshes_before + 1);
+    assert_eq!(srv.alloc_user.as_deref(), Some("alice"));
+    assert!(
+        srv.seen
+            .iter()
+            .any(|s| s.method == "refresh" && s.lifetime == Some(600)),
+        "a Refresh asking a lifetime, never a release"
+    );
+}
+
+#[test]
+fn a_refused_readopt_falls_back_to_the_back_off_and_never_loops() {
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    srv.silent = true;
+    let t = run_until(
+        &mut relay,
+        &mut srv,
+        t0,
+        t0 + TURN_KEEPALIVE + TURN_TX_TIMEOUT,
+    );
+    assert_eq!(relay.phase(), TurnPhase::Allocating);
+    // The server holds the allocation (437 to an Allocate) but refuses its Refresh too.
+    srv.silent = false;
+    srv.fail_refresh = Some(403);
+    let t = run_until(&mut relay, &mut srv, t, t + Duration::from_millis(600));
+    assert_eq!(
+        relay.phase(),
+        TurnPhase::Backoff,
+        "the normal back-off path"
+    );
+    let f = relay.facet(t);
+    assert_eq!(f.failures, 2, "the loss, then the refused refresh: {f:?}");
+    assert!(f.last_error.unwrap().contains("403"));
+    // Two minutes on: every attempt waits its back-off (1, 2, 4 ... 60 s), so a handful of
+    // attempts, never a loop; the relay never claims an allocation it does not have.
+    let allocates = srv.count("allocate");
+    let refreshes = srv.count("refresh");
+    let mut t2 = t;
+    while t2 < t + Duration::from_secs(120) {
+        t2 += Duration::from_millis(100);
+        relay.handle_timeout(t2, false);
+        pump(&mut relay, &mut srv, t2);
+        assert_ne!(relay.phase(), TurnPhase::Allocated);
+    }
+    let attempts_allocate = srv.count("allocate") - allocates;
+    let attempts_refresh = srv.count("refresh") - refreshes;
+    // 1 + 2 + 4 + 8 + 16 + 32 + 60 s: at most 7 attempts in 120 s, each an unsigned + a signed
+    // Allocate, a Refresh only while the loss is recent (60 s).
+    assert!(
+        (5..=14).contains(&attempts_allocate),
+        "{attempts_allocate} Allocates"
+    );
+    assert!(attempts_refresh <= 6, "{attempts_refresh} Refreshes");
+    assert!(relay.facet(t2).failures <= 2 + 8);
+}
