@@ -1418,3 +1418,75 @@ signalling with it. A skipped frame is dropped, never queued. Tests: `hub/tests/
   `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-SNV (interkom)`); the PWA
   showed the live cam1 picture through the HTTPS front at ~9.3 fps; stop the transient hub right
   after — it is a second sender of stream `cam1` into cam1's headset.
+
+## The in-hub WebRTC phone leg (intercom#42, phases 1 + 2)
+
+Owner decision B (20.11.2026): the hub ITSELF is the phones' WebRTC endpoint, no Janus. Design:
+issue 42 comment 7041415746. Per box `adapter = "webrtc"` on the `phones` participant; `janus`
+stays the fallback by config until an event ran clean (phase 4 switches strih-snv; phase 3 adds
+the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_42.rs`).
+
+- **Crate:** `str0m = "=0.25.0"`, `default-features = false`, `features = ["rust-crypto"]`
+  (sans-IO ICE + DTLS + SRTP; pinned exactly, pre-1.0). No openssl. **But `rust-crypto` is not
+  C-free:** `str0m-rust-crypto` turns on dimpl's `rcgen` feature, which pulls `aws-lc-rs` /
+  `aws-lc-sys` (C, built with cmake/cc) ONLY for the self-signed DTLS certificate; DTLS and SRTP
+  themselves are RustCrypto. CI already has cmake (libopus). Chromium 131 interoperates (DTLS up in
+  ~60 ms on localhost).
+- **Config** (`webrtc_signal::WebrtcConfig`, `deny_unknown_fields`): `[webrtc]` `udp_bind`
+  (default `0.0.0.0:6992`, a fixed port, never a Dante address), `host_ips` (default: the bind's IP
+  when specific, else every up IPv4 of the box minus loopback, link-local and the Dante leg),
+  `max_phones` (default 16, 1..=64), `turn` RESERVED (any value fails the load until phase 3).
+  `Matrix::from_toml`: `webrtc` only on role `phones`, 2 in / 2 out, at most one, never together
+  with a `janus` participant, and the table iff the adapter.
+- **Signalling** (`webrtc_http.rs`, merged next to `http::router`, so `AppState` is unchanged):
+  `GET /api/phone` -> `{"transport":"webrtc"|"janus"}` (a hub without the leg says `janus`);
+  `POST /api/phone/offer {sdp, display}` -> `{id, sdp}` (400 bad body / offer, 413 over 16 KiB of
+  SDP, 503 all slots taken); `POST /api/phone/<id>/display` and `DELETE /api/phone/<id>` -> 204 /
+  404. The id is 128 random bits (32 hex) from `/dev/urandom` and is the phone's only credential:
+  `/api/state` shows its first 8 characters.
+- **Network task** (`webrtc_leg.rs`, tokio): ONE UDP socket, every phone's `Rtc`; `IP_PKTINFO`
+  gives each datagram's destination (str0m needs it to pair a local candidate) and the Dante guard
+  drops the Dante leg first; `Rtc::accepts` demuxes. Opus only (`clear_codecs` + `enable_opus`),
+  frame mode; the decoder is `janus_codec::RxDecoder` (FEC + PLC) on the packet's seq. A phone is
+  dropped on leave, ICE `Disconnected`, a dead `Rtc`, an rtc error, or no connection 20 s after its
+  offer; its slot frees with a new generation, so a late packet never reaches the next phone.
+- **phones-room thread** (`webrtc_room.rs`, "phones-room", `PaceSchedule` 20 ms): takes H from the
+  phones bus ring the block loop feeds (the same `PacedRing` the Janus sender pops; the block loop
+  now feeds `phones_ring = (pid, ring)` whichever leg runs), each phone's mic from its own
+  `PacedRing` (target 2048, cap 5760, reset after 500 ms without packets), pushes Σ mics into the
+  `phones` jitter buffer (a `janus_capture` leg for both adapters), builds outᵢ = H + Σ_{j≠i} mⱼ
+  with a skip-self loop (`mix_minus`), encodes Opus FEC no-DTX with `TxEncoder::encode_into` into
+  a fixed buffer and `try_send`s it (a full queue counts `room_dropped`). The hub-mix thread only
+  pushes the ring (unchanged) and clones the facet's `Arc`.
+- **`/api/state` `webrtc`** (top level, omitted without the leg; `WebrtcStateRef` serializes the
+  shared counters when the snapshot is serialized): udp_bind, host_candidates, max_phones,
+  phones_connected, sessions_started/ended, offers_refused, rx_refused, room_ticks/packets/dropped/
+  encode_errors, bus_underflows/overflow_trims/rate_ppm/asrc_phase_frames, tx_interval_ms_sd/max,
+  and per phone id (8 hex), display, slot, ice_state, connected, age_s, rx/tx_packets,
+  rx_lost_frames, mic_active (a packet above ~-60 dBFS within 1 s: a disabled track sends digital
+  silence), mic_rate_ppm. The seed snapshot carries it too (a fresh hub answers with it at once).
+- **Journal:** one line per session start / end (why, packets, lost frames), ICE state change,
+  rename and error; never per packet.
+- **PWA** (`web/app.js`): `fetchTransport()` before EVERY session (a failed read keeps the last
+  answer, default `janus`); `webrtc` -> `startNative`: one `RTCPeerConnection` (the `/api/ice`
+  servers when TURN is on), one `sendrecv` audio transceiver with an empty sender (or the kept mic
+  on a reconnect), offer POSTed after ICE gathering (3 s at most), the answer applied; mic ON =
+  `replaceTrack`, OFF = `track.enabled = false`, never a renegotiation; teardown closes the pc and
+  `DELETE`s (keepalive), `pagehide` too. The backoff, the generation counter, `MEDIA_STALL_MS` and
+  the UX are shared; the janus path is byte-for-byte the old flow (stub_hub.py answers
+  `/api/phone` janus).
+- **Tests:** `hub/tests/webrtc_signal_42.rs` (config, matrix, ids, limits, slots),
+  `webrtc_room_42.rs` (N-1 with a distinct tone per phone graded by a Hann-windowed Goertzel: own
+  tone < -90 dB pure / < -50 dB after Opus; the hub hears every phone and never the bus; slot
+  generations), `webrtc_leg_42.rs` (a str0m CLIENT against the real network task + room over
+  localhost: tone both ways, 503 / 413 / 400 / 404 / rename / leave frees the slot), and the
+  Playwright `webrtc` project (`webrtc.spec.js` + `webrtc-hub.js` + `webrtc.toml`, the REAL
+  binary on the base port + 4..6, started and SIGKILLed by the spec itself): two phones, a VBAN tone
+  reaches both meters, A's fake mic reaches B and never A, mic OFF silences B, rename, a closed page
+  frees its slot by DELETE and a vanished one by ICE, a killed hub is reconnected by itself. The
+  spec serves one still frame for `/interkom.mjpeg` (this hub has no `[video]`; its 503 would be a
+  console line). During the kill window only `Failed to load resource: net::ERR_CONNECTION_REFUSED`
+  lines are allowed; outside it the console must be empty.
+- **Gotchas:** a top-level `display` binding inside `tracing::info!(... = %display ...)` collides
+  with tracing's `display` helper (E0277): rename the binding. Chromium answers a stereo
+  `opus/48000/2` rtpmap; the hub encodes and decodes mono, which Opus allows.
