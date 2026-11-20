@@ -5,7 +5,9 @@
 //! indications and ChannelData from the client, and builds Data indications and ChannelData to it.
 //! RFC 5766 rules the hub must follow are enforced: a request on an existing allocation signed by
 //! another username is 441, an Allocate while one exists is 437, a Send to an IP without a
-//! permission is dropped. Knobs make it fail or go silent.
+//! permission is dropped, a channel number bound to another peer (or a peer bound to another
+//! number) is 400. A STUN Binding request (the client's keepalive) gets its success answer.
+//! Knobs make it fail or go silent.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -18,8 +20,8 @@ use rtc_stun::fingerprint::FINGERPRINT;
 use rtc_stun::integrity::MessageIntegrity;
 use rtc_stun::message::{
     Getter, Message, MessageType, Setter, CLASS_ERROR_RESPONSE, CLASS_INDICATION, CLASS_REQUEST,
-    CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION,
-    METHOD_DATA, METHOD_REFRESH, METHOD_SEND,
+    CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE, METHOD_BINDING, METHOD_CHANNEL_BIND,
+    METHOD_CREATE_PERMISSION, METHOD_DATA, METHOD_REFRESH, METHOD_SEND,
 };
 use rtc_stun::textattrs::TextAttribute;
 use rtc_stun::xoraddr::XorMappedAddress;
@@ -71,6 +73,10 @@ pub struct FakeTurn {
     /// on its next timer pass, not at once).
     pub release_lag: usize,
     lingering: usize,
+    /// Answer the next ChannelBind with this error code.
+    pub fail_channel_bind_once: Option<u16>,
+    /// Every ChannelBind the fake accepted: (number, peer), in order.
+    pub binds: Vec<(u16, SocketAddr)>,
 }
 
 fn crypto() -> std::sync::Arc<dyn rtc_turn::crypto::RTCCryptoProvider> {
@@ -84,6 +90,7 @@ fn method_name(m: &Message) -> &'static str {
         METHOD_CREATE_PERMISSION => "permission",
         METHOD_CHANNEL_BIND => "channel-bind",
         METHOD_SEND => "send",
+        METHOD_BINDING => "binding",
         _ => "other",
     }
 }
@@ -113,6 +120,8 @@ impl FakeTurn {
             stale_next: false,
             release_lag: 0,
             lingering: 0,
+            fail_channel_bind_once: None,
+            binds: Vec::new(),
         }
     }
 
@@ -213,6 +222,21 @@ impl FakeTurn {
             user: user.clone(),
             lifetime,
         });
+        // A Binding request (the keepalive): answered with the mapped address, no credential.
+        if m.typ.method == METHOD_BINDING {
+            let mut r = Message::new();
+            r.build(&[
+                Box::new(m.transaction_id),
+                Box::new(MessageType::new(METHOD_BINDING, CLASS_SUCCESS_RESPONSE)),
+                Box::new(XorMappedAddress {
+                    ip: self.mapped.ip(),
+                    port: self.mapped.port(),
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            return vec![r.raw];
+        }
         // A released allocation that has not gone yet takes the 5-tuple (signed or not).
         if m.typ.method == METHOD_ALLOCATE && self.lingering > 0 {
             self.lingering -= 1;
@@ -334,9 +358,22 @@ impl FakeTurn {
                     return vec![self.error(&m, 400, false)];
                 }
                 let peer = SocketAddr::new(p.ip, p.port);
+                if let Some(code) = self.fail_channel_bind_once.take() {
+                    return vec![self.error(&m, code, false)];
+                }
+                // RFC 8656 §12: a number bound to another peer, or a peer bound to another number,
+                // is refused while the binding lives.
+                let clash = self
+                    .channels
+                    .iter()
+                    .any(|(num, p)| (*num == n.0) != (*p == peer));
+                if clash {
+                    return vec![self.error(&m, 400, false)];
+                }
                 // A channel binding installs a permission too (RFC 5766 §11.2).
                 self.perms.insert(peer.ip());
                 self.channels.insert(n.0, peer);
+                self.binds.push((n.0, peer));
                 let mut r = Message::new();
                 r.build(&[
                     Box::new(m.transaction_id),

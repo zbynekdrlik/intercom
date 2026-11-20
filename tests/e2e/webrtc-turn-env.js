@@ -32,7 +32,15 @@ const hub = hubAt({
   udpPort: BASE + 9,
   name: "webrtc-turn",
   webrtcExtra: 'turn = "cloudflare"',
-  args: (runDir) => ["--turn-config", path.join(runDir, "turn.toml"), "--turn-api", `http://127.0.0.1:${MINT_PORT}`],
+  // --turn-private-peers (test only): the peers here are loopback addresses, which a production
+  // hub never asks a TURN permission for.
+  args: (runDir) => [
+    "--turn-config",
+    path.join(runDir, "turn.toml"),
+    "--turn-api",
+    `http://127.0.0.1:${MINT_PORT}`,
+    "--turn-private-peers",
+  ],
 });
 
 /** True once coturn answers a STUN Binding request. */

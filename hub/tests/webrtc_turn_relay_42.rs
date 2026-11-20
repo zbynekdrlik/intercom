@@ -132,6 +132,15 @@ async fn start_hub(opts: TurnOptions) -> Hub {
     }
 }
 
+/// The production bounds with the test-only permission for loopback peers (coturn and its peers
+/// live on 127.0.0.x here; a production hub never asks a permission for a non-global address).
+fn loopback_opts() -> TurnOptions {
+    TurnOptions {
+        allow_private_peers: true,
+        ..TurnOptions::for_phones(4)
+    }
+}
+
 fn creds(turn: &Coturn, user: &str, pass: &str) -> TurnCreds {
     TurnCreds {
         server: turn.addr,
@@ -275,7 +284,7 @@ fn run_phone(base: String, run_for: Duration) -> (String, PhoneRun) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_reaches_the_hub_only_through_the_hubs_relay_and_the_tone_round_trips() {
     let turn = Coturn::start(&[("hub", "hub-pw")]);
-    let hub = start_hub(TurnOptions::for_phones(4)).await;
+    let hub = start_hub(loopback_opts()).await;
     hub.handle
         .set_turn_credentials(creds(&turn, "hub", "hub-pw"))
         .await
@@ -363,7 +372,7 @@ async fn start_leg_on(bind: SocketAddr, creds: TurnCreds) -> Arc<WebrtcShared> {
             dante_guard: DanteGuard::new(None, vec![]),
         },
         TurnFeed::Manual,
-        TurnOptions::for_phones(4),
+        loopback_opts(),
     )
     .unwrap();
     handle.set_turn_credentials(creds).await.unwrap();
@@ -421,7 +430,7 @@ fn a_restarted_hub_allocates_at_once_while_the_old_allocation_still_lives() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_allocation_refreshes_and_rotates_its_credential_against_coturn() {
     let turn = Coturn::start(&[("hub-a", "pw-a"), ("hub-b", "pw-b")]);
-    let mut opts = TurnOptions::for_phones(4);
+    let mut opts = loopback_opts();
     opts.refresh_cap = Some(Duration::from_secs(1));
     let hub = start_hub(opts).await;
     hub.handle
