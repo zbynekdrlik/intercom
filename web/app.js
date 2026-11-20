@@ -15,6 +15,15 @@
 // Design: issue 1345 comment "Design (main, 25.9.2026) — redesign the phone interkom UX".
 // This file NEVER logs to the console: every failure becomes visible page state
 // (browser-console-zero-errors). The codec is whatever Janus negotiates — nothing here assumes one.
+//
+// intercom#42 (owner decision B, 20.11.2026): the transport seam. Before every session the page
+// reads `GET /api/phone`: `{"transport":"janus"}` (or no answer) = the Janus audiobridge session
+// below, exactly as before; `{"transport":"webrtc"}` = the hub ITSELF is the WebRTC endpoint, and
+// the page uses a native RTCPeerConnection (no janus.js): ONE sendrecv offer with an empty audio
+// sender, sent after ICE gathering (3 s at most) as `POST /api/phone/offer`; mic ON =
+// `replaceTrack`, OFF = `track.enabled = false`, never a renegotiation; the name goes to
+// `POST /api/phone/<id>/display`; leaving is `DELETE /api/phone/<id>`. The UX, the reconnect
+// backoff, the generation counter and the media watchdog are shared by both transports.
 
 // ---- Config (all overridable for a dev host via the query string) ------------------------
 const ROOM = numParam("room", 1000); // the Janus audiobridge room the intercom mixes into.
@@ -41,6 +50,12 @@ const MEDIA_STALL_MS = 4000;
 // the hub's own 5 s bound on a Cloudflare mint (hub/src/turn.rs TURN_MINT_TIMEOUT), so a
 // page that meets a cold cache still gets the relay.
 const ICE_FETCH_TIMEOUT_MS = 6000;
+// intercom#42: the native session posts its offer once ICE gathering completed, or after this long
+// with whatever candidates it has (a phone that cannot reach a STUN/TURN server still connects on
+// the LAN).
+const ICE_GATHER_MAX_MS = 3000;
+// The transport answer is a tiny local read; a slow hub never holds the session longer than this.
+const TRANSPORT_FETCH_TIMEOUT_MS = 3000;
 const METER_FLOOR_DB = -60; // the meters' left edge.
 const VOICE_DB = -45; // above this the meter counts as "voice present".
 const VOICE_HOLD_MS = 600; // keep "hovorí" this long after the level drops.
@@ -89,6 +104,27 @@ async function fetchIceServers() {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+// The phones' transport (intercom#42): "janus" (the audiobridge, the default and the answer of a
+// hub without the in-hub leg) or "webrtc" (the hub itself). Read before every session; a failed
+// read keeps the last known one. Never rejects, never logs.
+let transport = "janus";
+async function fetchTransport() {
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), TRANSPORT_FETCH_TIMEOUT_MS) : null;
+  try {
+    const r = await fetch("/api/phone", { cache: "no-store", signal: ctl ? ctl.signal : undefined });
+    if (r.ok) {
+      const body = await r.json();
+      if (body && (body.transport === "webrtc" || body.transport === "janus")) transport = body.transport;
+    }
+  } catch (e) {
+    // hub down or not JSON: keep the last known transport.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  return transport;
 }
 
 // ---- DOM handles -------------------------------------------------------------------------
@@ -219,6 +255,20 @@ let reconnectTimer = null;
 let reconnectAt = 0;
 let watchdogTimer = null;
 let iceTimer = null;
+// The native (in-hub WebRTC) session, intercom#42: its PeerConnection and the id the hub gave it.
+let nativePc = null;
+let phoneId = null;
+// The id of this page's last native session that really CONNECTED: the next offer names it as
+// `replaces`, so the hub counts a reconnect as an established phone, never as one of the
+// anonymous offers it caps (intercom#42 review). Set only on connect (review round 4): a session
+// that never connects leaves the previous claim in place, which is exactly the one the hub keeps.
+let lastPhoneId = null;
+
+// The live PeerConnection of either transport (the media watchdog and the mic read it).
+function currentPc() {
+  if (nativePc) return nativePc;
+  return (bridge && bridge.webrtcStuff && bridge.webrtcStuff.pc) || null;
+}
 
 // Start (or restart) the session. Called at boot, by the reconnect timer, and on "come back".
 function startSession() {
@@ -257,19 +307,131 @@ function startSession() {
   };
   // The TURN servers first (issue 1453), bounded by ICE_FETCH_TIMEOUT_MS; any failure joins anyway.
   const go = () => fetchIceServers().then(begin);
-  if (janusReady) {
-    go();
-  } else {
-    // debug:false -> Janus.log/warn/error are all no-ops, so janus.js never writes to the console.
-    Janus.init({
-      debug: false,
-      dependencies: janusDeps(),
-      callback: () => {
-        janusReady = true;
-        go();
-      },
+  const startJanus = () => {
+    if (janusReady) {
+      go();
+    } else {
+      // debug:false -> Janus.log/warn/error are all no-ops, so janus.js never writes to the console.
+      Janus.init({
+        debug: false,
+        dependencies: janusDeps(),
+        callback: () => {
+          janusReady = true;
+          go();
+        },
+      });
+    }
+  };
+  // intercom#42: which transport this hub speaks, read before every session.
+  fetchTransport().then((t) => {
+    if (my !== gen) return;
+    if (t === "webrtc") {
+      fetchIceServers().then((iceServers) => {
+        if (my === gen) startNative(my, iceServers);
+      });
+    } else {
+      startJanus();
+    }
+  });
+}
+
+// ---- The native session: the hub itself is the WebRTC endpoint (intercom#42) ----------------
+function waitIceGathering(pc) {
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === "complete") {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, ICE_GATHER_MAX_MS);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        resolve();
+      }
     });
+  });
+}
+
+async function startNative(my, iceServers) {
+  let pc;
+  try {
+    pc = new RTCPeerConnection(iceServers ? { iceServers } : {});
+  } catch (e) {
+    scheduleReconnect();
+    return;
   }
+  nativePc = pc;
+  // ONE sendrecv audio transceiver from the start: the mic is put on its sender later (or right
+  // away when it was already granted: a reconnect keeps the mic state, no second prompt).
+  const tr = pc.addTransceiver("audio", { direction: "sendrecv" });
+  if (micTrack) {
+    micTrack.enabled = micOn;
+    tr.sender.replaceTrack(micTrack).catch(() => {});
+    sentTrack = micTrack;
+  }
+  pc.addEventListener("track", (e) => {
+    if (my === gen && e.track.kind === "audio") attachRemote(e.track);
+  });
+  pc.addEventListener("connectionstatechange", () => {
+    if (my !== gen) return;
+    const state = pc.connectionState;
+    if (state === "connected") {
+      if (phoneId) lastPhoneId = phoneId;
+      clearTimeout(iceTimer);
+      mediaUp = true;
+      onConnected();
+    } else if (state === "failed" || state === "closed") {
+      scheduleReconnect();
+    } else if (state === "disconnected") {
+      setConn("connecting", "sieť sa zasekla…");
+      clearTimeout(iceTimer);
+      iceTimer = setTimeout(() => {
+        if (my === gen) scheduleReconnect();
+      }, ICE_GRACE_MS);
+    }
+  });
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitIceGathering(pc);
+    if (my !== gen) return;
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), ANSWER_TIMEOUT_MS) : null;
+    let r;
+    try {
+      r = await fetch("/api/phone/offer", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sdp: pc.localDescription.sdp,
+          display: displayName(),
+          ...(lastPhoneId ? { replaces: lastPhoneId } : {}),
+        }),
+        signal: ctl ? ctl.signal : undefined,
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (my !== gen) return;
+    if (!r.ok) throw new Error(`offer ${r.status}`);
+    const body = await r.json();
+    if (my !== gen) {
+      leaveHub(body.id); // this session was torn down while the answer was on its way
+      return;
+    }
+    phoneId = body.id;
+    joined = true;
+    await pc.setRemoteDescription({ type: "answer", sdp: body.sdp });
+  } catch (e) {
+    if (my === gen) scheduleReconnect();
+  }
+}
+
+// Tell the hub a phone left (its slot frees at once; a hub that does not hear it frees the slot
+// when ICE goes quiet). Best effort, never awaited.
+function leaveHub(id) {
+  if (!id) return;
+  fetch(`/api/phone/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }).catch(() => {});
 }
 
 // Drop the current session silently: bump the generation first so none of its callbacks act.
@@ -280,6 +442,16 @@ function teardownSession() {
   const old = janus;
   janus = null;
   bridge = null;
+  if (nativePc) {
+    try {
+      nativePc.close();
+    } catch (e) {
+      // already closed
+    }
+    nativePc = null;
+  }
+  leaveHub(phoneId);
+  phoneId = null;
   joined = false;
   mediaUp = false;
   sentTrack = null;
@@ -299,7 +471,10 @@ function teardownSession() {
 
 function scheduleReconnect() {
   teardownSession();
-  const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  // Up to -30 % jitter on the capped delay (review rounds 4-5): after a hub restart a whole crew
+  // does not come back in step, also at the 4 s cap, and no delay ever exceeds the cap.
+  const capped = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  const delay = Math.round(capped * (0.7 + 0.3 * Math.random()));
   reconnectAttempt += 1;
   reconnectAt = Date.now() + delay;
   renderReconnectCountdown();
@@ -314,7 +489,7 @@ function renderReconnectCountdown() {
 // A reason to try right now (network back, page visible again) short-circuits the backoff.
 function reconnectNow() {
   if (connEl.dataset.state === "connected") return;
-  if (!reconnectTimer && janus) return; // an attempt is already in flight
+  if (!reconnectTimer && (janus || nativePc)) return; // an attempt is already in flight
   teardownSession();
   startSession();
 }
@@ -339,7 +514,7 @@ function inboundAudioPackets(report) {
   return packets;
 }
 function checkMedia() {
-  const pc = bridge && bridge.webrtcStuff && bridge.webrtcStuff.pc;
+  const pc = currentPc();
   if (!pc || !mediaUp || connEl.dataset.state !== "connected") return;
   const my = gen;
   pc.getStats()
@@ -691,12 +866,13 @@ function onMicEnded(track) {
 }
 
 function sendMute(muted) {
+  // The native session has no mute message: the disabled track sends silence (intercom#42).
   if (bridge && joined) bridge.send({ message: { request: "configure", muted } });
 }
 
 // The audio transceiver of the live PeerConnection (the receive-only offer created it).
 function audioTransceiver() {
-  const pc = bridge && bridge.webrtcStuff && bridge.webrtcStuff.pc;
+  const pc = currentPc();
   if (!pc) return null;
   return pc.getTransceivers().find((t) => t.receiver && t.receiver.track && t.receiver.track.kind === "audio") || null;
 }
@@ -708,6 +884,10 @@ function audioTransceiver() {
 // offer (tracks: [] = "nothing to capture"); a later device change is a plain sender swap with no
 // renegotiation. While an offer is out, the change waits for its answer.
 function pushMicToSession(unmute) {
+  if (nativePc) {
+    pushMicNative();
+    return;
+  }
   if (!bridge || !joined || !micTrack) return;
   if (negotiating) {
     micPushPending = true;
@@ -756,6 +936,25 @@ function pushMicToSession(unmute) {
     );
   }
   if (unmute) sendMute(false);
+}
+
+// The native session's mic (intercom#42): its first offer was already sendrecv, so a new or
+// changed mic is a plain sender swap, never a renegotiation; on/off is `track.enabled`.
+function pushMicNative() {
+  const pc = nativePc;
+  if (!pc || !micTrack || sentTrack === micTrack) return;
+  const tr = pc.getTransceivers().find((t) => t.receiver && t.receiver.track && t.receiver.track.kind === "audio");
+  if (!tr) return;
+  const my = gen;
+  const track = micTrack;
+  tr.sender.replaceTrack(track).then(
+    () => {
+      if (my === gen) sentTrack = track;
+    },
+    () => {
+      if (my === gen) scheduleReconnect();
+    }
+  );
 }
 
 async function turnMicOn() {
@@ -860,6 +1059,13 @@ nameForm.addEventListener("submit", (e) => {
   nameSheet.hidden = true;
   showName();
   if (bridge && joined) bridge.send({ message: { request: "configure", display: name } });
+  if (nativePc && phoneId) {
+    fetch(`/api/phone/${encodeURIComponent(phoneId)}/display`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ display: name }),
+    }).catch(() => {});
+  }
 });
 nameShow.addEventListener("click", openNameSheet);
 nameChange.addEventListener("click", openNameSheet);
@@ -1057,6 +1263,15 @@ document.addEventListener("visibilitychange", () => {
   reconnectNow();
 });
 setInterval(renderReconnectCountdown, 500);
+// Closing or leaving the page frees the phone's slot on the hub at once (intercom#42).
+// A page that goes into the back/forward cache (`persisted`) keeps its PeerConnection: no leave.
+window.addEventListener("pagehide", (e) => {
+  if (e.persisted) return;
+  if (nativePc && phoneId) {
+    leaveHub(phoneId);
+    phoneId = null;
+  }
+});
 
 // ---- PWA service worker (installable; pure passthrough, no cache — server-truth) ------------
 if ("serviceWorker" in navigator) {

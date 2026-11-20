@@ -19,6 +19,7 @@ use crate::alsa_card::AlsaCardSpec;
 use crate::alsa_spec::check_alsa;
 use crate::dlink_leg::DlinkConfig;
 use crate::janus_rtp::JanusCodec;
+use crate::webrtc_signal::WebrtcConfig;
 
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
 /// `phones` participant over the Janus audiobridge plain-RTP leg; `None` marks a participant
@@ -43,6 +44,10 @@ pub const ADAPTER_ALSA: &str = "alsa";
 /// channels, in order, received by dstack's `dlink` in this process. An input only; at most one, and
 /// only with a `[dlink]` table.
 pub const ADAPTER_DLINK: &str = "dlink";
+/// The in-hub WebRTC phone leg (intercom#42, owner decision B 20.11.2026): the hub itself is the
+/// phones' WebRTC endpoint (`crate::webrtc_leg`), no Janus. Only on role `phones`, at most one,
+/// exclusive with `janus`, and only with a `[webrtc]` table.
+pub const ADAPTER_WEBRTC: &str = "webrtc";
 
 /// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
 /// could ever need; a bigger value is a typo.
@@ -322,6 +327,8 @@ struct MatrixToml {
     #[serde(default)]
     janus: Option<JanusConfig>,
     #[serde(default)]
+    webrtc: Option<WebrtcConfig>,
+    #[serde(default)]
     video: Option<VideoConfig>,
     #[serde(default)]
     dlink: Option<DlinkConfig>,
@@ -339,6 +346,8 @@ struct MatrixToml {
 pub struct Matrix {
     pub hub: HubConfig,
     pub janus: Option<JanusConfig>,
+    /// The in-hub WebRTC phone leg's config (intercom#42), present only with a `webrtc` participant.
+    pub webrtc: Option<WebrtcConfig>,
     pub video: Option<VideoConfig>,
     /// The hub's own Dante device (intercom#5), absent on a box without one (stream-snv,
     /// stream-pp).
@@ -448,6 +457,7 @@ impl Matrix {
 
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
+        let mut webrtc_count = 0usize;
         let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let (mut alsa_pcms, mut alsa_specs) = (std::collections::HashSet::new(), Vec::new());
         for (id, p) in raw.participants.iter().enumerate() {
@@ -461,6 +471,7 @@ impl Matrix {
                 && p.adapter != ADAPTER_ALSA_HDMI
                 && p.adapter != ADAPTER_ALSA
                 && p.adapter != ADAPTER_DLINK
+                && p.adapter != ADAPTER_WEBRTC
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
@@ -527,7 +538,8 @@ impl Matrix {
                 let capture = (p.adapter == ADAPTER_ALSA
                     || p.adapter == ADAPTER_DLINK
                     || p.adapter == ADAPTER_PIPEWIRE
-                    || p.adapter == ADAPTER_JANUS)
+                    || p.adapter == ADAPTER_JANUS
+                    || p.adapter == ADAPTER_WEBRTC)
                     && p.in_channels > 0
                     && p.role != PROGRAM_OUT_ROLE;
                 if p.adapter != ADAPTER_VBAN && !capture {
@@ -561,6 +573,30 @@ impl Matrix {
             }
             // The Janus audiobridge leg is ONLY for the phones participant, and there is at most one
             // (a single audiobridge room / plain-RTP participant). Fail loud otherwise (M3a).
+            // The in-hub WebRTC leg (intercom#42): the same shape rules as the Janus leg (role
+            // `phones`, mono<->stereo 2 in / 2 out), and one phones leg at most: janus OR webrtc.
+            if p.adapter == ADAPTER_WEBRTC {
+                if p.role != JANUS_ONLY_ROLE {
+                    bail!(
+                        "participant '{}': adapter 'webrtc' is only allowed on role '{}' (got '{}')",
+                        p.name,
+                        JANUS_ONLY_ROLE,
+                        p.role
+                    );
+                }
+                if p.in_channels != 2 || p.out_channels != 2 {
+                    bail!(
+                        "participant '{}': adapter 'webrtc' requires 2 in / 2 out channels (mono<->stereo), got {} in / {} out",
+                        p.name,
+                        p.in_channels,
+                        p.out_channels
+                    );
+                }
+                webrtc_count += 1;
+                if webrtc_count > 1 {
+                    bail!("at most one 'webrtc' participant is allowed (one phones leg)");
+                }
+            }
             if p.adapter == ADAPTER_JANUS {
                 if p.role != JANUS_ONLY_ROLE {
                     bail!(
@@ -589,6 +625,21 @@ impl Matrix {
             if index.insert(p.name.clone(), id).is_some() {
                 bail!("duplicate participant name '{}'", p.name);
             }
+        }
+
+        // The phones leg is ONE of janus / webrtc (intercom#42), and the webrtc one needs its table.
+        if janus_count > 0 && webrtc_count > 0 {
+            bail!("the phones leg is either 'janus' or 'webrtc', not both (intercom#42)");
+        }
+        match (webrtc_count, &raw.webrtc) {
+            (1, None) => bail!("a 'webrtc' participant needs a [webrtc] table (intercom#42)"),
+            (0, Some(_)) => {
+                bail!("[webrtc] is declared but no participant has adapter 'webrtc' (intercom#42)")
+            }
+            (_, Some(w)) => {
+                w.validate().map_err(|e| anyhow!(e))?;
+            }
+            _ => {}
         }
 
         // The local PipeWire adapter (issue 1344): validate the `program_out` sink + the talkback
@@ -756,6 +807,7 @@ impl Matrix {
         Ok(Matrix {
             hub: raw.hub,
             janus: raw.janus,
+            webrtc: raw.webrtc,
             video: raw.video,
             dlink: raw.dlink,
             participants: raw.participants,
@@ -776,6 +828,13 @@ impl Matrix {
         self.participants
             .iter()
             .position(|p| p.adapter == ADAPTER_JANUS)
+    }
+
+    /// The id of the single `webrtc`-adapter participant (the in-hub phones leg, intercom#42).
+    pub fn webrtc_participant(&self) -> Option<usize> {
+        self.participants
+            .iter()
+            .position(|p| p.adapter == ADAPTER_WEBRTC)
     }
 
     /// Map of VBAN input stream name → participant id (for the receiver's demux). Only participants

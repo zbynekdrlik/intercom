@@ -7,7 +7,9 @@
 use std::collections::HashSet;
 
 use crate::local_audio::{LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES};
-use crate::matrix::{Matrix, Participant, ADAPTER_JANUS, ADAPTER_VBAN, CAMBOX_ROLE};
+use crate::matrix::{
+    Matrix, Participant, ADAPTER_JANUS, ADAPTER_VBAN, ADAPTER_WEBRTC, CAMBOX_ROLE,
+};
 use crate::vban_io::JitterBuffer;
 use crate::vban_jitter::{
     target_frames_from_ms, vban_cap_blocks, CARD_CAPTURE_TARGET_FRAMES, VBAN_CAP_BLOCKS,
@@ -63,7 +65,8 @@ pub fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
         .iter()
         .enumerate()
         .map(|(id, p)| {
-            let jb = if p.adapter == ADAPTER_JANUS {
+            // The phones' ingress, from Janus or from the in-hub WebRTC room (intercom#42).
+            let jb = if p.adapter == ADAPTER_JANUS || p.adapter == ADAPTER_WEBRTC {
                 let target = ingress_target_frames(matrix, p, LOCAL_CAPTURE_TARGET_FRAMES);
                 let cap = (block_frames * LOCAL_CAPTURE_CAP_BLOCKS).max(target + block_frames);
                 JitterBuffer::janus_capture(cap, target, rate)

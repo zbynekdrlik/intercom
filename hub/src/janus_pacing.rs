@@ -192,6 +192,40 @@ impl PacedRing {
         self.origin = None;
     }
 
+    /// [`PacedRing::take_frame`] into a frame the caller keeps (intercom#42: the phones-room thread
+    /// takes one frame per phone every 20 ms): the copied input reuses `frame`'s buffer, so a
+    /// steady stream allocates nothing after its first frames.
+    pub fn take_frame_into(&mut self, frame: &mut PoppedFrame) {
+        frame.input.clear();
+        match self.fill.plan_pop(self.buf.len(), FRAME_48K) {
+            PopPlan::Silent { ran_dry } => {
+                frame.kind = if ran_dry {
+                    self.underflows += 1;
+                    PopKind::Underflow
+                } else {
+                    PopKind::Priming
+                };
+                frame.read = None;
+            }
+            PopPlan::Audio {
+                skip,
+                read,
+                consume,
+            } => {
+                self.buf.drain(..skip.min(self.buf.len()));
+                let queued = self.buf.make_contiguous();
+                let need = read.frames_needed(FRAME_48K);
+                debug_assert!(queued.len() >= need, "{} < {need}", queued.len());
+                frame
+                    .input
+                    .extend_from_slice(&queued[..need.min(queued.len())]);
+                self.buf.drain(..consume.min(self.buf.len()));
+                frame.kind = PopKind::Audio;
+                frame.read = Some(read);
+            }
+        }
+    }
+
     /// The resampler leg's numbers (target, depth, rate, phase, resyncs).
     pub fn stats(&self) -> NetworkFillStats {
         self.fill.stats()
@@ -222,7 +256,31 @@ pub struct PoppedFrame {
     input: Vec<i16>,
 }
 
+impl Default for PoppedFrame {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl PoppedFrame {
+    /// A silent priming frame with an empty input buffer: the reusable slot
+    /// [`PacedRing::take_frame_into`] fills.
+    pub fn empty() -> Self {
+        PoppedFrame {
+            kind: PopKind::Priming,
+            read: None,
+            input: Vec::with_capacity(2 * FRAME_48K),
+        }
+    }
+
+    /// [`PoppedFrame::render`] into `out` ([`FRAME_48K`] samples), without allocating.
+    pub fn render_into(&self, out: &mut [i16]) {
+        out.fill(0);
+        if let Some(read) = self.read {
+            asrc::render(read, &self.input, out);
+        }
+    }
+
     /// What the frame is: audio, priming silence, or an underflow's silence.
     pub fn kind(&self) -> PopKind {
         self.kind

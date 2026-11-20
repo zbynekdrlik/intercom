@@ -50,6 +50,7 @@ use intercom_hub::vban_io::{
     DecodeRejects, JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
+use intercom_hub::webrtc_http::{phone_router, PhoneApi};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
@@ -184,7 +185,7 @@ async fn main() -> Result<()> {
     // thread on its own 20 ms clock pops exactly one frame per tick — never on the 5.33 ms block
     // beat. Never started from a dev lane (the live Janus is the M4/supervisor step); absent config
     // = the VBAN-only hub.
-    let mut janus_ring: Option<Arc<Mutex<PacedRing>>> = None;
+    let mut phones_ring: Option<(usize, Arc<Mutex<PacedRing>>)> = None;
     let janus_report: Option<(usize, Arc<intercom_hub::janus_rtp::JanusSharedStats>)> = match (
         matrix.janus_participant(),
         matrix.janus.clone(),
@@ -229,7 +230,7 @@ async fn main() -> Result<()> {
                 RING_TARGET_FRAMES,
                 RING_CAP_FRAMES,
             )));
-            janus_ring = Some(ring.clone());
+            phones_ring = Some((pid, ring.clone()));
             tokio::spawn(intercom_hub::janus_rtp::run_janus_participant(
                 rt,
                 JANUS_SSRC,
@@ -250,6 +251,16 @@ async fn main() -> Result<()> {
             Some((pid, stats))
         }
         _ => None,
+    };
+
+    // --- The in-hub WebRTC phone leg (intercom#42): the hub itself is the phones' WebRTC
+    // endpoint. Exclusive with Janus (the matrix refuses both); see `start_webrtc_leg`.
+    let (phone_leg, webrtc_state) = match start_webrtc_leg(&matrix, &jitter, &dante_guard)? {
+        Some(leg) => {
+            phones_ring = Some((leg.phones_id, leg.ring));
+            (Some(leg.handle), Some(leg.state))
+        }
+        None => (None, None),
     };
 
     // --- Local PipeWire audio (issues 1344 + 1345): the program sink, the talkback capture and the
@@ -317,6 +328,7 @@ async fn main() -> Result<()> {
     // Seed the live channel so a client connecting before the first tick sees current state.
     let mut initial = HubState::snapshot(&matrix, VERSION, &vec![RuntimeStats::default(); n]);
     initial.memory_locked = Some(memory_lock.locked);
+    initial.webrtc = webrtc_state.clone(); // intercom#42: the facet from the first answer on
     let (live_tx, live_rx) = tokio::sync::watch::channel(Arc::new(initial));
     // The periodic status line is written here, on tokio, from every snapshot the block loop
     // publishes: a journal write can block, and the block loop runs on the real-time hub-mix
@@ -376,7 +388,8 @@ async fn main() -> Result<()> {
         outputs,
         senders,
         return_addrs,
-        janus_ring,
+        phones_ring,
+        webrtc_state,
         janus_report,
         local_audio,
         video_for_loop: video_state.clone(),
@@ -436,9 +449,13 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;
     // A connection on the Dante leg is closed at once (intercom#25); axum::serve has no accept hook.
-    let served =
-        intercom_hub::http_serve::serve(listener, router(state), dante_guard, shutdown_signal())
-            .await;
+    let served = intercom_hub::http_serve::serve(
+        listener,
+        router(state).merge(phone_router(PhoneApi::new(phone_leg))),
+        dante_guard,
+        shutdown_signal(),
+    )
+    .await;
     // The Dante device says goodbye before the process ends, also when the server failed (its own
     // wait is dlink::STOP_WAIT).
     if let Some(leg) = dlink_leg {
@@ -560,6 +577,95 @@ struct VbanReceive {
     vban_port: u16,
 }
 
+/// The running in-hub WebRTC phone leg (intercom#42).
+struct WebrtcLeg {
+    phones_id: usize,
+    /// The phones bus the block loop feeds and the phones-room thread pops.
+    ring: Arc<Mutex<PacedRing>>,
+    handle: intercom_hub::webrtc_leg::WebrtcHandle,
+    state: intercom_hub::webrtc_leg::WebrtcStateRef,
+}
+
+/// Start the in-hub WebRTC phone leg when the matrix declares a `webrtc` participant (the matrix
+/// guarantees its `[webrtc]` table): bind the one UDP socket (never on the Dante leg), pick the host
+/// candidates, start the network task and the "phones-room" thread. A bind failure stops the hub.
+fn start_webrtc_leg(
+    matrix: &Matrix,
+    jitter: &Arc<Mutex<Vec<JitterBuffer>>>,
+    dante_guard: &Arc<DanteGuard>,
+) -> Result<Option<WebrtcLeg>> {
+    use intercom_hub::webrtc_leg::{
+        local_ipv4_addrs, start_webrtc, WebrtcLegConfig, WebrtcShared, WebrtcStateRef,
+    };
+    use intercom_hub::webrtc_room::{spawn_phones_room, PhonesRoom, RoomIo, RoomSlots};
+    let (Some(pid), Some(cfg)) = (matrix.webrtc_participant(), matrix.webrtc.as_ref()) else {
+        return Ok(None);
+    };
+    let bind = cfg.validate().map_err(anyhow::Error::msg)?;
+    check_bind(dante_guard, "webrtc udp_bind", bind)?;
+    let socket = std::net::UdpSocket::bind(bind)
+        .with_context(|| format!("bind the WebRTC UDP socket {bind}"))?;
+    let host_ips = cfg.candidate_ips(bind, &local_ipv4_addrs(), |ip| dante_guard.is_dante(ip));
+    if host_ips.is_empty() {
+        anyhow::bail!("webrtc: no host candidate address (set [webrtc].host_ips)");
+    }
+    let port = socket.local_addr()?.port();
+    let shared = Arc::new(WebrtcShared::new(
+        bind.to_string(),
+        host_ips
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, port).to_string())
+            .collect(),
+        cfg.max_phones,
+    ));
+    let slots = Arc::new(RoomSlots::new(cfg.max_phones));
+    let ring = Arc::new(Mutex::new(PacedRing::new(
+        RING_TARGET_FRAMES,
+        RING_CAP_FRAMES,
+    )));
+    let (handle, packets) = start_webrtc(WebrtcLegConfig {
+        socket,
+        host_ips,
+        max_phones: cfg.max_phones,
+        slots: slots.clone(),
+        shared: shared.clone(),
+        dante_guard: dante_guard.clone(),
+    })?;
+    let room = PhonesRoom::new(RoomIo {
+        bus: ring.clone(),
+        slots,
+        jitter: jitter.clone(),
+        phones_id: pid,
+        sink: packets,
+        stats: shared.clone(),
+    })?;
+    let room = spawn_phones_room(room).context("spawn the phones-room thread")?;
+    // The room never returns; should it end (a panic), every phone goes silent: stop the daemon so
+    // systemd restarts it, like the hub-mix watch.
+    std::thread::Builder::new()
+        .name("phones-room-watch".into())
+        .spawn(move || {
+            let panicked = room.join().is_err();
+            tracing::error!(
+                panicked,
+                "intercom-hub: the phones-room thread ended -- exiting so systemd restarts the hub"
+            );
+            std::process::exit(1);
+        })
+        .context("spawn the phones-room watch thread")?;
+    tracing::info!(
+        participant = pid,
+        max_phones = cfg.max_phones,
+        "webrtc: in-hub phone leg enabled for the phones participant"
+    );
+    Ok(Some(WebrtcLeg {
+        phones_id: pid,
+        ring,
+        handle,
+        state: WebrtcStateRef(shared),
+    }))
+}
+
 /// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
 /// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
 fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
@@ -624,7 +730,10 @@ struct BlockLoop {
     /// Each output slot's return address: learned from the leg's own stream, else its resolved
     /// start-up address (issue 1431).
     return_addrs: Arc<Mutex<ReturnAddrs>>,
-    janus_ring: Option<Arc<Mutex<PacedRing>>>,
+    /// The phones participant's mono bus ring (the Janus sender or the WebRTC phones-room pops it).
+    phones_ring: Option<(usize, Arc<Mutex<PacedRing>>)>,
+    /// The in-hub WebRTC leg's `/api/state` facet (intercom#42): only its `Arc` is cloned here.
+    webrtc_state: Option<intercom_hub::webrtc_leg::WebrtcStateRef>,
     janus_report: Option<(usize, Arc<intercom_hub::janus_rtp::JanusSharedStats>)>,
     local_audio: LocalAudioWiring,
     video_for_loop: Option<Arc<intercom_hub::ndi_video::VideoState>>,
@@ -638,7 +747,7 @@ struct BlockLoop {
 /// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
 /// mix N-1, feed the Janus ring and the local PipeWire sinks, send each cambox its stream, and once
 /// a second publish the `/api/state` snapshot on the watch channel (a tokio task logs its status
-/// line). `janus_ring` + `janus_report` are fed and read only here.
+/// line). `phones_ring` + `janus_report` are fed and read only here.
 ///
 /// It sleeps to the absolute deadline of the next tick on the exact block grid. A wake that finds
 /// missed ticks runs up to four of them at once, in order, before the current one; only the part
@@ -653,7 +762,8 @@ fn run_block_loop(bl: BlockLoop) {
         outputs,
         senders,
         return_addrs,
-        janus_ring,
+        phones_ring,
+        webrtc_state,
         janus_report,
         local_audio,
         video_for_loop,
@@ -747,10 +857,11 @@ fn run_block_loop(bl: BlockLoop) {
                 *peak = (*peak).max(output.peak_abs(id));
             }
 
-            // Feed the phones participant's mixed output (down-mixed to mono) into the Janus
-            // ring. The paced sender thread pops it on its own 20 ms clock (issue 1345); the
-            // lock is held only for the append, never across a send.
-            if let (Some(ring), Some((pid, _))) = (&janus_ring, &janus_report) {
+            // Feed the phones participant's mixed output (down-mixed to mono) into the phones
+            // ring. The Janus paced sender or the WebRTC phones-room thread (intercom#42) pops it
+            // on its own 20 ms clock (issue 1345); the lock is held only for the append, never
+            // across a send.
+            if let Some((pid, ring)) = &phones_ring {
                 let interleaved = output.interleaved(*pid, block_frames);
                 if !interleaved.is_empty() {
                     let mono = stereo_to_mono(&interleaved);
@@ -875,6 +986,8 @@ fn run_block_loop(bl: BlockLoop) {
                 snapshot.lost_ticks = lost_total;
                 snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
                 snapshot.memory_locked = Some(memory_locked);
+                // The WebRTC facet (intercom#42): an Arc clone, read when it is serialized.
+                snapshot.webrtc = webrtc_state.clone();
                 // Once a second; the lock is taken by a receive path only when it refuses.
                 snapshot.dante_refusals = dante_guard.refusals();
                 // Attach the Interkom picture facet (M3c) when the video leg is running.

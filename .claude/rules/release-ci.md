@@ -64,3 +64,6 @@ paths:
   project): build `cargo build --release -p intercom-hub` first, or set `INTERCOM_HUB_BIN`, also for
   a `--project=phone` run (Playwright starts every webServer). On CI the `web-e2e` job `needs: rust`
   and downloads its `intercom-hub-linux-amd64` artifact (chmod 0755). It uses the base port + 1..3.
+- Since intercom#42 the `webrtc` project starts the REAL hub too, from the spec itself
+  (`webrtc-hub.js`, `adapter = "webrtc"`), on the base port + 4..6 (HTTP, VBAN, WebRTC UDP); the
+  same binary, nothing extra to wire on CI.
