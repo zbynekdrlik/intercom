@@ -70,6 +70,16 @@ async function meterMax(page, role, ms) {
   return max;
 }
 
+// The meter falls at 30 dB/s (app.js METER_RELEASE_DB_PER_S), so "quiet" is: it reaches the
+// silence floor, then STAYS there for the whole window (reading it at once raced the release).
+async function expectQuiet(page, role, ms, message) {
+  const loc = page.locator(`[data-role="${role}"]`);
+  await expect
+    .poll(async () => Number(await loc.getAttribute("data-db")), { message: `${message}: reaches silence`, timeout: 10000 })
+    .toBeLessThan(-70);
+  expect(await meterMax(page, role, ms), `${message}: stays silent`).toBeLessThan(-70);
+}
+
 async function hubState() {
   const r = await fetch(`${hubCtl.BASE_URL}/api/state`);
   return r.json();
@@ -100,8 +110,8 @@ test("two phones: each hears the cutter's tone, and A's mic reaches B but never 
   expect(await a.evaluate(() => transport)).toBe("webrtc");
 
   // Quiet room: nobody talks, both incoming meters sit at silence.
-  expect(await meterMax(a, "meter-in", 1500)).toBeLessThan(-70);
-  expect(await meterMax(b, "meter-in", 1500)).toBeLessThan(-70);
+  await expectQuiet(a, "meter-in", 1500, "A in a quiet room");
+  await expectQuiet(b, "meter-in", 1500, "B in a quiet room");
 
   // The cutter's voice (a VBAN tone into the hub) reaches BOTH phones.
   const stopTone = startTone({ port: hubCtl.VBAN_PORT, stream: "prog", channels: 1, hz: 997 });
@@ -116,6 +126,8 @@ test("two phones: each hears the cutter's tone, and A's mic reaches B but never 
   await expect(b.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "false", { timeout: 10000 });
 
   // A turns the mic on: B hears A (Chromium's fake microphone), A never hears itself (N-1).
+  // First A's meter must have released the tone fully, so what it shows after is A's own room.
+  await expectQuiet(a, "meter-in", 500, "A before its mic goes on");
   const micA = a.locator('[data-role="mic-toggle"]');
   await micA.click();
   await expect(micA).toHaveAttribute("data-muted", "false");
@@ -134,7 +146,7 @@ test("two phones: each hears the cutter's tone, and A's mic reaches B but never 
   await micA.click();
   await expect(micA).toHaveAttribute("data-muted", "true");
   await expect(b.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "false", { timeout: 10000 });
-  expect(await meterMax(b, "meter-in", 2000)).toBeLessThan(-70);
+  await expectQuiet(b, "meter-in", 2000, "B after A's mic OFF");
 
   // A renames itself: the hub shows the new name.
   await a.locator('[data-role="settings-open"]').click();
