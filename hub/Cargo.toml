@@ -82,6 +82,12 @@ hyper-util = { version = "0.1", features = ["server", "server-auto", "server-gra
 # (the dsync service as fallback, dstack#1). Pinned by tag.
 dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.178" }
 
+# The in-hub WebRTC phone leg (intercom#42, owner decision B 20.11.2026): str0m, sans-IO WebRTC
+# (ICE + DTLS + SRTP + RTP) on ONE UDP socket for every phone. Pinned exactly: 0.25 lists four
+# breaking changes and the crate is pre-1.0. `rust-crypto` = dimpl (pure-Rust DTLS) + RustCrypto
+# SRTP, so the hub still builds with no openssl and no C crypto (the default is aws-lc-rs, C).
+str0m = { version = "=0.25.0", default-features = false, features = ["rust-crypto"] }
+
 [dev-dependencies]
 # Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,
 # never a pid+timestamp path. The same version the appliance crate tests with.

@@ -27,7 +27,7 @@ pub const OPUS_BITRATE_BPS: i32 = 32_000;
 /// The packet loss the encoder plans for. In-band FEC is only produced when this is above zero.
 pub const OPUS_EXPECTED_LOSS_PERC: i32 = 10;
 /// The largest Opus packet (RFC 6716: 1275 bytes for one frame).
-const OPUS_MAX_PACKET: usize = 1275;
+pub const OPUS_MAX_PACKET: usize = 1275;
 /// The largest Opus frame a decode can return: 120 ms at 48 kHz.
 const OPUS_MAX_FRAME: usize = 5760;
 
@@ -77,6 +77,29 @@ impl TxEncoder {
                 Ok(out)
             }
             TxEncoder::Pcmu(decimator) => Ok(mulaw::ulaw_encode_block(&decimator.process(frame))),
+        }
+    }
+
+    /// [`TxEncoder::encode`] into a caller's buffer (intercom#42: the phones-room thread encodes one
+    /// packet per phone every 20 ms into fixed buffers). Returns the payload length; `out` holds
+    /// [`OPUS_MAX_PACKET`] bytes for Opus (PCMU needs 160).
+    pub fn encode_into(&mut self, frame: &[i16], out: &mut [u8]) -> Result<usize> {
+        if frame.len() != FRAME_48K {
+            bail!(
+                "janus encoder takes one 20 ms frame ({FRAME_48K} samples), got {}",
+                frame.len()
+            );
+        }
+        match self {
+            TxEncoder::Opus(enc) => enc.encode(frame, out).context("opus encode"),
+            TxEncoder::Pcmu(decimator) => {
+                let payload = mulaw::ulaw_encode_block(&decimator.process(frame));
+                if payload.len() > out.len() {
+                    bail!("pcmu payload {} > buffer {}", payload.len(), out.len());
+                }
+                out[..payload.len()].copy_from_slice(&payload);
+                Ok(payload.len())
+            }
         }
     }
 

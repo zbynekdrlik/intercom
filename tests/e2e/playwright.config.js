@@ -12,10 +12,13 @@
 // WAV and a MediaStream both play, headless shell AND headed), so the blocked-autoplay test
 // emulates the browser policy itself (see phone.spec.js) instead of a second project.
 //
+// intercom#42: the `webrtc` project runs webrtc.spec.js against the REAL hub on adapter "webrtc"
+// (webrtc.toml); the spec starts and stops that hub itself, on the base port + 4..6.
 // intercom#34: the `levels` project runs levels.spec.js against the REAL hub binary (the second
 // webServer, start-levels-hub.js: the cutter's loopback level page). The phone projects ignore it.
 const { defineConfig, devices } = require("@playwright/test");
 const levelsEnv = require("./levels-env");
+const webrtcHub = require("./webrtc-hub");
 
 const PORT = Number(process.env.INTERKOM_E2E_PORT || 8792);
 
@@ -52,10 +55,17 @@ module.exports = defineConfig({
   },
   projects: [
     // Every spec except the WebKit-only worker-upgrade spec (see its header).
-    { name: "phone", use: phone(), testIgnore: /(picture-sw-upgrade|levels)\.spec\.js$/ },
+    { name: "phone", use: phone(), testIgnore: /(picture-sw-upgrade|levels|webrtc)\.spec\.js$/ },
     // The iPhone engine (issue 1379): WebKit at the iPhone 14 shape. Only the picture/service-worker
     // specs run here -- the audio specs lean on Chromium's fake media devices, which WebKit lacks.
     { name: "iphone-webkit", use: { ...devices["iPhone 14"] }, testMatch: /picture-sw(-upgrade)?\.spec\.js$/ },
+    // The in-hub WebRTC phone leg (intercom#42): the phone page on the REAL hub with
+    // adapter = "webrtc". The spec starts, kills and restarts that hub itself (webrtc-hub.js).
+    {
+      name: "webrtc",
+      testMatch: /webrtc\.spec\.js$/,
+      use: { ...phone(), baseURL: webrtcHub.BASE_URL },
+    },
     // The cutter's level page on the notebook (intercom#34): a desktop Chromium on the real hub.
     {
       name: "levels",

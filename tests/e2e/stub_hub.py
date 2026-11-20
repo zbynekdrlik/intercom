@@ -170,6 +170,9 @@ def make_handler(version):
                     return self._send(200, "text/javascript; charset=utf-8", f.read())
             if path == "/api/version":
                 return self._send(200, "application/json", json.dumps({"version": version}).encode())
+            if path == "/api/phone":
+                # intercom#42: this stub fronts the Janus double, so the page takes the janus path.
+                return self._send(200, "application/json", json.dumps({"transport": "janus"}).encode())
             if path == "/api/state":
                 state = {"participants": [{"name": "cam1"}, {"name": "phones"}]}
                 return self._send(200, "application/json", json.dumps(state).encode())

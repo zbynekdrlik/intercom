@@ -348,6 +348,12 @@ pub struct HubState {
     /// snapshot is serialized (off the real-time thread).
     #[serde(skip_serializing_if = "crate::levels::Levels::is_empty")]
     pub levels: crate::levels::Levels,
+    /// The in-hub WebRTC phone leg (intercom#42): the UDP bind, the host candidates, the room's
+    /// counters and every phone (ice_state, rx/tx packets, rx_lost_frames, mic_active). Omitted on
+    /// a hub without a `webrtc` participant. Like `levels`, the hub-mix thread only clones the
+    /// `Arc`; the numbers are read when the snapshot is serialized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webrtc: Option<crate::webrtc_leg::WebrtcStateRef>,
 }
 
 impl HubState {
@@ -412,6 +418,7 @@ impl HubState {
             memory_locked: None,
             dante_refusals: BTreeMap::new(),
             levels: matrix.levels.clone(),
+            webrtc: None,
         }
     }
 
