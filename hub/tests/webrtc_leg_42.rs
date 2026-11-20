@@ -173,6 +173,8 @@ struct ClientOpts {
     /// Retry a 429 / 503 every 300 ms until this long has passed (the page's backoff); none =
     /// the first answer must be 200.
     retry_for: Option<Duration>,
+    /// Retry like the page (1, 2, 4, 4 ... s, no jitter: the worst case) instead of every 300 ms.
+    pwa_backoff: bool,
 }
 
 fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
@@ -186,6 +188,7 @@ fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
         id_out,
         client_ip,
         retry_for,
+        pwa_backoff,
     } = o;
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let local = socket.local_addr().unwrap();
@@ -213,12 +216,20 @@ fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
     }
     let url = format!("{base}/api/phone/offer");
     let deadline = Instant::now() + retry_for.unwrap_or_default();
+    let mut attempts = 0u32;
     let resp = loop {
         let r = reqwest::blocking_post(&url, &body, client_ip.as_deref());
         if r.0 == 200 || Instant::now() >= deadline || !matches!(r.0, 429 | 503) {
             break r;
         }
-        std::thread::sleep(Duration::from_millis(300));
+        // The page's own backoff (1 -> 2 -> 4 s cap) or a quick 300 ms one.
+        std::thread::sleep(if pwa_backoff {
+            let d = Duration::from_secs(1u64 << attempts.min(2));
+            attempts += 1;
+            d
+        } else {
+            Duration::from_millis(300)
+        });
     };
     assert_eq!(resp.0, 200, "offer answered: {}", resp.1);
     let v: serde_json::Value = serde_json::from_str(&resp.1).unwrap();
@@ -830,11 +841,15 @@ async fn a_reconnect_claim_is_spent_once() {
 
 // Review round 2 🟡3: one client (one key) holds at most 3 live or pending sessions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_client_holds_at_most_three_sessions() {
-    let hub = start_hub(16).await; // pending cap 8: only the per-client cap stops this client
+async fn one_client_holds_at_most_its_share_of_the_pending_offers() {
+    use intercom_hub::webrtc_leg::pending_cap_per_client;
+    let hub = start_hub(16).await; // pending cap 8, 4 per client (review round 4)
     let base = hub.base.clone();
+    let n = pending_cap_per_client(16);
+    let mut expect = vec![200; n];
+    expect.push(429);
     let mut codes = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..=n {
         codes.push(
             post_as(
                 &base,
@@ -844,23 +859,13 @@ async fn one_client_holds_at_most_three_sessions() {
             .await,
         );
     }
-    assert_eq!(codes, vec![200, 200, 200, 429]);
-    // Another client is not affected.
-    assert_eq!(
-        post_as(
-            &base,
-            "203.0.113.78",
-            serde_json::json!({"sdp": silent_offer()})
-        )
-        .await,
-        200
-    );
+    assert_eq!(codes, expect);
     // A LAN client that skips nginx cannot pose as someone else: its forged headers are ignored,
     // so its offers all count on its own address (here the test's loopback peer, as nginx would be
     // with no X-Forwarded-For of its own).
     let c = ::reqwest::Client::new();
     let mut forged = Vec::new();
-    for i in 0..4 {
+    for i in 0..=n {
         let r = c
             .post(format!("{base}/api/phone/offer"))
             .header("x-forwarded-for", format!("10.0.0.{i}, junk"))
@@ -870,14 +875,17 @@ async fn one_client_holds_at_most_three_sessions() {
             .unwrap();
         forged.push(r.status().as_u16());
     }
-    assert_eq!(forged, vec![200, 200, 200, 429], "{forged:?}");
+    assert_eq!(
+        forged, expect,
+        "its own share, not a fresh key per forged header"
+    );
     // Once the never-connecting offers expire, the client may offer again.
     wait_for("the pending slots expire", 5, || {
         hub.shared.snapshot().phones_pending == 0
     })
     .await;
     let f = hub.shared.snapshot();
-    assert_eq!(f.sessions_never_connected, 7, "{f:?}");
+    assert_eq!(f.sessions_never_connected, 2 * n as u64, "{f:?}");
     assert_eq!(
         post_as(
             &base,
@@ -1013,9 +1021,10 @@ async fn a_flood_from_the_venues_address_stays_inside_the_pending_caps() {
     for _ in 0..20 {
         codes.push(post_as(&base, VENUE_IP, serde_json::json!({"sdp": silent_offer()})).await);
     }
-    assert_eq!(codes.iter().filter(|c| **c == 200).count(), 3, "{codes:?}");
+    let n = intercom_hub::webrtc_leg::pending_cap_per_client(16);
+    assert_eq!(codes.iter().filter(|c| **c == 200).count(), n, "{codes:?}");
     assert!(codes.iter().all(|c| *c == 200 || *c == 429), "{codes:?}");
-    assert_eq!(hub.shared.snapshot().phones_pending, 3);
+    assert_eq!(hub.shared.snapshot().phones_pending, n as u64);
     // A reconnects during the flood: admitted at once.
     stop_a.store(true, Ordering::Relaxed);
     ha.await.unwrap();
@@ -1086,4 +1095,104 @@ fn send_failures_are_per_phone() {
         lines, 1,
         "one warning for the failing phone, nothing per packet"
     );
+}
+
+// Review round 4 🟡: after a hub RESTART no claim exists, so every phone is a fresh offer under the
+// venue's one key. 10 phones retrying with the page's own backoff (1, 2, 4 s; the jitter left out,
+// the worst case: all in step) are all connected within ~6 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crew_of_ten_behind_one_address_is_back_within_six_seconds_after_a_restart() {
+    let hub = start_hub(16).await; // a fresh hub: `recent` is empty, as after a restart
+    let base = hub.base.clone();
+    let t0 = Instant::now();
+    let phones: Vec<RunningPhone> = (0..10)
+        .map(|i| {
+            let stop = Arc::new(AtomicBool::new(false));
+            let id_out = Arc::new(Mutex::new(None));
+            let h = tokio::task::spawn_blocking({
+                let (base, stop, id_out) = (base.clone(), stop.clone(), id_out.clone());
+                move || {
+                    run_client_with(ClientOpts {
+                        base,
+                        display: format!("R{i}"),
+                        run_for: Duration::from_secs(30),
+                        stop,
+                        id_out,
+                        client_ip: Some(VENUE_IP.to_string()),
+                        retry_for: Some(Duration::from_secs(20)),
+                        pwa_backoff: true,
+                        ..Default::default()
+                    })
+                }
+            });
+            (stop, id_out, h)
+        })
+        .collect();
+    wait_for("10 phones connected", 20, || {
+        hub.shared.snapshot().phones_connected == 10
+    })
+    .await;
+    let took = t0.elapsed();
+    assert!(took < Duration::from_secs(6), "the crew took {took:?}");
+    for (stop, _, _) in &phones {
+        stop.store(true, Ordering::Relaxed);
+    }
+    for (_, _, h) in phones {
+        h.await.unwrap();
+    }
+}
+
+// Review round 4 🟡: reconnecting phones that are adopted but not connected yet are not fresh
+// offers, so a crew-wide reconnect never fills the hub-wide pending cap against a new phone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnects_in_flight_never_hold_the_pending_cap_against_a_new_phone() {
+    let hub = start_hub(4).await; // pending cap 2
+    let base = hub.base.clone();
+    let (stop_a, id_a, ha) = spawn_phone(&base, "A", None);
+    let (stop_b, id_b, hb) = spawn_phone(&base, "B", None);
+    wait_for("A and B connected", 5, || {
+        hub.shared.snapshot().phones_connected == 2
+    })
+    .await;
+    let (a, b) = (
+        id_a.lock().unwrap().clone().unwrap(),
+        id_b.lock().unwrap().clone().unwrap(),
+    );
+    for (stop, h) in [(stop_a, ha), (stop_b, hb)] {
+        stop.store(true, Ordering::Relaxed);
+        h.await.unwrap();
+    }
+    // Both come back; their new sessions are adopted but have not connected (silent offers).
+    for (i, old) in [a, b].into_iter().enumerate() {
+        let claim = serde_json::json!({"sdp": silent_offer(), "replaces": old});
+        assert_eq!(
+            post_as(&base, &format!("198.51.100.9{i}"), claim).await,
+            200
+        );
+    }
+    assert_eq!(hub.shared.snapshot().phones.len(), 2);
+    assert_eq!(
+        hub.shared.snapshot().phones_pending,
+        0,
+        "reconnects are not pending offers"
+    );
+    // A brand-new phone still gets a slot.
+    assert_eq!(
+        post_as(
+            &base,
+            "198.51.100.99",
+            serde_json::json!({"sdp": silent_offer()})
+        )
+        .await,
+        200
+    );
+}
+
+#[test]
+fn one_key_may_hold_half_the_pending_cap_at_least_three() {
+    use intercom_hub::webrtc_leg::pending_cap_per_client;
+    assert_eq!(pending_cap_per_client(16), 4);
+    assert_eq!(pending_cap_per_client(64), 16);
+    assert_eq!(pending_cap_per_client(4), 3);
+    assert_eq!(pending_cap_per_client(1), 3);
 }
