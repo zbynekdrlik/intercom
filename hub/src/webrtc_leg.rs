@@ -17,6 +17,7 @@
 //! Host candidates only in this phase; the hub-side TURN relay is phase 3. Logging: one line per
 //! session start / end, ICE state change and error, never one per packet.
 
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,10 +38,22 @@ use crate::janus_pacing::{IntervalStats, FRAME_48K};
 use crate::janus_rtp::JanusCodec;
 use crate::vban_jitter::NetworkFillStats;
 use crate::webrtc_room::{RoomSlots, TxPacket};
-use crate::webrtc_signal::{OfferRequest, PhoneId, SignalError, SlotTable};
+use crate::webrtc_signal::{
+    filter_offer_candidates, pending_cap, OfferRequest, PhoneId, SignalError, SlotTable,
+};
 
-/// A phone that has not connected (ICE + DTLS) this long after its offer is dropped.
-pub const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
+/// An offer's slot is held this long for the phone's first valid STUN binding request (the
+/// phone checks, the ICE-lite hub answers); no check, no slot (intercom#42 review: anonymous offers
+/// must not lock real phones out).
+pub const STUN_DEADLINE: Duration = Duration::from_secs(3);
+/// After its first STUN check a phone has this long to finish ICE + DTLS.
+pub const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+/// A reserved slot whose answer never came back (the HTTP request went away) is freed after this.
+pub const RESERVATION_DEADLINE: Duration = Duration::from_secs(5);
+/// A phone that was connected may reconnect with its old id (`replaces`) for this long.
+pub const RECENT_WINDOW: Duration = Duration::from_secs(120);
+/// At most this many recently connected ids are remembered.
+pub const RECENT_MAX: usize = 256;
 /// How long the pending-commands queue is.
 pub const COMMAND_QUEUE: usize = 64;
 /// A mic counts as active while a packet with sound came within this long.
@@ -62,6 +75,8 @@ pub struct WebrtcShared {
     pub sessions_started: AtomicU64,
     pub sessions_ended: AtomicU64,
     pub offers_refused: AtomicU64,
+    pub offers_rate_limited: AtomicU64,
+    pub phones_pending: AtomicU64,
     pub rx_refused: AtomicU64,
     pub room_ticks: AtomicU64,
     pub room_packets: AtomicU64,
@@ -107,8 +122,13 @@ pub struct WebrtcFacet {
     pub phones_connected: usize,
     pub sessions_started: u64,
     pub sessions_ended: u64,
-    /// Offers refused (full, too large, not an offer).
+    /// Offers refused (any reason: rate limit, full, too large, not JSON, not an offer); a
+    /// warning names the count at most every 10 s.
     pub offers_refused: u64,
+    /// Of those, refused by the per-client rate limit (429).
+    pub offers_rate_limited: u64,
+    /// Slots held by offers whose phone has not connected yet (at most half of `max_phones`).
+    pub phones_pending: u64,
     /// Datagrams no phone accepted (stray, late, or for a phone that left).
     pub rx_refused: u64,
     /// Room ticks (one per 20 ms), the packets they handed to the network task, and the ones the
@@ -159,6 +179,8 @@ impl WebrtcShared {
             sessions_started: ld(&self.sessions_started),
             sessions_ended: ld(&self.sessions_ended),
             offers_refused: ld(&self.offers_refused),
+            offers_rate_limited: ld(&self.offers_rate_limited),
+            phones_pending: ld(&self.phones_pending),
             rx_refused: ld(&self.rx_refused),
             room_ticks: ld(&self.room_ticks),
             room_packets: ld(&self.room_packets),
@@ -215,10 +237,76 @@ pub struct Answered {
     pub sdp: String,
 }
 
+/// A slot the network task set aside for an offer while its `Rtc` is built off the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reservation {
+    pub slot: usize,
+    pub generation: u64,
+}
+
+/// What builds a phone's `Rtc` and its answer, OFF the media task (the SDP parse and the DTLS
+/// certificate are the slow part): the crypto provider and the hub's host candidates.
+#[derive(Debug, Clone)]
+pub struct RtcFactory {
+    crypto: Arc<CryptoProvider>,
+    candidates: Vec<SocketAddr>,
+}
+
+impl RtcFactory {
+    /// A factory for `candidates` with the build's crypto provider.
+    pub fn new(candidates: Vec<SocketAddr>) -> Self {
+        RtcFactory {
+            crypto: Arc::new(str0m::crypto::from_feature_flags()),
+            candidates,
+        }
+    }
+
+    /// The hub's host candidates.
+    pub fn candidates(&self) -> &[SocketAddr] {
+        &self.candidates
+    }
+
+    /// An ICE-lite, Opus-only `Rtc` answering `sdp` (the offer's implausible candidates dropped
+    /// first): the hub never sends a connectivity check, it only answers the phone's.
+    pub fn answer(&self, sdp: &str) -> Result<(Rtc, String), SignalError> {
+        let (sdp, _dropped) = filter_offer_candidates(sdp, &self.candidates);
+        let offer =
+            SdpOffer::from_sdp_string(&sdp).map_err(|e| SignalError::BadOffer(e.to_string()))?;
+        let mut rtc = RtcConfig::new()
+            .set_crypto_provider(self.crypto.clone())
+            .set_ice_lite(true)
+            .clear_codecs()
+            .enable_opus(true, false)
+            .build(Instant::now());
+        for addr in &self.candidates {
+            match Candidate::host(*addr, "udp") {
+                Ok(c) => {
+                    rtc.add_local_candidate(c);
+                }
+                Err(e) => tracing::warn!(%addr, error = %e, "webrtc: host candidate refused"),
+            }
+        }
+        let answer: SdpAnswer = rtc
+            .sdp_api()
+            .accept_offer(offer)
+            .map_err(|e| SignalError::BadOffer(e.to_string()))?;
+        Ok((rtc, answer.to_sdp_string()))
+    }
+}
+
 enum Command {
-    Offer {
-        req: OfferRequest,
-        reply: oneshot::Sender<Result<Answered, SignalError>>,
+    Reserve {
+        replaces: Option<PhoneId>,
+        reply: oneshot::Sender<Result<Reservation, SignalError>>,
+    },
+    Adopt {
+        reservation: Reservation,
+        rtc: Box<Rtc>,
+        display: String,
+        reply: oneshot::Sender<Result<PhoneId, SignalError>>,
+    },
+    Release {
+        reservation: Reservation,
     },
     Display {
         id: PhoneId,
@@ -231,21 +319,24 @@ enum Command {
     },
 }
 
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Command::Reserve { .. } => "Reserve",
+            Command::Adopt { .. } => "Adopt",
+            Command::Release { .. } => "Release",
+            Command::Display { .. } => "Display",
+            Command::Close { .. } => "Close",
+        })
+    }
+}
+
 /// The HTTP side's handle on the network task.
 #[derive(Debug, Clone)]
 pub struct WebrtcHandle {
     cmd: mpsc::Sender<Command>,
     pub shared: Arc<WebrtcShared>,
-}
-
-impl std::fmt::Debug for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Command::Offer { .. } => "Offer",
-            Command::Display { .. } => "Display",
-            Command::Close { .. } => "Close",
-        })
-    }
+    pub factory: Arc<RtcFactory>,
 }
 
 impl WebrtcHandle {
@@ -261,9 +352,37 @@ impl WebrtcHandle {
         rx.await.map_err(|_| SignalError::Unavailable)?
     }
 
-    /// A phone's offer: its id and the hub's answer.
+    /// A phone's offer: the capacity first (on the media task, a few µs), the SDP parse, the
+    /// certificate and the answer on the blocking pool, then the ready `Rtc` goes to the media
+    /// task. Returns the phone's id and the hub's answer.
     pub async fn offer(&self, req: OfferRequest) -> Result<Answered, SignalError> {
-        self.ask(|reply| Command::Offer { req, reply }).await
+        let replaces = req.replaces;
+        let reservation = self
+            .ask(|reply| Command::Reserve { replaces, reply })
+            .await?;
+        let factory = self.factory.clone();
+        let sdp = req.sdp;
+        let built = tokio::task::spawn_blocking(move || factory.answer(&sdp))
+            .await
+            .unwrap_or(Err(SignalError::Unavailable));
+        let (rtc, answer) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = self.cmd.send(Command::Release { reservation }).await;
+                return Err(e);
+            }
+        };
+        let display = req.display;
+        let rtc = Box::new(rtc);
+        let id = self
+            .ask(|reply| Command::Adopt {
+                reservation,
+                rtc,
+                display,
+                reply,
+            })
+            .await?;
+        Ok(Answered { id, sdp: answer })
     }
 
     /// A phone's new display name.
@@ -272,7 +391,7 @@ impl WebrtcHandle {
             .await
     }
 
-    /// A phone leaves.
+    /// A phone leaves. An id the hub no longer has is not an error (it already left).
     pub async fn close(&self, id: PhoneId) -> Result<(), SignalError> {
         self.ask(|reply| Command::Close { id, reply }).await
     }
@@ -299,32 +418,81 @@ pub fn start_webrtc(
     let local = cfg.socket.local_addr()?;
     let socket = tokio::net::UdpSocket::from_std(cfg.socket)?;
     // Each datagram carries its destination (str0m pairs it with a local candidate) and its
-    // ingress interface (the Dante guard drops what arrived on the Dante leg, intercom#25).
+    // ingress interface (the Dante guard drops what arrived on the Dante leg, intercom#25); each
+    // send names its source (`pktinfo::try_send_from`).
     crate::pktinfo::enable_guarded(&socket, &cfg.dante_guard, "webrtc socket")?;
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_QUEUE);
     let (pkt_tx, pkt_rx) = mpsc::channel(4 * cfg.max_phones.max(1));
-    let handle = WebrtcHandle {
-        cmd: cmd_tx,
-        shared: cfg.shared.clone(),
-    };
     let candidates: Vec<SocketAddr> = cfg
         .host_ips
         .iter()
         .map(|ip| SocketAddr::new(*ip, local.port()))
         .collect();
+    let factory = Arc::new(RtcFactory::new(candidates.clone()));
+    let handle = WebrtcHandle {
+        cmd: cmd_tx,
+        shared: cfg.shared.clone(),
+        factory,
+    };
     let task = NetTask {
         socket,
         local,
         candidates,
         phones: Vec::new(),
+        reservations: Vec::new(),
+        recent: VecDeque::new(),
         table: SlotTable::new(cfg.max_phones),
         slots: cfg.slots,
         shared: cfg.shared,
         guard: cfg.dante_guard,
-        crypto: Arc::new(str0m::crypto::from_feature_flags()),
     };
     tokio::spawn(task.run(cmd_rx, pkt_rx));
     Ok((handle, pkt_tx))
+}
+
+/// Every IPv4 address of an interface that is up (`getifaddrs`), with the interface's name: the
+/// caller ([`crate::webrtc_signal::WebrtcConfig::candidate_ips`]) keeps the LAN ones. Empty when
+/// the call fails.
+pub fn local_ipv4_addrs() -> Vec<(String, IpAddr)> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `head` with a list freed below with freeifaddrs.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        tracing::warn!(error = %std::io::Error::last_os_error(), "webrtc: getifaddrs failed");
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is a node of the list getifaddrs returned and is not freed yet.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        if ifa.ifa_addr.is_null()
+            || ifa.ifa_name.is_null()
+            || ifa.ifa_flags & (libc::IFF_UP as libc::c_uint) == 0
+        {
+            continue;
+        }
+        // SAFETY: ifa_addr points at a sockaddr whose family field is valid to read.
+        if i32::from(unsafe { (*ifa.ifa_addr).sa_family }) != libc::AF_INET {
+            continue;
+        }
+        // SAFETY: AF_INET: a sockaddr_in; the name is NUL-terminated and owned by the list.
+        let (a, name) = unsafe {
+            (
+                &*(ifa.ifa_addr as *const libc::sockaddr_in),
+                std::ffi::CStr::from_ptr(ifa.ifa_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        found.push((
+            name,
+            IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr))),
+        ));
+    }
+    // SAFETY: the list getifaddrs allocated, freed once.
+    unsafe { libc::freeifaddrs(head) };
+    found
 }
 
 struct Phone {
@@ -339,7 +507,12 @@ struct Phone {
     ice: IceConnectionState,
     connected: bool,
     created: Instant,
-    tx_frames: u64,
+    /// The first valid STUN binding request from the phone (ICE-lite: the phone checks, the hub
+    /// answers). Until it comes the slot is held only [`STUN_DEADLINE`].
+    stun_at: Option<Instant>,
+    /// The room tick of the first packet written to this phone: its RTP time is (tick - first) x
+    /// 960, so a packet the full queue dropped still advances it.
+    first_tick: Option<u64>,
     rx_packets: u64,
     tx_packets: u64,
     rx_lost_frames: u64,
@@ -350,49 +523,26 @@ struct Phone {
     changed: bool,
 }
 
+struct PendingReservation {
+    r: Reservation,
+    deadline: Instant,
+    /// A reconnecting phone's offer (`replaces` matched): not held to the pending cap.
+    reconnect: bool,
+}
+
 struct NetTask {
     socket: tokio::net::UdpSocket,
     local: SocketAddr,
     candidates: Vec<SocketAddr>,
     phones: Vec<Phone>,
+    reservations: Vec<PendingReservation>,
+    /// Phones that were connected and left within [`RECENT_WINDOW`]: their id still counts as a
+    /// reconnect claim.
+    recent: VecDeque<(PhoneId, Instant)>,
     table: SlotTable,
     slots: Arc<RoomSlots>,
     shared: Arc<WebrtcShared>,
     guard: Arc<DanteGuard>,
-    crypto: Arc<CryptoProvider>,
-}
-
-/// Every IPv4 address of an interface that is up (`getifaddrs`), loopback included: the caller
-/// ([`crate::webrtc_signal::WebrtcConfig::candidate_ips`]) filters. Empty when the call fails.
-pub fn local_ipv4_addrs() -> Vec<IpAddr> {
-    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `head` with a list freed below with freeifaddrs.
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        tracing::warn!(error = %std::io::Error::last_os_error(), "webrtc: getifaddrs failed");
-        return Vec::new();
-    }
-    let mut found = Vec::new();
-    let mut cur = head;
-    while !cur.is_null() {
-        // SAFETY: `cur` is a node of the list getifaddrs returned and is not freed yet.
-        let ifa = unsafe { &*cur };
-        cur = ifa.ifa_next;
-        if ifa.ifa_addr.is_null() || ifa.ifa_flags & (libc::IFF_UP as libc::c_uint) == 0 {
-            continue;
-        }
-        // SAFETY: ifa_addr points at a sockaddr whose family field is valid to read.
-        if i32::from(unsafe { (*ifa.ifa_addr).sa_family }) != libc::AF_INET {
-            continue;
-        }
-        // SAFETY: AF_INET: a sockaddr_in.
-        let a = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
-        found.push(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
-            a.sin_addr.s_addr,
-        ))));
-    }
-    // SAFETY: the list getifaddrs allocated, freed once.
-    unsafe { libc::freeifaddrs(head) };
-    found
 }
 
 fn ice_name(s: IceConnectionState) -> &'static str {
@@ -403,6 +553,11 @@ fn ice_name(s: IceConnectionState) -> &'static str {
         IceConnectionState::Completed => "completed",
         IceConnectionState::Disconnected => "disconnected",
     }
+}
+
+/// A STUN message (RFC 5389): the first two bits 0 and the magic cookie at bytes 4..8.
+pub fn is_stun(data: &[u8]) -> bool {
+    data.len() >= 20 && data[0] < 4 && data[4..8] == [0x21, 0x12, 0xA4, 0x42]
 }
 
 impl NetTask {
@@ -418,7 +573,8 @@ impl NetTask {
             bind = %self.local,
             candidates = ?self.candidates,
             max_phones = self.table.capacity(),
-            "webrtc: phone leg listening (host candidates only; TURN is phase 3)"
+            pending_cap = pending_cap(self.table.capacity()),
+            "webrtc: phone leg listening (ICE-lite, host candidates only; TURN is phase 3)"
         );
         loop {
             let next = self.drive(Instant::now());
@@ -458,6 +614,7 @@ impl NetTask {
     fn receive(&mut self, data: &[u8], from: SocketAddr, dst_ip: Option<IpAddr>) {
         let now = Instant::now();
         let destination = self.destination(dst_ip);
+        let stun = is_stun(data);
         let Ok(contents) = data.try_into() else {
             self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
             return;
@@ -475,21 +632,41 @@ impl NetTask {
             self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        if stun && phone.stun_at.is_none() {
+            // accepts() matched the STUN message on this phone's ICE credentials.
+            phone.stun_at = Some(now);
+        }
         if let Err(e) = phone.rtc.handle_input(input) {
             tracing::warn!(phone = %phone.id.short(), error = %e, "webrtc: input refused — dropping the phone");
             phone.ending.get_or_insert("rtc error");
         }
     }
 
+    /// Unconnected phones and open reservations, the reconnects not counted.
+    fn pending(&self) -> usize {
+        self.phones
+            .iter()
+            .filter(|p| !p.connected && p.ending.is_none())
+            .count()
+            + self.reservations.iter().filter(|r| !r.reconnect).count()
+    }
+
     fn command(&mut self, cmd: Command) {
         match cmd {
-            Command::Offer { req, reply } => {
-                let r = self.accept_offer(req);
-                if r.is_err() {
-                    self.shared.offers_refused.fetch_add(1, Ordering::Relaxed);
-                }
+            Command::Reserve { replaces, reply } => {
+                let r = self.reserve(replaces);
                 let _ = reply.send(r);
             }
+            Command::Adopt {
+                reservation,
+                rtc,
+                display,
+                reply,
+            } => {
+                let r = self.adopt(reservation, *rtc, display);
+                let _ = reply.send(r);
+            }
+            Command::Release { reservation } => self.release(reservation),
             Command::Display {
                 id,
                 display: name,
@@ -509,85 +686,96 @@ impl NetTask {
                 let _ = reply.send(r);
             }
             Command::Close { id, reply } => {
-                let r = match self.phones.iter_mut().find(|p| p.id == id) {
-                    Some(p) => {
-                        p.ending.get_or_insert("left");
-                        Ok(())
-                    }
-                    None => Err(SignalError::UnknownPhone),
-                };
-                let _ = reply.send(r);
+                if let Some(p) = self.phones.iter_mut().find(|p| p.id == id) {
+                    p.ending.get_or_insert("left");
+                }
+                // Idempotent: a phone the hub already dropped has left too.
+                let _ = reply.send(Ok(()));
             }
         }
     }
 
-    fn accept_offer(&mut self, req: OfferRequest) -> Result<Answered, SignalError> {
-        let offer = SdpOffer::from_sdp_string(&req.sdp)
-            .map_err(|e| SignalError::BadOffer(e.to_string()))?;
+    /// Set a slot aside for an offer. A `replaces` naming a live phone drops that phone first; one
+    /// naming a live or recently connected phone is a reconnect, never held to the pending cap.
+    fn reserve(&mut self, replaces: Option<PhoneId>) -> Result<Reservation, SignalError> {
+        let now = Instant::now();
+        let mut reconnect = false;
+        if let Some(old) = replaces {
+            if let Some(i) = self.phones.iter().position(|p| p.id == old) {
+                self.phones[i].ending = Some("replaced by its reconnect");
+                self.sweep(now);
+                reconnect = true;
+            } else {
+                reconnect = self.recent.iter().any(|(id, _)| *id == old);
+            }
+        }
+        if !reconnect && self.pending() >= pending_cap(self.table.capacity()) {
+            return Err(SignalError::Full);
+        }
         let Some((slot, generation)) = self.table.allocate() else {
-            tracing::warn!(display = %req.display, max = self.table.capacity(), "webrtc: offer refused — every phone slot is taken");
             return Err(SignalError::Full);
         };
+        let r = Reservation { slot, generation };
+        self.reservations.push(PendingReservation {
+            r,
+            deadline: now + RESERVATION_DEADLINE,
+            reconnect,
+        });
+        Ok(r)
+    }
+
+    fn release(&mut self, r: Reservation) {
+        if let Some(i) = self.reservations.iter().position(|p| p.r == r) {
+            self.reservations.swap_remove(i);
+            self.table.free(r.slot, r.generation);
+        }
+    }
+
+    fn adopt(&mut self, r: Reservation, rtc: Rtc, name: String) -> Result<PhoneId, SignalError> {
+        let Some(i) = self.reservations.iter().position(|p| p.r == r) else {
+            // The reservation expired while the answer was built.
+            return Err(SignalError::Unavailable);
+        };
+        self.reservations.swap_remove(i);
         let id = match PhoneId::random() {
             Ok(id) => id,
             Err(e) => {
-                self.table.free(slot, generation);
+                self.table.free(r.slot, r.generation);
                 tracing::error!(error = %e, "webrtc: no random id for a phone");
                 return Err(SignalError::Unavailable);
-            }
-        };
-        let now = Instant::now();
-        let mut rtc = RtcConfig::new()
-            .set_crypto_provider(self.crypto.clone())
-            .clear_codecs()
-            .enable_opus(true, false)
-            .build(now);
-        for addr in &self.candidates {
-            match Candidate::host(*addr, "udp") {
-                Ok(c) => {
-                    rtc.add_local_candidate(c);
-                }
-                Err(e) => tracing::warn!(%addr, error = %e, "webrtc: host candidate refused"),
-            }
-        }
-        let answer: SdpAnswer = match rtc.sdp_api().accept_offer(offer) {
-            Ok(a) => a,
-            Err(e) => {
-                self.table.free(slot, generation);
-                tracing::warn!(display = %req.display, error = %e, "webrtc: offer not accepted");
-                return Err(SignalError::BadOffer(e.to_string()));
             }
         };
         let decoder = match RxDecoder::new(JanusCodec::Opus) {
             Ok(d) => d,
             Err(e) => {
-                self.table.free(slot, generation);
+                self.table.free(r.slot, r.generation);
                 tracing::error!(error = %e, "webrtc: opus decoder create failed");
                 return Err(SignalError::Unavailable);
             }
         };
-        self.slots.open(slot, generation);
+        self.slots.open(r.slot, r.generation);
         self.shared.sessions_started.fetch_add(1, Ordering::Relaxed);
         tracing::info!(
             phone = %id.short(),
-            display = %req.display,
-            slot,
+            display = %name,
+            slot = r.slot,
             phones = self.table.in_use(),
             "webrtc: phone session started"
         );
         self.phones.push(Phone {
             id,
-            slot,
-            generation,
+            slot: r.slot,
+            generation: r.generation,
             rtc,
             mid: None,
             pt: None,
-            display: req.display,
+            display: name,
             decoder,
             ice: IceConnectionState::New,
             connected: false,
-            created: now,
-            tx_frames: 0,
+            created: Instant::now(),
+            stun_at: None,
+            first_tick: None,
             rx_packets: 0,
             tx_packets: 0,
             rx_lost_frames: 0,
@@ -596,10 +784,7 @@ impl NetTask {
             changed: false,
         });
         self.publish();
-        Ok(Answered {
-            id,
-            sdp: answer.to_sdp_string(),
-        })
+        Ok(id)
     }
 
     fn write_packet(&mut self, pkt: &TxPacket) {
@@ -616,11 +801,8 @@ impl NetTask {
         if !phone.connected || phone.ending.is_some() {
             return;
         }
-        let rtp_time = MediaTime::new(
-            phone.tx_frames * FRAME_48K as u64,
-            Frequency::FORTY_EIGHT_KHZ,
-        );
-        phone.tx_frames += 1;
+        let first = *phone.first_tick.get_or_insert(pkt.tick);
+        let rtp_time = rtp_time_for(first, pkt.tick);
         let Some(writer) = phone.rtc.writer(mid) else {
             return;
         };
@@ -634,7 +816,7 @@ impl NetTask {
     }
 
     /// Feed time to every phone, send what they want to send, handle their events, drop the
-    /// phones that ended. Returns when the next timeout is due.
+    /// phones that ended and the reservations that expired. Returns when the next timeout is due.
     fn drive(&mut self, now: Instant) -> Instant {
         let mut next = now + Duration::from_millis(100);
         for phone in &mut self.phones {
@@ -647,15 +829,48 @@ impl NetTask {
             if let Some(t) = poll_phone(phone, &self.socket, &self.slots) {
                 next = next.min(t);
             }
-            if phone.ending.is_none()
-                && !phone.connected
-                && now.duration_since(phone.created) > CONNECT_DEADLINE
-            {
-                phone.ending = Some("never connected");
+            if phone.ending.is_none() && !phone.connected {
+                match phone.stun_at {
+                    None if now.duration_since(phone.created) > STUN_DEADLINE => {
+                        phone.ending = Some("no ICE check from the phone");
+                    }
+                    Some(t) if now.duration_since(t) > CONNECT_DEADLINE => {
+                        phone.ending = Some("never connected");
+                    }
+                    _ => {}
+                }
             }
             if phone.ending.is_none() && !phone.rtc.is_alive() {
                 phone.ending = Some("closed");
             }
+            if phone.ending.is_none() {
+                let deadline = match phone.stun_at {
+                    None => phone.created + STUN_DEADLINE,
+                    Some(t) => t + CONNECT_DEADLINE,
+                };
+                if !phone.connected {
+                    next = next.min(deadline);
+                }
+            }
+        }
+        // Reservations whose answer never came back (the HTTP handler went away).
+        let before = self.reservations.len();
+        let mut expired = Vec::new();
+        self.reservations.retain(|p| {
+            let keep = p.deadline > now;
+            if !keep {
+                expired.push(p.r);
+            }
+            keep
+        });
+        for r in expired {
+            self.table.free(r.slot, r.generation);
+        }
+        if self.reservations.len() != before {
+            tracing::debug!(
+                expired = before - self.reservations.len(),
+                "webrtc: offer reservations expired"
+            );
         }
         // An ICE change or a connect shows on /api/state at once, not at the next second.
         let mut changed = false;
@@ -663,36 +878,53 @@ impl NetTask {
             // every flag is cleared, so no short-circuit
             changed |= std::mem::take(&mut p.changed);
         }
-        if changed && !self.phones.iter().any(|p| p.ending.is_some()) {
-            self.publish();
-        }
-        if self.phones.iter().any(|p| p.ending.is_some()) {
-            let mut kept = Vec::with_capacity(self.phones.len());
-            for mut phone in std::mem::take(&mut self.phones) {
-                match phone.ending {
-                    None => kept.push(phone),
-                    Some(why) => {
-                        phone.rtc.disconnect();
-                        self.slots.close(phone.slot, phone.generation);
-                        self.table.free(phone.slot, phone.generation);
-                        self.shared.sessions_ended.fetch_add(1, Ordering::Relaxed);
-                        tracing::info!(
-                            phone = %phone.id.short(),
-                            display = %phone.display,
-                            why,
-                            age_s = phone.created.elapsed().as_secs(),
-                            rx_packets = phone.rx_packets,
-                            tx_packets = phone.tx_packets,
-                            rx_lost_frames = phone.rx_lost_frames,
-                            "webrtc: phone session ended"
-                        );
-                    }
-                }
-            }
-            self.phones = kept;
+        if !self.sweep(now) && changed {
             self.publish();
         }
         next.max(now + Duration::from_millis(1))
+    }
+
+    /// Drop every phone that ended; true when any was (the facet was then republished).
+    fn sweep(&mut self, now: Instant) -> bool {
+        if !self.phones.iter().any(|p| p.ending.is_some()) {
+            return false;
+        }
+        let mut kept = Vec::with_capacity(self.phones.len());
+        for mut phone in std::mem::take(&mut self.phones) {
+            match phone.ending {
+                None => kept.push(phone),
+                Some(why) => {
+                    phone.rtc.disconnect();
+                    self.slots.close(phone.slot, phone.generation);
+                    self.table.free(phone.slot, phone.generation);
+                    self.shared.sessions_ended.fetch_add(1, Ordering::Relaxed);
+                    if phone.connected {
+                        self.recent.push_back((phone.id, now));
+                    }
+                    tracing::info!(
+                        phone = %phone.id.short(),
+                        display = %phone.display,
+                        why,
+                        age_s = phone.created.elapsed().as_secs(),
+                        rx_packets = phone.rx_packets,
+                        tx_packets = phone.tx_packets,
+                        rx_lost_frames = phone.rx_lost_frames,
+                        "webrtc: phone session ended"
+                    );
+                }
+            }
+        }
+        while self
+            .recent
+            .front()
+            .is_some_and(|(_, t)| now.saturating_duration_since(*t) > RECENT_WINDOW)
+            || self.recent.len() > RECENT_MAX
+        {
+            self.recent.pop_front();
+        }
+        self.phones = kept;
+        self.publish();
+        true
     }
 
     fn publish(&self) {
@@ -716,12 +948,24 @@ impl NetTask {
                 mic_rate_ppm: self.slots.mic_rate_ppm(p.slot),
             })
             .collect();
+        self.shared
+            .phones_pending
+            .store(self.pending() as u64, Ordering::Relaxed);
         self.shared.publish_phones(phones);
     }
 }
 
-/// Poll one phone until it wants to wait: send its datagrams, handle its events. The next timeout,
-/// or `None` once it is closed.
+/// A phone's RTP time for the room tick `tick`, its first packet at `first`: 960 per tick, so a
+/// packet that never reached the phone still moves the clock on.
+pub fn rtp_time_for(first: u64, tick: u64) -> MediaTime {
+    MediaTime::new(
+        tick.saturating_sub(first) * FRAME_48K as u64,
+        Frequency::FORTY_EIGHT_KHZ,
+    )
+}
+
+/// Poll one phone until it wants to wait: send its datagrams (from the local candidate str0m
+/// chose), handle its events. The next timeout, or `None` once it is closed.
 fn poll_phone(
     phone: &mut Phone,
     socket: &tokio::net::UdpSocket,
@@ -743,8 +987,15 @@ fn poll_phone(
             Output::Timeout(t) => return Some(t),
             Output::Transmit(t) => {
                 // Non-blocking: a full send buffer drops this datagram (WebRTC retransmits what it
-                // must), it never stalls the task.
-                if let Err(e) = socket.try_send_to(&t.contents, t.destination) {
+                // must), it never stalls the task. The source is the candidate the phone talks
+                // to, so a 0.0.0.0 bind with several host IPs answers from the right one.
+                let src = match t.source.ip() {
+                    IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4),
+                    _ => None,
+                };
+                if let Err(e) =
+                    crate::pktinfo::try_send_from(socket, &t.contents, t.destination, src)
+                {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         tracing::debug!(phone = %phone.id.short(), dest = %t.destination, error = %e, "webrtc: send failed");
                     }

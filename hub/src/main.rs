@@ -451,7 +451,7 @@ async fn main() -> Result<()> {
     // A connection on the Dante leg is closed at once (intercom#25); axum::serve has no accept hook.
     let served = intercom_hub::http_serve::serve(
         listener,
-        router(state).merge(phone_router(PhoneApi { leg: phone_leg })),
+        router(state).merge(phone_router(PhoneApi::new(phone_leg))),
         dante_guard,
         shutdown_signal(),
     )

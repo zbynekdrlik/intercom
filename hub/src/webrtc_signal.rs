@@ -106,13 +106,14 @@ impl WebrtcConfig {
         Ok(bind)
     }
 
-    /// The host candidate IPs: the configured ones, else the bind's own IP, else `discovered`
-    /// (the box's addresses) minus loopback, link-local and whatever `is_excluded` refuses (the
-    /// Dante leg).
+    /// The host candidate IPs: the configured ones, else the bind's own IP, else the box's LAN
+    /// addresses from `discovered` (`(interface, address)`, see [`is_lan_candidate`]) minus
+    /// whatever `is_excluded` refuses (the Dante leg). The answer goes to anonymous POSTers, so the
+    /// default never names an internal address (a container bridge, the tailnet, link-local).
     pub fn candidate_ips(
         &self,
         bind: SocketAddr,
-        discovered: &[IpAddr],
+        discovered: &[(String, IpAddr)],
         is_excluded: impl Fn(IpAddr) -> bool,
     ) -> Vec<IpAddr> {
         if !self.host_ips.is_empty() {
@@ -121,16 +122,203 @@ impl WebrtcConfig {
         if !bind.ip().is_unspecified() {
             return vec![bind.ip()];
         }
-        let mut out: Vec<IpAddr> = discovered
-            .iter()
-            .copied()
-            .filter(|ip| ip.is_ipv4() && !ip.is_loopback() && !ip.is_unspecified())
-            .filter(|ip| !matches!(ip, IpAddr::V4(v4) if v4.is_link_local()))
-            .filter(|ip| !is_excluded(*ip))
-            .collect();
-        out.dedup();
+        let mut out: Vec<IpAddr> = Vec::new();
+        for (iface, ip) in discovered {
+            if is_lan_candidate(iface, *ip) && !is_excluded(*ip) && !out.contains(ip) {
+                out.push(*ip);
+            }
+        }
         out
     }
+}
+
+/// Interface name prefixes that are never a phone's way in: container and VM bridges, VPNs.
+pub const VIRTUAL_IFACE_PREFIXES: &[&str] = &[
+    "lo",
+    "docker",
+    "br-",
+    "veth",
+    "virbr",
+    "vnet",
+    "tailscale",
+    "ts",
+    "tun",
+    "tap",
+    "wg",
+    "zt",
+    "cni",
+    "flannel",
+    "lxc",
+    "lxd",
+    "podman",
+];
+
+/// A default host candidate: an RFC 1918 IPv4 address on a real interface. Loopback, link-local,
+/// the CGNAT / tailnet range 100.64/10, public addresses and virtual interfaces are left out (set
+/// `[webrtc].host_ips` to advertise anything else).
+pub fn is_lan_candidate(iface: &str, ip: IpAddr) -> bool {
+    let IpAddr::V4(v4) = ip else {
+        return false;
+    };
+    if VIRTUAL_IFACE_PREFIXES.iter().any(|p| iface.starts_with(p)) {
+        return false;
+    }
+    v4.is_private()
+}
+
+/// Offers without a connected phone behind them may hold at most this many slots (half, at least
+/// one), so a burst of anonymous offers never locks a reconnecting phone out.
+pub fn pending_cap(max_phones: usize) -> usize {
+    (max_phones / 2).max(1)
+}
+
+/// The rate-limit key of a request: Cloudflare's client address (every phone through the tunnel
+/// has the tunnel's peer address), else the last `X-Forwarded-For` hop (the one the box's own
+/// nginx appended), else the TCP peer.
+pub fn client_key(cf: Option<&str>, xff: Option<&str>, peer: Option<IpAddr>) -> String {
+    if let Some(cf) = cf.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("cf:{}", cf.chars().take(64).collect::<String>());
+    }
+    if let Some(last) = xff
+        .and_then(|x| x.rsplit(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return format!("xff:{}", last.chars().take(64).collect::<String>());
+    }
+    match peer {
+        Some(ip) => format!("peer:{ip}"),
+        None => "peer:unknown".to_string(),
+    }
+}
+
+/// A token bucket per client key: `burst` offers at once, then one every `1 / per_s` seconds.
+/// Keys idle for a minute are forgotten; past `MAX_KEYS` keys every new one shares one bucket.
+#[derive(Debug)]
+pub struct RateLimiter {
+    buckets: std::collections::HashMap<String, (f64, std::time::Instant)>,
+    burst: f64,
+    per_s: f64,
+}
+
+/// The offer rate limit: 5 at once, then one every 2 s per client.
+pub const OFFER_BURST: f64 = 5.0;
+pub const OFFER_PER_S: f64 = 0.5;
+
+impl RateLimiter {
+    const MAX_KEYS: usize = 1024;
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    pub fn new(burst: f64, per_s: f64) -> Self {
+        RateLimiter {
+            buckets: std::collections::HashMap::new(),
+            burst,
+            per_s,
+        }
+    }
+
+    /// May `key` make one more request at `now`? A yes spends a token.
+    pub fn allow(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if self.buckets.len() >= Self::MAX_KEYS {
+            self.buckets
+                .retain(|_, (_, last)| now.saturating_duration_since(*last) < Self::IDLE);
+        }
+        let key = if self.buckets.len() >= Self::MAX_KEYS && !self.buckets.contains_key(key) {
+            "overflow"
+        } else {
+            key
+        };
+        let (tokens, last) = self
+            .buckets
+            .entry(key.to_string())
+            .or_insert((self.burst, now));
+        let refill = now.saturating_duration_since(*last).as_secs_f64() * self.per_s;
+        *tokens = (*tokens + refill).min(self.burst);
+        *last = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A warning about refused offers at most once every [`RefusalLog::EVERY`], carrying the count
+/// since the last line, so a flood on the public route never floods the journal.
+#[derive(Debug, Default)]
+pub struct RefusalLog {
+    last: Option<std::time::Instant>,
+    since: u64,
+}
+
+impl RefusalLog {
+    pub const EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// One refusal at `now`: `Some(count)` when a line is due (the refusals since the last one,
+    /// this one included).
+    pub fn note(&mut self, now: std::time::Instant) -> Option<u64> {
+        self.since += 1;
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) < Self::EVERY)
+        {
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.since))
+    }
+}
+
+/// The offer's `a=candidate` lines the hub keeps: UDP, a port of 1024 or more, a unicast address
+/// that is not one of the hub's own, at most [`MAX_OFFER_CANDIDATES`]; `.local` mDNS names are
+/// kept (str0m ignores them). The hub runs ICE-lite, so it never sends a check to any of them;
+/// they are kept for the phase-3 TURN permissions only. Returns the SDP and how many were dropped.
+pub fn filter_offer_candidates(sdp: &str, own: &[SocketAddr]) -> (String, usize) {
+    let mut kept = 0usize;
+    let mut dropped = 0usize;
+    let mut out = String::with_capacity(sdp.len());
+    for line in sdp.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        if let Some(cand) = body.strip_prefix("a=candidate:") {
+            if kept < MAX_OFFER_CANDIDATES && plausible_candidate(cand, own) {
+                kept += 1;
+            } else {
+                dropped += 1;
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    (out, dropped)
+}
+
+/// The most offer candidates the hub keeps.
+pub const MAX_OFFER_CANDIDATES: usize = 8;
+
+fn plausible_candidate(cand: &str, own: &[SocketAddr]) -> bool {
+    // foundation component transport priority address port "typ" type ...
+    let f: Vec<&str> = cand.split_whitespace().collect();
+    if f.len() < 8 || !f[2].eq_ignore_ascii_case("udp") || f[6] != "typ" {
+        return false;
+    }
+    let Ok(port) = f[5].parse::<u16>() else {
+        return false;
+    };
+    if port < 1024 {
+        return false;
+    }
+    if f[4].ends_with(".local") {
+        return true;
+    }
+    let Ok(ip) = f[4].parse::<IpAddr>() else {
+        return false;
+    };
+    let unicast = match ip {
+        IpAddr::V4(v4) => !(v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast()),
+        IpAddr::V6(v6) => !(v6.is_unspecified() || v6.is_multicast()),
+    };
+    unicast && !own.iter().any(|o| o.ip() == ip)
 }
 
 /// A phone's id: 128 random bits, 32 lowercase hex characters. It is the phone's only credential
@@ -199,6 +387,11 @@ pub enum SignalError {
     UnknownPhone,
     /// The WebRTC leg is not running (503).
     Unavailable,
+    /// Too many offers from one client (429).
+    RateLimited,
+    /// The body is not `application/json` (415): a page elsewhere cannot fire a CORS "simple"
+    /// POST at the hub, it must preflight, and the hub answers no preflight.
+    UnsupportedMediaType,
 }
 
 impl SignalError {
@@ -209,6 +402,8 @@ impl SignalError {
             SignalError::TooLarge => 413,
             SignalError::Full | SignalError::Unavailable => 503,
             SignalError::UnknownPhone => 404,
+            SignalError::RateLimited => 429,
+            SignalError::UnsupportedMediaType => 415,
         }
     }
 }
@@ -224,8 +419,19 @@ impl fmt::Display for SignalError {
             SignalError::Full => write!(f, "every phone slot is taken"),
             SignalError::UnknownPhone => write!(f, "no such phone"),
             SignalError::Unavailable => write!(f, "the WebRTC phone leg is not running"),
+            SignalError::RateLimited => {
+                write!(f, "too many offers from this client, retry shortly")
+            }
+            SignalError::UnsupportedMediaType => write!(f, "the body must be application/json"),
         }
     }
+}
+
+/// `Content-Type: application/json` (parameters such as `; charset=utf-8` allowed).
+pub fn is_json_content_type(value: Option<&str>) -> bool {
+    value
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
 }
 
 /// A parsed `POST /api/phone/offer` body.
@@ -233,6 +439,8 @@ impl fmt::Display for SignalError {
 pub struct OfferRequest {
     pub sdp: String,
     pub display: String,
+    /// The id this phone had before a reconnect (see [`OfferBody`]).
+    pub replaces: Option<PhoneId>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +448,10 @@ struct OfferBody {
     sdp: String,
     #[serde(default)]
     display: Option<String>,
+    /// The id this phone had before a reconnect: an offer naming a live or recently connected
+    /// phone of this hub is not held to the pending cap (and replaces a live one).
+    #[serde(default)]
+    replaces: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -265,6 +477,8 @@ pub fn parse_offer_body(body: &[u8]) -> Result<OfferRequest, SignalError> {
     Ok(OfferRequest {
         sdp: b.sdp,
         display: clean_display(b.display.as_deref().unwrap_or("")),
+        // A malformed or unknown id is simply no claim: the offer is then a new phone.
+        replaces: b.replaces.as_deref().and_then(PhoneId::parse),
     })
 }
 

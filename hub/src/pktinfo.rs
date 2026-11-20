@@ -77,6 +77,63 @@ pub async fn recv_from_with_info(
         .await
 }
 
+/// Send `buf` to `dest` FROM the local address `src` (intercom#42: a socket bound to 0.0.0.0 with
+/// several host candidates must answer each phone from the candidate address it talks to, or the
+/// browser drops the reply). `IP_PKTINFO`'s `ipi_spec_dst` sets the source; no `src` (or an IPv6
+/// destination) is a plain send. Non-blocking: a full buffer is `WouldBlock`.
+pub fn try_send_from(
+    socket: &tokio::net::UdpSocket,
+    buf: &[u8],
+    dest: SocketAddr,
+    src: Option<Ipv4Addr>,
+) -> io::Result<usize> {
+    let (SocketAddr::V4(dest), Some(src)) = (dest, src) else {
+        return socket.try_send_to(buf, dest);
+    };
+    let fd = socket.as_raw_fd();
+    socket.try_io(Interest::WRITABLE, || sendmsg_from(fd, buf, dest, src))
+}
+
+fn sendmsg_from(fd: RawFd, buf: &[u8], dest: SocketAddrV4, src: Ipv4Addr) -> io::Result<usize> {
+    // SAFETY: plain-old-data structs, zero is a valid value for each.
+    let mut to: libc::sockaddr_in = unsafe { zeroed() };
+    to.sin_family = libc::AF_INET as libc::sa_family_t;
+    to.sin_port = dest.port().to_be();
+    to.sin_addr.s_addr = u32::from(*dest.ip()).to_be();
+    let mut iov = libc::iovec {
+        iov_base: buf.as_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+    let mut control = Control([0; 64]);
+    // SAFETY: as above.
+    let mut msg: libc::msghdr = unsafe { zeroed() };
+    msg.msg_name = (&mut to as *mut libc::sockaddr_in).cast();
+    msg.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.0.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE only computes a size.
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::in_pktinfo>() as u32) } as _;
+    // SAFETY: the control buffer (64 bytes, aligned) holds one in_pktinfo cmsg; the header and its
+    // data are written inside it.
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::IPPROTO_IP;
+        (*cmsg).cmsg_type = libc::IP_PKTINFO;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<libc::in_pktinfo>() as u32) as _;
+        let mut info: libc::in_pktinfo = zeroed();
+        info.ipi_spec_dst.s_addr = u32::from(src).to_be();
+        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut libc::in_pktinfo, info);
+    }
+    // SAFETY: msg points at live buffers sized as declared; the fd is the caller's socket.
+    let n = unsafe { libc::sendmsg(fd, &msg, 0) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
 /// One warning for a truncated control message (the buffer holds `IP_PKTINFO` with room to spare).
 static CTRUNC_WARNED: AtomicBool = AtomicBool::new(false);
 

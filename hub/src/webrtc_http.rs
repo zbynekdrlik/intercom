@@ -3,32 +3,70 @@
 //!
 //! - `GET /api/phone` -> `{"transport": "webrtc" | "janus"}`: the page's transport seam. A hub
 //!   without the webrtc leg says `janus` (the page then behaves exactly as before);
-//! - `POST /api/phone/offer {sdp, display}` -> `{id, sdp}` (400 bad body / offer, 413 too large,
-//!   503 every slot taken or no webrtc leg);
-//! - `POST /api/phone/<id>/display {display}` -> 204 (404 unknown id);
-//! - `DELETE /api/phone/<id>` -> 204 (404 unknown id).
+//! - `POST /api/phone/offer {sdp, display, replaces?}` -> `{id, sdp}` (415 not JSON, 429 rate
+//!   limited, 413 too large, 400 bad body / offer, 503 no slot or no webrtc leg);
+//! - `POST /api/phone/<id>/display {display}` -> 204 (415, 404 unknown id);
+//! - `DELETE /api/phone/<id>` -> 204, also for an id the hub already dropped (the page never logs
+//!   a 404 for a phone that left by itself).
 //!
-//! The body is read with a hard limit ([`MAX_SIGNAL_BODY_BYTES`]) before any parsing.
+//! The route is public (cloudflared, no credential), so an offer is checked in the cheapest order:
+//! the content type (a page elsewhere cannot send JSON without a CORS preflight, and the hub
+//! answers none), the per-client rate limit, the body limit, the slot (on the media task), and only
+//! then the SDP parse, the DTLS certificate and the answer, on the blocking pool. Every refusal is
+//! counted on `/api/state`; a warning names the count at most every 10 s.
+
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{header, StatusCode},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
-    Router,
+    Extension, Router,
 };
 
 use crate::webrtc_leg::WebrtcHandle;
 use crate::webrtc_signal::{
-    parse_display_body, parse_offer_body, PhoneId, SignalError, MAX_SIGNAL_BODY_BYTES,
-    TRANSPORT_JANUS, TRANSPORT_WEBRTC,
+    client_key, is_json_content_type, parse_display_body, parse_offer_body, PhoneId, RateLimiter,
+    RefusalLog, SignalError, MAX_SIGNAL_BODY_BYTES, OFFER_BURST, OFFER_PER_S, TRANSPORT_JANUS,
+    TRANSPORT_WEBRTC,
 };
 
-/// The routes' state: the network task's handle, `None` on a hub without the webrtc leg.
+/// The offer route's guards: the per-client rate limit and the refusal log.
+#[derive(Debug)]
+pub struct OfferGuard {
+    pub rate: RateLimiter,
+    pub log: RefusalLog,
+}
+
+/// The routes' state: the network task's handle (`None` on a hub without the webrtc leg) and the
+/// offer guards.
 #[derive(Clone, Debug)]
 pub struct PhoneApi {
     pub leg: Option<WebrtcHandle>,
+    pub guard: Arc<Mutex<OfferGuard>>,
+}
+
+impl PhoneApi {
+    /// The routes for `leg`, with the default offer rate limit.
+    pub fn new(leg: Option<WebrtcHandle>) -> Self {
+        Self::with_rate(leg, RateLimiter::new(OFFER_BURST, OFFER_PER_S))
+    }
+
+    /// The routes with a given rate limiter (the tests use their own).
+    pub fn with_rate(leg: Option<WebrtcHandle>, rate: RateLimiter) -> Self {
+        PhoneApi {
+            leg,
+            guard: Arc::new(Mutex::new(OfferGuard {
+                rate,
+                log: RefusalLog::default(),
+            })),
+        }
+    }
 }
 
 /// The phone signalling routes.
@@ -68,34 +106,95 @@ async fn transport(State(api): State<PhoneApi>) -> Response {
         .into_response()
 }
 
-async fn offer(State(api): State<PhoneApi>, body: Bytes) -> Response {
-    let Some(leg) = api.leg else {
+/// Count a refused offer; at most every 10 s one warning with the count since the last.
+fn count_refusal(api: &PhoneApi, leg: &WebrtcHandle, e: &SignalError, client: &str) {
+    leg.shared.offers_refused.fetch_add(1, Ordering::Relaxed);
+    if *e == SignalError::RateLimited {
+        leg.shared
+            .offers_rate_limited
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let due = api
+        .guard
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .log
+        .note(Instant::now());
+    if let Some(count) = due {
+        tracing::warn!(
+            refused_since_last_line = count,
+            last_reason = %e,
+            last_client = %client,
+            "webrtc: phone offers refused (counted on /api/state webrtc.offers_refused)"
+        );
+    }
+}
+
+async fn offer(
+    State(api): State<PhoneApi>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    body: Bytes,
+) -> Response {
+    let Some(leg) = api.leg.clone() else {
         return refused(SignalError::Unavailable);
     };
-    let req = match parse_offer_body(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            leg.shared
-                .offers_refused
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(error = %e, "webrtc: offer refused");
-            return refused(e);
+    let header_str = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    let client = client_key(
+        headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer.map(|Extension(ConnectInfo(a))| a.ip()),
+    );
+    let checked = (|| {
+        if !is_json_content_type(header_str(header::CONTENT_TYPE)) {
+            return Err(SignalError::UnsupportedMediaType);
         }
+        let allowed = api
+            .guard
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .rate
+            .allow(&client, Instant::now());
+        if !allowed {
+            return Err(SignalError::RateLimited);
+        }
+        parse_offer_body(&body)
+    })();
+    let result = match checked {
+        Ok(req) => leg.offer(req).await,
+        Err(e) => Err(e),
     };
-    match leg.offer(req).await {
+    match result {
         Ok(a) => (
             [(header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({ "id": a.id.to_string(), "sdp": a.sdp })),
         )
             .into_response(),
-        Err(e) => refused(e),
+        Err(e) => {
+            count_refusal(&api, &leg, &e, &client);
+            refused(e)
+        }
     }
 }
 
-async fn display(State(api): State<PhoneApi>, Path(id): Path<String>, body: Bytes) -> Response {
+async fn display(
+    State(api): State<PhoneApi>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(leg) = api.leg else {
         return refused(SignalError::Unavailable);
     };
+    if !is_json_content_type(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    ) {
+        return refused(SignalError::UnsupportedMediaType);
+    }
     let Some(id) = PhoneId::parse(&id) else {
         return refused(SignalError::UnknownPhone);
     };
@@ -113,8 +212,9 @@ async fn leave(State(api): State<PhoneApi>, Path(id): Path<String>) -> Response 
     let Some(leg) = api.leg else {
         return refused(SignalError::Unavailable);
     };
+    // Not an id at all: nothing to leave, and nothing worth an error either.
     let Some(id) = PhoneId::parse(&id) else {
-        return refused(SignalError::UnknownPhone);
+        return StatusCode::NO_CONTENT.into_response();
     };
     match leg.close(id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),

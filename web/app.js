@@ -258,6 +258,10 @@ let iceTimer = null;
 // The native (in-hub WebRTC) session, intercom#42: its PeerConnection and the id the hub gave it.
 let nativePc = null;
 let phoneId = null;
+// The id of this page's last native session that the hub answered: the next offer names it as
+// `replaces`, so the hub counts a reconnect as an established phone, never as one of the
+// anonymous offers it caps (intercom#42 review).
+let lastPhoneId = null;
 
 // The live PeerConnection of either transport (the media watchdog and the mic read it).
 function currentPc() {
@@ -396,7 +400,11 @@ async function startNative(my, iceServers) {
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sdp: pc.localDescription.sdp, display: displayName() }),
+        body: JSON.stringify({
+          sdp: pc.localDescription.sdp,
+          display: displayName(),
+          ...(lastPhoneId ? { replaces: lastPhoneId } : {}),
+        }),
         signal: ctl ? ctl.signal : undefined,
       });
     } finally {
@@ -410,6 +418,7 @@ async function startNative(my, iceServers) {
       return;
     }
     phoneId = body.id;
+    lastPhoneId = body.id;
     joined = true;
     await pc.setRemoteDescription({ type: "answer", sdp: body.sdp });
   } catch (e) {
@@ -1251,7 +1260,9 @@ document.addEventListener("visibilitychange", () => {
 });
 setInterval(renderReconnectCountdown, 500);
 // Closing or leaving the page frees the phone's slot on the hub at once (intercom#42).
-window.addEventListener("pagehide", () => {
+// A page that goes into the back/forward cache (`persisted`) keeps its PeerConnection: no leave.
+window.addEventListener("pagehide", (e) => {
+  if (e.persisted) return;
   if (nativePc && phoneId) {
     leaveHub(phoneId);
     phoneId = null;

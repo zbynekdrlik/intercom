@@ -1434,22 +1434,56 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   ~60 ms on localhost).
 - **Config** (`webrtc_signal::WebrtcConfig`, `deny_unknown_fields`): `[webrtc]` `udp_bind`
   (default `0.0.0.0:6992`, a fixed port, never a Dante address), `host_ips` (default: the bind's IP
-  when specific, else every up IPv4 of the box minus loopback, link-local and the Dante leg),
+  when specific, else the box's LAN addresses only, `is_lan_candidate`: RFC 1918 IPv4 on a real
+  interface, never loopback, link-local, 100.64/10 (the tailnet), a public address, a
+  `docker`/`br-`/`veth`/`virbr`/`tailscale`/`tun`/`wg`... interface or the Dante leg; the answer
+  goes to anonymous POSTers, so it must not leak an internal address),
   `max_phones` (default 16, 1..=64), `turn` RESERVED (any value fails the load until phase 3).
   `Matrix::from_toml`: `webrtc` only on role `phones`, 2 in / 2 out, at most one, never together
   with a `janus` participant, and the table iff the adapter.
 - **Signalling** (`webrtc_http.rs`, merged next to `http::router`, so `AppState` is unchanged):
   `GET /api/phone` -> `{"transport":"webrtc"|"janus"}` (a hub without the leg says `janus`);
-  `POST /api/phone/offer {sdp, display}` -> `{id, sdp}` (400 bad body / offer, 413 over 16 KiB of
-  SDP, 503 all slots taken); `POST /api/phone/<id>/display` and `DELETE /api/phone/<id>` -> 204 /
-  404. The id is 128 random bits (32 hex) from `/dev/urandom` and is the phone's only credential:
-  `/api/state` shows its first 8 characters.
+  `POST /api/phone/offer {sdp, display, replaces?}` -> `{id, sdp}`; `POST /api/phone/<id>/display`
+  -> 204 / 404; `DELETE /api/phone/<id>` -> 204 ALWAYS (an id the hub already dropped too, so the
+  page never logs a 404). The id is 128 random bits (32 hex) from `/dev/urandom` and is the phone's
+  only credential: `/api/state` shows its first 8 characters.
+- **The offer route is public** (cloudflared, no credential; review round 1 🔴1, 🟡3, 🟡4). It
+  checks in the cheapest order: `Content-Type: application/json` or 415 (a page elsewhere then
+  needs a CORS preflight, which the hub never answers), a token bucket per client or 429
+  (`RateLimiter`, 5 at once then one per 2 s; key `client_key`: `CF-Connecting-IP`, else the LAST
+  `X-Forwarded-For` hop, the one the box's nginx appended, else the TCP peer), the body limits (413
+  / 400), then a slot on the media task (`Reserve`, 503), and only then the SDP parse, the DTLS
+  certificate and the answer on the blocking pool (`RtcFactory::answer` in `spawn_blocking`), the
+  ready `Rtc` handed back (`Adopt`; a failed build `Release`s; a reservation nobody adopts is freed
+  after 5 s). Offers whose phone has not connected may hold at most `pending_cap` = half the slots;
+  an offer whose `replaces` names a live phone (dropped at once, "replaced by its reconnect") or
+  one connected within the last 120 s (`RECENT_WINDOW`) is a reconnect and is not held to that cap,
+  so a flood never locks out a reconnecting phone. The PWA sends its last id as `replaces`. Every
+  refusal counts in `offers_refused` (`offers_rate_limited` for the 429s); a warning names the
+  count at most every 10 s (`RefusalLog`), never a line per request.
 - **Network task** (`webrtc_leg.rs`, tokio): ONE UDP socket, every phone's `Rtc`; `IP_PKTINFO`
   gives each datagram's destination (str0m needs it to pair a local candidate) and the Dante guard
-  drops the Dante leg first; `Rtc::accepts` demuxes. Opus only (`clear_codecs` + `enable_opus`),
-  frame mode; the decoder is `janus_codec::RxDecoder` (FEC + PLC) on the packet's seq. A phone is
-  dropped on leave, ICE `Disconnected`, a dead `Rtc`, an rtc error, or no connection 20 s after its
-  offer; its slot frees with a new generation, so a late packet never reaches the next phone.
+  drops the Dante leg first; `Rtc::accepts` demuxes. Every send names its source
+  (`pktinfo::try_send_from`, `IP_PKTINFO` `ipi_spec_dst` = str0m's `Transmit::source`), so a
+  0.0.0.0 bind with several host IPs answers each phone from the address it talks to. Opus only
+  (`clear_codecs` + `enable_opus`), frame mode; the decoder is `janus_codec::RxDecoder` (FEC + PLC)
+  on the packet's seq.
+- **ICE-lite (review round 1 🔴2).** `set_ice_lite(true)`: the hub never sends a connectivity
+  check, it only answers the phone's, so an anonymous offer cannot aim it at a third address (full
+  ICE checked every offer candidate, up to 100 pairs: a reflector / LAN scanner). The offer's
+  candidates are filtered anyway (`filter_offer_candidates`: UDP, port >= 1024, unicast, not the
+  hub's own, at most 8; `.local` kept). str0m's lite agent drops a pair 15 s after its last check
+  (`RECENT_BINDING_REQUEST`), which is the "ICE disconnected" drop of a vanished phone. **Phase 3
+  (TURN) stays lite:** the hub's relayed candidate goes into the answer like a host one, the hub
+  creates a TURN permission per plausible offer candidate address (that is what the filter keeps
+  them for) and answers the phone's checks that arrive through the relay; it still never initiates
+  a check.
+- **Slot deadlines.** A phone's slot is held 3 s (`STUN_DEADLINE`) for its first valid STUN
+  binding request (`is_stun` + `Rtc::accepts`), then 10 s (`CONNECT_DEADLINE`) for ICE + DTLS. A
+  phone is also dropped on leave, ICE `Disconnected`, a dead `Rtc`, an rtc error or its replace;
+  its slot frees with a new generation, so a late packet never reaches the next phone. Each packet
+  carries its room tick and the RTP time is `(tick - first tick) x 960` (`rtp_time_for`), so a
+  packet the full queue dropped still moves the phone's clock on.
 - **phones-room thread** (`webrtc_room.rs`, "phones-room", `PaceSchedule` 20 ms): takes H from the
   phones bus ring the block loop feeds (the same `PacedRing` the Janus sender pops; the block loop
   now feeds `phones_ring = (pid, ring)` whichever leg runs), each phone's mic from its own
@@ -1460,7 +1494,8 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   pushes the ring (unchanged) and clones the facet's `Arc`.
 - **`/api/state` `webrtc`** (top level, omitted without the leg; `WebrtcStateRef` serializes the
   shared counters when the snapshot is serialized): udp_bind, host_candidates, max_phones,
-  phones_connected, sessions_started/ended, offers_refused, rx_refused, room_ticks/packets/dropped/
+  phones_connected, phones_pending, sessions_started/ended, offers_refused, offers_rate_limited,
+  rx_refused, room_ticks/packets/dropped/
   encode_errors, bus_underflows/overflow_trims/rate_ppm/asrc_phase_frames, tx_interval_ms_sd/max,
   and per phone id (8 hex), display, slot, ice_state, connected, age_s, rx/tx_packets,
   rx_lost_frames, mic_active (a packet above ~-60 dBFS within 1 s: a disabled track sends digital
@@ -1472,18 +1507,26 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   servers when TURN is on), one `sendrecv` audio transceiver with an empty sender (or the kept mic
   on a reconnect), offer POSTed after ICE gathering (3 s at most), the answer applied; mic ON =
   `replaceTrack`, OFF = `track.enabled = false`, never a renegotiation; teardown closes the pc and
-  `DELETE`s (keepalive), `pagehide` too. The backoff, the generation counter, `MEDIA_STALL_MS` and
+  `DELETE`s (keepalive), `pagehide` too unless `persisted` (a back/forward-cache page keeps its
+  PeerConnection); the next offer names the last id as `replaces`. The backoff, the generation counter, `MEDIA_STALL_MS` and
   the UX are shared; the janus path is byte-for-byte the old flow (stub_hub.py answers
   `/api/phone` janus).
 - **Tests:** `hub/tests/webrtc_signal_42.rs` (config, matrix, ids, limits, slots),
   `webrtc_room_42.rs` (N-1 with a distinct tone per phone graded by a Hann-windowed Goertzel: own
   tone < -90 dB pure / < -50 dB after Opus; the hub hears every phone and never the bus; slot
   generations), `webrtc_leg_42.rs` (a str0m CLIENT against the real network task + room over
-  localhost: tone both ways, 503 / 413 / 400 / 404 / rename / leave frees the slot), and the
+  localhost: tone both ways, 503 / 413 / 404 / rename / leave frees the slot, the flood (10
+  never-connecting offers from 10 addresses hold only the pending cap; a reconnect with `replaces`
+  is admitted during it; a new phone connects once the flood's slots expire after 3 s), 415 and the
+  per-client 429, an offer naming a foreign address that never gets a datagram, the RTP tick
+  arithmetic, `is_stun`), and the
   Playwright `webrtc` project (`webrtc.spec.js` + `webrtc-hub.js` + `webrtc.toml`, the REAL
   binary on the base port + 4..6, started and SIGKILLed by the spec itself): two phones, a VBAN tone
   reaches both meters, A's fake mic reaches B and never A, mic OFF silences B, rename, a closed page
-  frees its slot by DELETE and a vanished one by ICE, a killed hub is reconnected by itself. The
+  frees its slot by DELETE, a vanished one (the renderer crashed with CDP `Page.crash`, which never
+  answers, so it is not awaited) by ICE (`why="ICE disconnected"` read from the run's hub.log;
+  closing the context instead would fire pagehide -> DELETE), a killed hub is reconnected by itself
+  (the outage window for console lines ends once the page is connected again). The
   spec serves one still frame for `/interkom.mjpeg` (this hub has no `[video]`; its 503 would be a
   console line). During the kill window only `Failed to load resource: net::ERR_CONNECTION_REFUSED`
   lines are allowed; outside it the console must be empty.
