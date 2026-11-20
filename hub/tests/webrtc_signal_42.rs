@@ -9,10 +9,10 @@ use intercom_hub::matrix::{Matrix, ADAPTER_WEBRTC};
 use intercom_hub::webrtc_http::transport_json;
 use intercom_hub::webrtc_signal::{
     clean_display, client_key, filter_offer_candidates, is_json_content_type, is_lan_candidate,
-    parse_display_body, parse_offer_body, pending_cap, PhoneId, RateLimiter, RefusalLog,
-    SignalError, SlotTable, WebrtcConfig, DEFAULT_DISPLAY, DEFAULT_MAX_PHONES, DEFAULT_UDP_BIND,
-    MAX_DISPLAY_CHARS, MAX_OFFER_CANDIDATES, MAX_SDP_BYTES, MAX_SIGNAL_BODY_BYTES, OFFER_BURST,
-    OFFER_PER_S,
+    offer_rate, parse_display_body, parse_offer_body, pending_cap, PhoneId, RateLimiter,
+    RefusalLog, SignalError, SlotTable, WebrtcConfig, DEFAULT_DISPLAY, DEFAULT_MAX_PHONES,
+    DEFAULT_UDP_BIND, MAX_DISPLAY_CHARS, MAX_OFFER_CANDIDATES, MAX_SDP_BYTES,
+    MAX_SIGNAL_BODY_BYTES,
 };
 
 fn hub_toml(phones_role: &str, phones_adapter: &str, ch: (usize, usize), extra: &str) -> String {
@@ -377,28 +377,49 @@ fn unconnected_offers_may_hold_at_most_half_the_slots() {
 }
 
 #[test]
-fn the_rate_limit_is_a_token_bucket_per_client() {
+fn the_rate_limit_is_a_token_bucket_per_client_sized_for_a_whole_crew() {
+    // Review round 3: a venue's crew shares ONE key through cloudflared, so a hub of N slots lets N
+    // fresh offers in at once from one key, then one a second.
+    assert_eq!(offer_rate(16), (16.0, 1.0));
+    assert_eq!(offer_rate(2), (5.0, 1.0), "never under 5");
+    let (burst, per_s) = offer_rate(16);
     let t0 = Instant::now();
-    let mut r = RateLimiter::new(OFFER_BURST, OFFER_PER_S);
-    for _ in 0..5 {
-        assert!(r.allow("cf:203.0.113.1", t0));
+    let mut r = RateLimiter::new(burst, per_s);
+    for _ in 0..16 {
+        assert!(r.allow("203.0.113.1", t0));
     }
-    assert!(!r.allow("cf:203.0.113.1", t0), "the burst is spent");
+    assert!(!r.allow("203.0.113.1", t0), "the burst is spent");
     assert!(
-        r.allow("cf:203.0.113.2", t0),
+        r.allow("203.0.113.2", t0),
         "another client has its own bucket"
     );
-    assert!(!r.allow("cf:203.0.113.1", t0 + Duration::from_millis(1900)));
+    assert!(!r.allow("203.0.113.1", t0 + Duration::from_millis(900)));
     assert!(
-        r.allow("cf:203.0.113.1", t0 + Duration::from_millis(2000)),
-        "one every 2 s"
+        r.allow("203.0.113.1", t0 + Duration::from_millis(1000)),
+        "one a second"
     );
     // A long pause refills to the burst, never beyond it.
     let later = t0 + Duration::from_secs(3600);
-    for _ in 0..5 {
-        assert!(r.allow("cf:203.0.113.1", later));
+    for _ in 0..16 {
+        assert!(r.allow("203.0.113.1", later));
     }
-    assert!(!r.allow("cf:203.0.113.1", later));
+    assert!(!r.allow("203.0.113.1", later));
+}
+
+#[test]
+fn a_peek_spends_nothing_and_a_spend_takes_exactly_one_token() {
+    let t0 = Instant::now();
+    let mut r = RateLimiter::new(2.0, 0.001);
+    for _ in 0..10 {
+        assert!(r.peek("k", t0), "looking never spends");
+    }
+    r.spend("k", t0);
+    assert!(r.peek("k", t0));
+    r.spend("k", t0);
+    assert!(!r.peek("k", t0), "two spends empty a 2-token bucket");
+    r.spend("k", t0); // a spend on an empty bucket is a no-op, never a debt
+    assert!(!r.allow("k", t0));
+    assert!(r.allow("k", t0 + Duration::from_secs(1000)), "it refills");
 }
 
 #[test]
@@ -452,6 +473,21 @@ fn the_client_key_trusts_headers_only_from_the_boxs_own_nginx_and_cloudflared() 
     );
     // A v4-mapped peer is its IPv4 address.
     assert_eq!(client_key(None, None, ip("::ffff:10.77.9.7")), "10.77.9.7");
+    // Canonical before the loopback checks (review round 3): a v4-mapped loopback peer is the
+    // box's nginx, and a v4-mapped loopback hop is cloudflared.
+    let mapped_lo = ip("::ffff:127.0.0.1");
+    assert_eq!(
+        client_key(None, Some("10.77.9.50"), mapped_lo),
+        "10.77.9.50"
+    );
+    assert_eq!(
+        client_key(Some("203.0.113.9"), Some("::ffff:127.0.0.1"), lo),
+        "203.0.113.9"
+    );
+    assert_eq!(
+        client_key(Some("::ffff:203.0.113.9"), Some("127.0.0.1"), lo),
+        "203.0.113.9"
+    );
 }
 
 #[test]

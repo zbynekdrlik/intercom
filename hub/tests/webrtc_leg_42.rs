@@ -151,10 +151,12 @@ fn run_client(
         run_for,
         stop,
         id_out: Arc::new(Mutex::new(None)),
+        ..Default::default()
     })
 }
 
 /// How a test phone offers.
+#[derive(Default)]
 struct ClientOpts {
     base: String,
     display: String,
@@ -166,6 +168,11 @@ struct ClientOpts {
     stop: Arc<AtomicBool>,
     /// The phone's id, as soon as the hub answered.
     id_out: Arc<Mutex<Option<String>>>,
+    /// Arrive as a phone through cloudflared -> the box's nginx with this CF-Connecting-IP.
+    client_ip: Option<String>,
+    /// Retry a 429 / 503 every 300 ms until this long has passed (the page's backoff); none =
+    /// the first answer must be 200.
+    retry_for: Option<Duration>,
 }
 
 fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
@@ -177,6 +184,8 @@ fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
         run_for,
         stop,
         id_out,
+        client_ip,
+        retry_for,
     } = o;
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let local = socket.local_addr().unwrap();
@@ -202,7 +211,15 @@ fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
     if let Some(r) = replaces {
         body["replaces"] = serde_json::json!(r);
     }
-    let resp = reqwest::blocking_post(&format!("{base}/api/phone/offer"), &body);
+    let url = format!("{base}/api/phone/offer");
+    let deadline = Instant::now() + retry_for.unwrap_or_default();
+    let resp = loop {
+        let r = reqwest::blocking_post(&url, &body, client_ip.as_deref());
+        if r.0 == 200 || Instant::now() >= deadline || !matches!(r.0, 429 | 503) {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
     assert_eq!(resp.0, 200, "offer answered: {}", resp.1);
     let v: serde_json::Value = serde_json::from_str(&resp.1).unwrap();
     let id = v["id"].as_str().unwrap().to_string();
@@ -280,18 +297,20 @@ fn run_client_with(o: ClientOpts) -> (String, ClientRun) {
 
 /// A tiny blocking HTTP client over reqwest's async one (the hub's own dependency).
 mod reqwest {
-    pub fn blocking_post(url: &str, body: &serde_json::Value) -> (u16, String) {
+    pub fn blocking_post(url: &str, body: &serde_json::Value, cf: Option<&str>) -> (u16, String) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         rt.block_on(async {
-            let r = ::reqwest::Client::new()
-                .post(url)
-                .json(body)
-                .send()
-                .await
-                .unwrap();
+            let mut req = ::reqwest::Client::new().post(url).json(body);
+            if let Some(cf) = cf {
+                // As cloudflared -> the box's nginx -> the hub delivers a phone.
+                req = req
+                    .header("x-forwarded-for", "127.0.0.1")
+                    .header("cf-connecting-ip", cf);
+            }
+            let r = req.send().await.unwrap();
             let s = r.status().as_u16();
             (s, r.text().await.unwrap())
         })
@@ -525,6 +544,7 @@ async fn an_offer_flood_never_locks_out_a_reconnecting_or_a_new_phone() {
                 run_for: Duration::from_secs(30),
                 stop,
                 id_out,
+                ..Default::default()
             })
         }
     });
@@ -561,6 +581,7 @@ async fn an_offer_flood_never_locks_out_a_reconnecting_or_a_new_phone() {
                 run_for: Duration::from_secs(30),
                 stop,
                 id_out: Arc::new(Mutex::new(None)),
+                ..Default::default()
             })
         }
     });
@@ -654,6 +675,7 @@ async fn an_offer_naming_a_foreign_address_gets_no_datagram_from_the_hub() {
                 run_for: Duration::from_secs(3),
                 stop: Arc::new(AtomicBool::new(false)),
                 id_out: Arc::new(Mutex::new(None)),
+                ..Default::default()
             })
         }
     })
@@ -729,6 +751,7 @@ fn spawn_phone(base: &str, display: &str, replaces: Option<String>) -> RunningPh
                 run_for: Duration::from_secs(30),
                 stop,
                 id_out,
+                ..Default::default()
             })
         }
     });
@@ -877,4 +900,190 @@ fn a_failing_send_warns_once_per_run_and_notes_the_recovery() {
     assert_eq!(f.ok(), Some(3), "the recovery names the count");
     assert_eq!(f.ok(), None);
     assert_eq!(f.fail(), Some(4), "a new failing run warns again");
+}
+
+/// The venue's Wi-Fi: every phone reaches the hub through cloudflared with ONE public address.
+const VENUE_IP: &str = "203.0.113.200";
+
+fn spawn_venue_phone(
+    base: &str,
+    display: String,
+    replaces: Option<String>,
+    retry_for: Option<Duration>,
+) -> RunningPhone {
+    let stop = Arc::new(AtomicBool::new(false));
+    let id_out = Arc::new(Mutex::new(None));
+    let h = tokio::task::spawn_blocking({
+        let (base, stop, id_out) = (base.to_string(), stop.clone(), id_out.clone());
+        move || {
+            run_client_with(ClientOpts {
+                base,
+                display,
+                replaces,
+                run_for: Duration::from_secs(60),
+                stop,
+                id_out,
+                client_ip: Some(VENUE_IP.to_string()),
+                retry_for,
+                ..Default::default()
+            })
+        }
+    });
+    (stop, id_out, h)
+}
+
+// Review round 3 🔴: a whole crew behind the venue's one address all connect, all reconnect at
+// once, and a flood of fresh offers from that same address neither exceeds the pending cap nor
+// knocks a connected phone off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_whole_crew_behind_one_address_connects_and_reconnects_at_once() {
+    let hub = start_hub(16).await; // the production limiter: burst 16, 1/s; pending cap 8
+    let base = hub.base.clone();
+
+    // 16 phones open the page at once; the per-client pending cap (3) and the hub-wide one (8)
+    // pace them, the page's retry (here every 300 ms) brings every one in.
+    let mut phones: Vec<RunningPhone> = (0..16)
+        .map(|i| spawn_venue_phone(&base, format!("K{i}"), None, Some(Duration::from_secs(20))))
+        .collect();
+    wait_for("16 phones connected", 30, || {
+        hub.shared.snapshot().phones_connected == 16
+    })
+    .await;
+    let ids: Vec<String> = phones
+        .iter()
+        .map(|(_, id, _)| id.lock().unwrap().clone().unwrap())
+        .collect();
+
+    // A network blip: every page drops its session and comes back AT ONCE naming its old id. No
+    // retry: each reconnect must be admitted on its first try (no token, no pending cap).
+    for (stop, _, _) in &phones {
+        stop.store(true, Ordering::Relaxed);
+    }
+    for (_, _, h) in phones.drain(..) {
+        h.await.unwrap();
+    }
+    let refused_before = hub.shared.snapshot().offers_refused;
+    let phones: Vec<RunningPhone> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, old)| spawn_venue_phone(&base, format!("K{i}"), Some(old.clone()), None))
+        .collect();
+    wait_for("16 phones reconnected", 30, || {
+        let f = hub.shared.snapshot();
+        f.phones_connected == 16 && f.phones.len() == 16
+    })
+    .await;
+    assert_eq!(
+        hub.shared.snapshot().offers_refused,
+        refused_before,
+        "no reconnect was refused"
+    );
+
+    // A flood of fresh offers from the same address: the table is full of connected phones, and
+    // nothing of the flood ever holds a slot or knocks one of them off.
+    let mut codes = Vec::new();
+    for _ in 0..20 {
+        codes.push(post_as(&base, VENUE_IP, serde_json::json!({"sdp": silent_offer()})).await);
+    }
+    assert!(codes.iter().all(|c| *c == 503 || *c == 429), "{codes:?}");
+    let f = hub.shared.snapshot();
+    assert_eq!(f.phones_connected, 16);
+    assert!(f.phones_pending <= 8, "{f:?}");
+    for (stop, _, _) in &phones {
+        stop.store(true, Ordering::Relaxed);
+    }
+    for (_, _, h) in phones {
+        h.await.unwrap();
+    }
+}
+
+// The same address with free slots: fresh offers are still bounded by the per-client pending
+// cap and the hub-wide one, and a connected phone of that address is never refused a reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_from_the_venues_address_stays_inside_the_pending_caps() {
+    let hub = start_hub(16).await;
+    let base = hub.base.clone();
+    let (stop_a, id_a, ha) = spawn_venue_phone(&base, "A".into(), None, None);
+    wait_for("A connected", 5, || {
+        hub.shared.snapshot().phones_connected == 1
+    })
+    .await;
+    let a_old = id_a.lock().unwrap().clone().unwrap();
+    let mut codes = Vec::new();
+    for _ in 0..20 {
+        codes.push(post_as(&base, VENUE_IP, serde_json::json!({"sdp": silent_offer()})).await);
+    }
+    assert_eq!(codes.iter().filter(|c| **c == 200).count(), 3, "{codes:?}");
+    assert!(codes.iter().all(|c| *c == 200 || *c == 429), "{codes:?}");
+    assert_eq!(hub.shared.snapshot().phones_pending, 3);
+    // A reconnects during the flood: admitted at once.
+    stop_a.store(true, Ordering::Relaxed);
+    ha.await.unwrap();
+    let (stop_a2, _, ha2) = spawn_venue_phone(&base, "A".into(), Some(a_old), None);
+    wait_for("A back", 5, || {
+        hub.shared
+            .snapshot()
+            .phones
+            .iter()
+            .any(|p| p.display == "A" && p.connected)
+    })
+    .await;
+    stop_a2.store(true, Ordering::Relaxed);
+    ha2.await.unwrap();
+}
+
+// Review round 3 🟡: a reconnect claim spent on an offer that never connects (or never gets an
+// answer) comes back, so the flaky phone's next try is still a reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_spent_on_an_offer_that_never_connects_comes_back() {
+    let hub = start_hub(4).await; // pending cap 2
+    let base = hub.base.clone();
+    let (stop, id, h) = spawn_phone(&base, "A", None);
+    wait_for("A connected", 5, || {
+        hub.shared.snapshot().phones_connected == 1
+    })
+    .await;
+    let a_id = id.lock().unwrap().clone().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    h.await.unwrap();
+
+    // The reconnect's offer is answered but its phone never connects (3 s STUN deadline).
+    let claim = serde_json::json!({"sdp": silent_offer(), "replaces": a_id});
+    assert_eq!(post_as(&base, "198.51.100.60", claim.clone()).await, 200);
+    wait_for("the silent reconnect ends", 5, || {
+        hub.shared.snapshot().phones.is_empty()
+    })
+    .await;
+    fill_pending(&hub, 70).await;
+    assert_eq!(
+        post_as(&base, "198.51.100.61", claim.clone()).await,
+        200,
+        "the claim came back: still a reconnect, past the full pending cap"
+    );
+
+    // A reconnect whose SDP fails to build (400) gives its claim back too.
+    wait_for("the slots expire", 5, || {
+        hub.shared.snapshot().phones.is_empty()
+    })
+    .await;
+    fill_pending(&hub, 80).await;
+    let broken = serde_json::json!({"sdp": "v=0 nonsense", "replaces": a_id});
+    assert_eq!(post_as(&base, "198.51.100.62", broken).await, 400);
+    assert_eq!(post_as(&base, "198.51.100.63", claim).await, 200);
+}
+
+// Review round 3 🟡: one phone whose sends fail never makes the healthy ones log.
+#[test]
+fn send_failures_are_per_phone() {
+    use intercom_hub::webrtc_leg::SendFailures;
+    let (mut bad, mut good) = (SendFailures::default(), SendFailures::default());
+    let mut lines = 0;
+    for _ in 0..50 {
+        lines += usize::from(bad.fail().is_some());
+        lines += usize::from(good.ok().is_some());
+    }
+    assert_eq!(
+        lines, 1,
+        "one warning for the failing phone, nothing per packet"
+    );
 }
