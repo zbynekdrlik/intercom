@@ -487,7 +487,10 @@ async fn the_allocation_refreshes_and_rotates_its_credential_against_coturn() {
     let f = hub.shared.snapshot().turn.unwrap();
     assert!(f.refreshes >= 2, "coturn accepted the refreshes: {f:?}");
     assert_eq!(f.failures, 0, "{f:?}");
-    // A new credential with no phone on the relay: released and allocated again under hub-b.
+    let first_local = f.local.clone();
+    assert!(first_local.is_some(), "{f:?}");
+    // A new credential with no phone on the relay: hub-b allocates on a NEW socket first, then
+    // the switch, then hub-a's allocation is released on its own (old) socket.
     hub.handle
         .set_turn_credentials(creds(&turn, "hub-b", "pw-b"))
         .await
@@ -495,8 +498,9 @@ async fn the_allocation_refreshes_and_rotates_its_credential_against_coturn() {
     let f = wait_allocated(&hub, 2).await;
     assert_eq!(
         f.failures, 0,
-        "the release came before the new Allocate (no 437): {f:?}"
+        "the new allocation's own socket never meets a 437: {f:?}"
     );
+    assert_ne!(f.local, first_local, "a new local socket: {f:?}");
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let g = hub.shared.snapshot().turn.unwrap();
     assert_eq!(g.state, "allocated");
