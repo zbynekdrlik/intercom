@@ -122,20 +122,54 @@ cutter-adjustable per-source level control on the hub. Design: comment 700832355
 ## The tray icon `intercom-tray` (owner 19.11.2026: "ikonka na otvorenie dole v bare")
 
 - **What:** `tray/` (its own Cargo workspace, see `.claude/rules/release-ci.md`), dstack's dtray
-  pattern: `tray-icon` =0.21.2 without default features + `gtk` =0.18.2 / `glib` =0.18.5. The strih
+  pattern: `tray-icon` =0.21.2 without default features + `gtk` =0.18.2 / `glib` =0.18.5, plus the
+  mix window's `wry` / `webkit2gtk` (below). The strih
   boxes run Xorg + openbox with tint2's systray, where dtray's icon already shows (camera-box
   19.11.2026). AppIndicator gives no click on the icon itself, so the page opens from the menu.
 - **Menu:** the status line (`Hub v<x> beží` / `Hub nedostupný (<why>)`, read from the control
   listener's `/api/version` every 2 s on its own thread, with a loopback `Host` for the rebinding
   guard), **Otvoriť hlasitosti**, **Kopírovať URL**, **Ukončiť ikonu (hub beží ďalej)**. The icon is
   drawn in code: headphones, green while the hub answers, grey otherwise.
-- **Open:** `lib::choose_launch`: Firefox `--new-window` first (the boxes' only browser is the snap
-  `/snap/bin/firefox`; `/snap/bin` is searched even off `PATH`), then Chrome / Chromium `--app=`,
-  then `xdg-open`. The choice and the launcher's exit are logged.
+- **Open = the tray's own mix window (intercom#39, owner 20.11.2026: "ten firefox v okne so
+  zalozkami je poriadny hnus").** `src/linux_mix.rs`: a plain `gtk::Window` titled `Interkom — mix`
+  (the headphone icon, WM_CLASS `intercom-tray`, a normal window = its own taskbar entry) holding
+  wry's WebKitGTK 4.1 WebView (`wry =0.57.1` without default features + `os-webview`,
+  `webkit2gtk =2.0.2`, both on gtk 0.18) built with `build_gtk` into the tray's own GTK loop: no
+  tao, no second loop or thread (design comment 7038134606). No tabs, no address bar.
+  - A second Open raises the same window (`present`, deiconify; a hidden one is moved back to its
+    last place first). Closing it (`delete-event`) only hides it; the tray keeps running.
+  - Size + position: `$XDG_STATE_HOME/intercom-tray/window.json` (else
+    `~/.local/state/intercom-tray/`; a relative `XDG_STATE_HOME` is ignored), written 1 s after a
+    move/resize, on close and on Exit (temp file + rename); restored through `mix_window::place`:
+    the monitor its centre is on, else centred on the primary; size within 360x280 .. the
+    monitor's work area; pulled fully onto it. A broken file = the default 900x700, centred.
+  - GOTCHA: hiding a GTK window emits a configure-event whose `position()` is GTK's stale FIRST
+    position; the handler ignores a configure while `!is_visible()`, or the close overwrote the
+    saved place (caught by the xvfb smoke, 20.11.2026).
+  - The page down (WebKit `load-failed`, except `NetworkError::Cancelled`, which every replaced
+    load raises) -> `mix_window::error_page` (Slovak "Hub sa nedá otvoriť … Skúšam znova o 3 s…",
+    the URL and WebKit's reason, escaped) and a reload of the URL every `RETRY` (3 s).
+  - Fallback: the WebView fails to build -> one error line and the old browser launch
+    (`lib::choose_launch`: Firefox `--new-window`, the snap `/snap/bin/firefox` even off `PATH`, then
+    Chrome / Chromium `--app=`, then `xdg-open`) from then on (`mix_window::open_action`). Limit: the
+    binary LINKS `libwebkit2gtk-4.1.so.0` (+ soup 3, JSC 4.1) like GTK, so a box without
+    `libwebkit2gtk-4.1-0` cannot start the tray at all; strih-snv has 2.52.6 (read 20.11.2026).
+  - `--open` shows the window at start too (the smoke run uses it).
+  - Build: CI's tray job installs `libwebkit2gtk-4.1-dev`; `release.yml` installs the runtime
+    `libwebkit2gtk-4.1-0` before its `intercom-tray --version` check (the runner image lacks it).
+  - Local smoke (dev1 has xvfb-run, openbox, xdotool, ImageMagick `import`): a script FILE run by
+    `xvfb-run -a -s '-screen 0 1920x1080x24'` that starts `openbox`, the tray with `--open` and
+    `XDG_RUNTIME_DIR` / `XDG_STATE_HOME` in a scratch dir, a `python3 -m http.server` page started
+    late (the retry), `xdotool windowmove/windowsize`, close with `windowactivate` + `key alt+F4`
+    (openbox sends WM_DELETE; `xdotool windowclose` DESTROYS the window instead), then a restart.
+    WebKit's `libEGL warning: ... DRI3` lines under Xvfb are noise. No systray host under Xvfb, so
+    the menu's second Open (the raise) is checked live only.
 - **URL:** `--url` (default `http://127.0.0.1:8791/`), refused unless `http://<loopback>:<port>`.
   One tray per session (`$XDG_RUNTIME_DIR/intercom-tray.lock`).
 - **Ships** in the hub tarball; camera-box installs and starts it as a session app like
   `dtray.service` (its `strih-session-apps.sh`).
 - **Tests:** `tray/tests/tray_34.rs` (the URL, the browser order on the boxes' real layout, the
-  status read against a local listener, the icon, the lock path, the version equal to the root's).
+  status read against a local listener, the icon, the lock path, the version equal to the root's);
+  `tray/tests/tray_39.rs` (the window title, the state path / text / file round trip and failures,
+  the placement on monitors, raise vs create vs browser, the Slovak error page and its escaping).
 

@@ -17,10 +17,8 @@ fn r(x: i32, y: i32, width: i32, height: i32) -> Rect {
 
 /// A fresh empty directory under the target dir (no tempfile crate in this workspace).
 fn fresh_dir(name: &str) -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "tray39-{name}-{}",
-        std::process::id()
-    ));
+    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tray39-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -39,12 +37,16 @@ fn the_state_lives_under_xdg_state_home_else_the_homes_local_state() {
     );
     assert_eq!(
         state_path(None, Some(Path::new("/home/c"))),
-        Some(PathBuf::from("/home/c/.local/state/intercom-tray/window.json"))
+        Some(PathBuf::from(
+            "/home/c/.local/state/intercom-tray/window.json"
+        ))
     );
     // The XDG spec: a relative XDG_STATE_HOME is invalid and ignored.
     assert_eq!(
         state_path(Some(Path::new("rel/dir")), Some(Path::new("/home/c"))),
-        Some(PathBuf::from("/home/c/.local/state/intercom-tray/window.json"))
+        Some(PathBuf::from(
+            "/home/c/.local/state/intercom-tray/window.json"
+        ))
     );
     assert_eq!(state_path(Some(Path::new("")), None), None);
     assert_eq!(state_path(None, None), None);

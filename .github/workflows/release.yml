@@ -49,6 +49,15 @@ jobs:
           name: intercom-tray-linux-amd64
           path: target/release
 
+      # intercom#39: intercom-tray links WebKitGTK 4.1 (its mix window), which the runner image
+      # lacks, so its `--version` below would not even start without it. The runtime package only,
+      # with the tray job's apt retry.
+      - name: WebKitGTK runtime for intercom-tray --version
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends libwebkit2gtk-4.1-0
+
       - name: The binary reports the tag's version and loads every TOML
         env:
           TAG: ${{ inputs.tag }}
