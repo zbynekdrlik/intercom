@@ -85,6 +85,11 @@ struct Args {
     #[arg(long, default_value = CLOUDFLARE_TURN_API, hide = true)]
     turn_api: String,
 
+    /// TESTS ONLY (the forced-relay E2E, whose peers are loopback addresses): let the hub's TURN
+    /// relay ask permissions for non-global IPv4 peers. A production hub never does.
+    #[arg(long, hide = true)]
+    turn_private_peers: bool,
+
     /// Only load and check the routing TOML (`--config`) and exit: 0 = this hub binary runs it,
     /// non-zero names why not (issue 1438: setup-strih installs a new routing file only when the
     /// installed hub loads it, so an older hub never crash-loops on an adapter it does not know).
@@ -268,7 +273,13 @@ async fn main() -> Result<()> {
         &args.turn_api,
     ));
     turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
-    let (phone_leg, webrtc_state) = match start_webrtc_leg(&matrix, &jitter, &dante_guard, &turn)? {
+    let (phone_leg, webrtc_state) = match start_webrtc_leg(
+        &matrix,
+        &jitter,
+        &dante_guard,
+        &turn,
+        args.turn_private_peers,
+    )? {
         Some(leg) => {
             phones_ring = Some((leg.phones_id, leg.ring));
             (Some(leg.handle), Some(leg.state))
@@ -601,6 +612,7 @@ fn start_webrtc_leg(
     jitter: &Arc<Mutex<Vec<JitterBuffer>>>,
     dante_guard: &Arc<DanteGuard>,
     turn: &Arc<TurnMinter>,
+    turn_private_peers: bool,
 ) -> Result<Option<WebrtcLeg>> {
     use intercom_hub::webrtc_leg::{
         local_ipv4_addrs, start_webrtc_turn, TurnFeed, WebrtcLegConfig, WebrtcShared,
@@ -649,7 +661,10 @@ fn start_webrtc_leg(
             dante_guard: dante_guard.clone(),
         },
         feed,
-        TurnOptions::for_phones(cfg.max_phones),
+        TurnOptions {
+            allow_private_peers: turn_private_peers,
+            ..TurnOptions::for_phones(cfg.max_phones)
+        },
     )?;
     let room = PhonesRoom::new(RoomIo {
         bus: ring.clone(),

@@ -10,19 +10,23 @@
 //!
 //! - **One allocation** (UDP over UDP, the long-term credential: an unsigned Allocate gets 401 with
 //!   REALM + NONCE, the signed one the relayed address), refreshed at half its lifetime (or
-//!   `refresh_cap`), a 438 stale nonce retried once with the new nonce. A failure (an error answer,
-//!   no answer after the retransmissions, a lost allocation) backs off 1 s -> 60 s and allocates
-//!   again. One log line per state change, never per packet.
+//!   `refresh_cap`), a 438 stale nonce retried once with the new nonce, kept alive by a STUN
+//!   Binding request whenever nothing went to the server for [`TURN_KEEPALIVE`] (the venue NAT's
+//!   mapping). A refused or unanswered Allocate backs off 1 s -> 60 s. A LOST allocation (a 437 or
+//!   no answer on any other request, an expiry) is allocated again at once (`lost`), or refreshed
+//!   back when the server turns out to still hold it (`Readopt`). One log line per state change,
+//!   never per packet.
 //! - **A credential rotation** (a new username from the minter) RELEASES the allocation with the
 //!   OLD credential (RFC 5766 §6.2: a request on an allocation signed by another username is 441;
 //!   the same 5-tuple cannot hold a second allocation, 437) and allocates with the new one. While a
 //!   phone is on the relay that waits, but never past [`TURN_ROTATE_MARGIN`] before the old
 //!   credential expires.
 //! - **Permissions per IP** (`set_wanted`: the plausible addresses of the live phones' offers),
-//!   IPv4 only, at most `max_permissions`, refreshed every [`TURN_PERMISSION_REFRESH`] only while
-//!   wanted; the server lets a permission lapse after 300 s once the hub stops refreshing it.
+//!   global IPv4 only, at most `max_permissions`, refreshed every [`TURN_PERMISSION_REFRESH`] only
+//!   while wanted; the server lets a permission lapse after 300 s once the hub stops refreshing it.
 //! - **Sends** (`send_to`): a Send indication, and once a ChannelBind for that peer succeeded,
-//!   ChannelData (4 bytes of header instead of 36), at most `max_channels`. Never to a peer without
+//!   ChannelData (4 bytes of header instead of 36), at most `max_channels` live; a departed peer's
+//!   channel is remembered [`TURN_CHANNEL_REMEMBER`] and reused. Never to a peer without
 //!   a permitted IP. **Receives** (`handle_datagram`): Data indications and ChannelData unwrap to
 //!   (peer, payload) for str0m; responses drive the state machine; anything else is dropped.
 //!
@@ -35,7 +39,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,14 +48,14 @@ use rtc_stun::error_code::ErrorCodeAttribute;
 use rtc_stun::fingerprint::FINGERPRINT;
 use rtc_stun::integrity::MessageIntegrity;
 use rtc_stun::message::{
-    is_stun_message, Getter, Message, MessageType, Setter, TransactionId, CLASS_ERROR_RESPONSE,
-    CLASS_INDICATION, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE, METHOD_CHANNEL_BIND,
-    METHOD_CREATE_PERMISSION, METHOD_DATA, METHOD_REFRESH, METHOD_SEND,
+    is_stun_message, Getter, Message, MessageType, Setter, TransactionId, BINDING_REQUEST,
+    CLASS_ERROR_RESPONSE, CLASS_INDICATION, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE,
+    METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_DATA, METHOD_REFRESH, METHOD_SEND,
 };
 use rtc_stun::textattrs::TextAttribute;
 use rtc_turn::crypto::RTCCryptoProvider;
 use rtc_turn::proto::chandata::ChannelData;
-use rtc_turn::proto::channum::{ChannelNumber, MAX_CHANNEL_NUMBER, MIN_CHANNEL_NUMBER};
+use rtc_turn::proto::channum::{ChannelNumber, MIN_CHANNEL_NUMBER};
 use rtc_turn::proto::data::Data;
 use rtc_turn::proto::lifetime::Lifetime;
 use rtc_turn::proto::peeraddr::PeerAddress;
@@ -79,8 +83,6 @@ pub const TURN_TX_TIMEOUT: Duration = Duration::from_millis(7500);
 const TX_SENDS_MS: [u64; 4] = [0, 500, 1500, 3500];
 /// A refused permission is asked again after this (no tight loop on a 403).
 const PERMISSION_RETRY: Duration = Duration::from_secs(60);
-/// A refresh that got no answer is tried again this soon (while the allocation lives).
-const REFRESH_RETRY: Duration = Duration::from_secs(5);
 /// After a release, a 437 (the server still holds the old allocation: coturn drops it on its next
 /// timer pass, 1-3 s on dev1) is the release settling, not a failure, for this long.
 pub const TURN_RELEASE_SETTLE: Duration = Duration::from_secs(10);
@@ -90,6 +92,21 @@ const RELEASE_RETRY: Duration = Duration::from_millis(500);
 const MAX_NONCE_RETRIES: u8 = 2;
 /// The default TURN port (RFC 5766).
 pub const TURN_DEFAULT_PORT: u16 = 3478;
+/// While nothing else goes to the TURN server for this long, a STUN Binding request does (review
+/// of phase 3): the venue's CGNAT / conntrack drops an idle UDP mapping in 30-180 s, and the only
+/// other idle traffic is the Refresh every 300 s. Its answer (or its absence) also proves the
+/// allocation's 5-tuple still reaches the server.
+pub const TURN_KEEPALIVE: Duration = Duration::from_secs(15);
+/// The last channel number (RFC 8656 §12: 0x4000 through 0x4FFF; 0x5000-0x7FFF are reserved).
+pub const TURN_MAX_CHANNEL_NUMBER: u16 = 0x4FFF;
+/// A departed peer's channel is remembered this long after its last bind: the server keeps the
+/// binding 600 s and refuses its number / peer to another binding for 300 s more (RFC 8656 §12).
+pub const TURN_CHANNEL_REMEMBER: Duration = Duration::from_secs(900);
+/// A refused ChannelBind is tried again after this (Send indications meanwhile).
+pub const TURN_CHANNEL_RETRY: Duration = Duration::from_secs(30);
+/// A lost allocation is allocated again at once, unless another was lost this recently (then the
+/// back-off applies: no tight loop against a server that keeps losing it).
+pub const TURN_LOSS_AT_ONCE_WINDOW: Duration = Duration::from_secs(60);
 
 /// One credential set for the hub's allocation. `Debug` never prints the password.
 #[derive(Clone, PartialEq, Eq)]
@@ -122,6 +139,10 @@ pub struct TurnOptions {
     /// Refresh the allocation at least this often (tests; production refreshes at half the
     /// lifetime).
     pub refresh_cap: Option<Duration>,
+    /// Ask permissions for non-global IPv4 peers too (RFC 1918, 100.64/10, link-local, loopback).
+    /// TESTS ONLY (coturn and its peers on 127.0.0.x): a production hub never asks for them, a
+    /// public TURN service refuses them (403) and a phone on the LAN reaches a host candidate.
+    pub allow_private_peers: bool,
 }
 
 impl TurnOptions {
@@ -133,6 +154,7 @@ impl TurnOptions {
             max_permissions: (n * crate::webrtc_signal::MAX_OFFER_CANDIDATES).clamp(8, 512),
             max_channels: (n * 2).clamp(2, 128),
             refresh_cap: None,
+            allow_private_peers: false,
         }
     }
 }
@@ -281,6 +303,11 @@ enum TxKind {
     },
     Permission(IpAddr),
     ChannelBind(SocketAddr, u16),
+    /// A STUN Binding request: the idle relay's NAT keepalive.
+    Keepalive,
+    /// A Refresh of an allocation the hub took for lost but the server still holds (its Allocate
+    /// got 437 right after the loss): the relayed address it had.
+    Readopt(SocketAddr),
 }
 
 struct Tx {
@@ -310,9 +337,25 @@ struct Chan {
     number: u16,
     ready: bool,
     in_flight: bool,
-    failed: bool,
+    /// A refused bind: Send indications until then, then the bind is tried again.
+    failed_until: Option<Instant>,
     bound_at: Instant,
     last_used: Instant,
+    /// Its peer's IP is no longer wanted: kept (number and all) for [`TURN_CHANNEL_REMEMBER`].
+    departed: bool,
+}
+
+/// A global unicast IPv4 address: not RFC 1918, 100.64/10, link-local, loopback, unspecified,
+/// broadcast or multicast.
+fn is_global_v4(ip: Ipv4Addr) -> bool {
+    let shared = ip.octets()[0] == 100 && (ip.octets()[1] & 0xC0) == 64;
+    !(ip.is_private()
+        || shared
+        || ip.is_link_local()
+        || ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast())
 }
 
 /// The hub's TURN client (see the module doc).
@@ -332,8 +375,15 @@ pub struct TurnRelay {
     wanted: HashSet<IpAddr>,
     perms: HashMap<IpAddr, Perm>,
     chans: HashMap<SocketAddr, Chan>,
+    /// number -> peer, for the inbound ChannelData.
+    chan_peer: HashMap<u16, SocketAddr>,
     next_channel: u16,
     out: VecDeque<Vec<u8>>,
+    /// When the last datagram went to the TURN server (the keepalive's clock).
+    last_sent: Instant,
+    /// When an allocation was last lost, and its relayed address.
+    last_loss: Option<Instant>,
+    lost_relayed: Option<SocketAddr>,
     backoff: Duration,
     retry_at: Option<Instant>,
     /// When the last release (a rotation) was answered.
@@ -375,8 +425,12 @@ impl TurnRelay {
             wanted: HashSet::new(),
             perms: HashMap::new(),
             chans: HashMap::new(),
+            chan_peer: HashMap::new(),
             next_channel: MIN_CHANNEL_NUMBER,
             out: VecDeque::new(),
+            last_sent: Instant::now(),
+            last_loss: None,
+            lost_relayed: None,
             backoff: TURN_BACKOFF_MIN,
             retry_at: None,
             released_at: None,
@@ -502,13 +556,15 @@ impl TurnRelay {
         }
     }
 
-    /// The peer IPs the live phones may send from. IPv4 only, at most `max_permissions`; the
-    /// rest is counted in `permissions_refused`. IPs no longer wanted lose their permission (and
-    /// channels) here: the hub stops refreshing them.
+    /// The peer IPs the live phones may send from. Global IPv4 only (non-global ones only with
+    /// the test-only `allow_private_peers`), at most `max_permissions`; the rest is counted in
+    /// `permissions_refused`. IPs no longer wanted lose their permission here (the hub stops
+    /// refreshing it); their channels are kept as departed for [`TURN_CHANNEL_REMEMBER`].
     pub fn set_wanted(&mut self, ips: impl IntoIterator<Item = IpAddr>, now: Instant) {
         let mut wanted = HashSet::new();
         for ip in ips {
-            if !ip.is_ipv4() || wanted.contains(&ip) {
+            let IpAddr::V4(v4) = ip else { continue };
+            if wanted.contains(&ip) || (!self.opts.allow_private_peers && !is_global_v4(v4)) {
                 continue;
             }
             if wanted.len() >= self.opts.max_permissions {
@@ -524,16 +580,71 @@ impl TurnRelay {
             ));
         }
         self.perms.retain(|ip, _| wanted.contains(ip));
-        let chans_before = self.chans.len();
-        self.chans.retain(|peer, _| wanted.contains(&peer.ip()));
-        if self.chans.len() != chans_before {
-            tracing::debug!(
-                dropped = chans_before - self.chans.len(),
-                "webrtc turn: channels of departed peers dropped"
-            );
+        for (peer, c) in &mut self.chans {
+            if !wanted.contains(&peer.ip()) {
+                c.departed = true;
+            }
         }
         self.wanted = wanted;
+        self.prune_channels(now);
         self.ask_permissions(now);
+    }
+
+    /// Forget the departed channels the server no longer holds (or never bound), and keep the
+    /// table bounded: at most 4 x `max_channels` entries, the oldest departed go first.
+    fn prune_channels(&mut self, now: Instant) {
+        let before = self.chans.len();
+        self.chans.retain(|_, c| {
+            !c.departed
+                || ((c.ready || c.in_flight)
+                    && now.saturating_duration_since(c.bound_at) < TURN_CHANNEL_REMEMBER)
+        });
+        let cap = self.opts.max_channels.saturating_mul(4).max(1);
+        while self.chans.len() > cap {
+            let oldest = self
+                .chans
+                .iter()
+                .filter(|(_, c)| c.departed)
+                .min_by_key(|(_, c)| c.bound_at)
+                .map(|(p, _)| *p);
+            match oldest {
+                Some(p) => {
+                    self.chans.remove(&p);
+                }
+                None => break,
+            }
+        }
+        if self.chans.len() != before {
+            let live: HashSet<u16> = self.chans.values().map(|c| c.number).collect();
+            self.chan_peer.retain(|n, _| live.contains(n));
+            tracing::debug!(
+                forgotten = before - self.chans.len(),
+                "webrtc turn: departed channels forgotten"
+            );
+        }
+    }
+
+    /// A channel number no remembered channel holds, in 0x4000..=0x4FFF.
+    fn free_channel_number(&mut self) -> Option<u16> {
+        let span = usize::from(TURN_MAX_CHANNEL_NUMBER - MIN_CHANNEL_NUMBER) + 1;
+        for _ in 0..span {
+            let n = self.next_channel;
+            self.next_channel = if n >= TURN_MAX_CHANNEL_NUMBER {
+                MIN_CHANNEL_NUMBER
+            } else {
+                n + 1
+            };
+            if !self.chan_peer.contains_key(&n) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// A datagram for the TURN server.
+    fn emit(&mut self, d: Vec<u8>, now: Instant) {
+        self.out.push_back(d);
+        self.last_sent = now;
     }
 
     fn start_allocate(&mut self, now: Instant) {
@@ -546,6 +657,7 @@ impl TurnRelay {
             p.next_at = now;
         }
         self.chans.clear();
+        self.chan_peer.clear();
         self.next_channel = MIN_CHANNEL_NUMBER;
         if self.creds.is_none() {
             self.enter(TurnPhase::Waiting);
@@ -566,9 +678,28 @@ impl TurnRelay {
             p.in_flight = false;
         }
         self.chans.clear();
+        self.chan_peer.clear();
         self.retry_at = Some(now + self.backoff);
         self.enter(TurnPhase::Backoff);
         self.backoff = (self.backoff * 2).min(TURN_BACKOFF_MAX);
+    }
+
+    /// The allocation is gone (a 437, no answer, an expiry, a refused refresh): allocate again AT
+    /// ONCE, unless one was already lost within [`TURN_LOSS_AT_ONCE_WINDOW`] (then back off).
+    fn lost(&mut self, reason: String, now: Instant) {
+        let recent = self
+            .last_loss
+            .is_some_and(|l| now.saturating_duration_since(l) < TURN_LOSS_AT_ONCE_WINDOW);
+        self.last_loss = Some(now);
+        self.lost_relayed = self.alloc.as_ref().map(|a| a.relayed);
+        if recent {
+            self.fail(reason, now);
+            return;
+        }
+        self.failures += 1;
+        tracing::warn!(error = %reason, "webrtc turn: the allocation is lost, allocating again at once (counted on /api/state webrtc.turn.failures)");
+        self.last_error = Some(reason);
+        self.start_allocate(now);
     }
 
     fn build(&self, kind: &TxKind) -> Result<Message, String> {
@@ -585,6 +716,11 @@ impl TurnRelay {
             TxKind::Refresh { lifetime } => {
                 setters.push(Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)));
                 setters.push(Box::new(Lifetime(*lifetime)));
+                true
+            }
+            TxKind::Readopt(_) => {
+                setters.push(Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)));
+                setters.push(Box::new(Lifetime(TURN_REQUEST_LIFETIME)));
                 true
             }
             TxKind::Permission(ip) => {
@@ -606,6 +742,10 @@ impl TurnRelay {
                 }));
                 setters.push(Box::new(ChannelNumber(*number)));
                 true
+            }
+            TxKind::Keepalive => {
+                setters.push(Box::new(BINDING_REQUEST));
+                false
             }
         };
         let crypto = self.crypto.crypto();
@@ -638,7 +778,7 @@ impl TurnRelay {
     fn request_retry(&mut self, kind: TxKind, now: Instant, nonce_retries: u8) {
         match self.build(&kind) {
             Ok(m) => {
-                self.out.push_back(m.raw.clone());
+                self.emit(m.raw.clone(), now);
                 self.txs.insert(
                     m.transaction_id,
                     Tx {
@@ -678,6 +818,7 @@ impl TurnRelay {
                     at(a.refresh_at);
                 }
                 at(a.expires_at);
+                at(self.last_sent + TURN_KEEPALIVE);
                 for p in self.perms.values() {
                     if !p.in_flight {
                         at(p.next_at);
@@ -698,15 +839,19 @@ impl TurnRelay {
     pub fn handle_timeout(&mut self, now: Instant, busy: bool) {
         // Retransmit, or give up on, the requests in flight.
         let mut timed_out = Vec::new();
+        let mut resent = Vec::new();
         for (id, tx) in &mut self.txs {
             if let Some(ms) = TX_SENDS_MS.get(tx.sends) {
                 if now >= tx.started + Duration::from_millis(*ms) {
-                    self.out.push_back(tx.raw.clone());
+                    resent.push(tx.raw.clone());
                     tx.sends += 1;
                 }
             } else if now >= tx.started + TURN_TX_TIMEOUT {
                 timed_out.push(*id);
             }
+        }
+        for d in resent {
+            self.emit(d, now);
         }
         for id in timed_out {
             if let Some(tx) = self.txs.remove(&id) {
@@ -726,7 +871,7 @@ impl TurnRelay {
                 None => (false, false),
             };
             if expired {
-                self.fail("the allocation expired without a refresh".into(), now);
+                self.lost("the allocation expired without a refresh".into(), now);
                 return;
             }
             if refresh {
@@ -742,6 +887,14 @@ impl TurnRelay {
             }
             self.ask_permissions(now);
             self.refresh_channels(now);
+            self.prune_channels(now);
+            let keepalive_out = self
+                .txs
+                .values()
+                .any(|t| matches!(t.kind, TxKind::Keepalive));
+            if !keepalive_out && now >= self.last_sent + TURN_KEEPALIVE {
+                self.request(TxKind::Keepalive, now);
+            }
         }
     }
 
@@ -781,24 +934,22 @@ impl TurnRelay {
                 self.fail("allocate: no answer from the TURN server".into(), now);
             }
             TxKind::Refresh { lifetime } if lifetime.is_zero() => self.released(now),
+            // Any other request unanswered after its retransmissions: the server no longer
+            // hears this 5-tuple (a dropped NAT mapping, a lost allocation). Allocate again.
             TxKind::Refresh { .. } => {
-                self.last_error = Some("refresh: no answer from the TURN server".into());
-                if let Some(a) = self.alloc.as_mut() {
-                    a.refreshing = false;
-                    a.refresh_at = now + REFRESH_RETRY;
-                }
+                self.lost("refresh: no answer from the TURN server".into(), now);
             }
-            TxKind::Permission(ip) => {
-                if let Some(p) = self.perms.get_mut(&ip) {
-                    p.in_flight = false;
-                    p.next_at = now + REFRESH_RETRY;
-                }
+            TxKind::Permission(_) => {
+                self.lost("permission: no answer from the TURN server".into(), now);
             }
-            TxKind::ChannelBind(peer, _) => {
-                if let Some(c) = self.chans.get_mut(&peer) {
-                    c.in_flight = false;
-                    c.failed = !c.ready;
-                }
+            TxKind::ChannelBind(..) => {
+                self.lost("channel bind: no answer from the TURN server".into(), now);
+            }
+            TxKind::Keepalive => {
+                self.lost("keepalive: no answer from the TURN server".into(), now);
+            }
+            TxKind::Readopt(_) => {
+                self.fail("refresh of the held allocation: no answer".into(), now);
             }
         }
     }
@@ -853,11 +1004,8 @@ impl TurnRelay {
                 ..Default::default()
             };
             cd.decode().ok()?;
-            let peer = self
-                .chans
-                .iter()
-                .find(|(_, c)| c.number == cd.number.0 && (c.ready || c.in_flight))
-                .map(|(p, _)| *p)?;
+            // Any channel the hub bound, a departed peer's too (the server still delivers it).
+            let peer = *self.chan_peer.get(&cd.number.0)?;
             self.rx_packets += 1;
             return Some((peer, cd.data));
         }
@@ -915,7 +1063,50 @@ impl TurnRelay {
             self.enter(TurnPhase::Releasing);
             return;
         }
+        // Our Allocate got 437 right after we took the allocation for lost (a request went
+        // unanswered for a few seconds, the server did not lose it): the server still holds it
+        // for this 5-tuple. Refresh it and carry on with its relayed address, instead of waiting
+        // out its lifetime (~10 min) in back-off.
+        let readopt = self.lost_relayed.filter(|_| {
+            self.last_loss
+                .is_some_and(|l| now.saturating_duration_since(l) < TURN_LOSS_AT_ONCE_WINDOW)
+        });
+        if let (437, TxKind::Allocate { .. }, Some(relayed), true) =
+            (code, &tx.kind, readopt, self.key.is_some())
+        {
+            tracing::info!(%relayed, "webrtc turn: the server still holds the allocation, refreshing it");
+            self.request(TxKind::Readopt(relayed), now);
+            return;
+        }
         match tx.kind {
+            TxKind::Readopt(relayed) => {
+                if !ok {
+                    self.fail(
+                        format!("refresh of the held allocation refused: {reason}"),
+                        now,
+                    );
+                    return;
+                }
+                let mut l = Lifetime::default();
+                let lifetime = if l.get_from(m).is_ok() && !l.0.is_zero() {
+                    l.0
+                } else {
+                    TURN_REQUEST_LIFETIME
+                };
+                self.lost_relayed = None;
+                self.alloc = Some(Allocation {
+                    relayed,
+                    lifetime,
+                    expires_at: now + lifetime,
+                    refresh_at: now + self.refresh_interval(lifetime),
+                    refreshing: false,
+                });
+                self.refreshes += 1;
+                self.backoff = TURN_BACKOFF_MIN;
+                self.retry_at = None;
+                self.enter(TurnPhase::Allocated);
+                self.ask_permissions(now);
+            }
             TxKind::Allocate { signed: false } => {
                 if code == 401 {
                     let realm = TextAttribute::get_from_as(m, ATTR_REALM).map(|t| t.text);
@@ -959,7 +1150,7 @@ impl TurnRelay {
             TxKind::Refresh { lifetime } if lifetime.is_zero() => self.released(now),
             TxKind::Refresh { .. } => {
                 if !ok {
-                    self.fail(format!("refresh refused: {reason}"), now);
+                    self.lost(format!("refresh refused: {reason}"), now);
                     return;
                 }
                 let mut l = Lifetime::default();
@@ -969,7 +1160,7 @@ impl TurnRelay {
                     TURN_REQUEST_LIFETIME
                 };
                 if granted.is_zero() {
-                    self.fail("refresh: the server ended the allocation".into(), now);
+                    self.lost("refresh: the server ended the allocation".into(), now);
                     return;
                 }
                 let refresh_at = now + self.refresh_interval(granted);
@@ -981,6 +1172,13 @@ impl TurnRelay {
                 }
                 self.refreshes += 1;
             }
+            TxKind::Permission(ip) if code == 437 => {
+                self.lost(format!("permission for {ip}: {reason}"), now);
+            }
+            TxKind::ChannelBind(peer, _) if code == 437 => {
+                self.lost(format!("channel bind for {peer}: {reason}"), now);
+            }
+            TxKind::Keepalive => {}
             TxKind::Permission(ip) => {
                 let Some(p) = self.perms.get_mut(&ip) else {
                     return; // no longer wanted
@@ -1004,11 +1202,12 @@ impl TurnRelay {
                     c.in_flight = false;
                     if ok {
                         c.ready = true;
+                        c.failed_until = None;
                         c.bound_at = now;
                     } else {
                         c.ready = false;
-                        c.failed = true;
-                        tracing::debug!(%peer, %reason, "webrtc turn: channel bind refused, Send indications go on");
+                        c.failed_until = Some(now + TURN_CHANNEL_RETRY);
+                        tracing::debug!(%peer, %reason, "webrtc turn: channel bind refused, Send indications until it is tried again");
                     }
                 }
             }
@@ -1046,6 +1245,7 @@ impl TurnRelay {
             refreshing: false,
         });
         self.allocations += 1;
+        self.lost_relayed = None;
         self.backoff = TURN_BACKOFF_MIN;
         self.retry_at = None;
         self.enter(TurnPhase::Allocated);
@@ -1069,37 +1269,47 @@ impl TurnRelay {
             self.tx_refused += 1;
             return Err("no TURN permission for the peer");
         }
+        let live = self.chans.values().filter(|c| !c.departed).count();
+        let mut bind = None;
         if let Some(c) = self.chans.get_mut(&peer) {
+            // A returning peer takes its remembered channel back (the server still holds it).
+            c.departed = false;
+            c.last_used = now;
             if c.ready {
-                c.last_used = now;
                 let mut cd = ChannelData {
                     data: payload.to_vec(),
                     number: ChannelNumber(c.number),
                     ..Default::default()
                 };
                 cd.encode();
-                self.out.push_back(cd.raw);
+                self.emit(cd.raw, now);
                 self.tx_packets += 1;
                 return Ok(());
             }
-        } else if self.chans.len() < self.opts.max_channels {
-            let number = self.next_channel;
-            self.next_channel = if number >= MAX_CHANNEL_NUMBER {
-                MIN_CHANNEL_NUMBER
-            } else {
-                number + 1
-            };
-            self.chans.insert(
-                peer,
-                Chan {
-                    number,
-                    ready: false,
-                    in_flight: true,
-                    failed: false,
-                    bound_at: now,
-                    last_used: now,
-                },
-            );
+            if !c.in_flight && c.failed_until.is_none_or(|u| now >= u) {
+                c.in_flight = true;
+                c.failed_until = None;
+                bind = Some(c.number);
+            }
+        } else if live < self.opts.max_channels {
+            if let Some(number) = self.free_channel_number() {
+                self.chans.insert(
+                    peer,
+                    Chan {
+                        number,
+                        ready: false,
+                        in_flight: true,
+                        failed_until: None,
+                        bound_at: now,
+                        last_used: now,
+                        departed: false,
+                    },
+                );
+                self.chan_peer.insert(number, peer);
+                bind = Some(number);
+            }
+        }
+        if let Some(number) = bind {
             self.request(TxKind::ChannelBind(peer, number), now);
         }
         let mut m = Message::new();
@@ -1116,9 +1326,15 @@ impl TurnRelay {
             self.tx_refused += 1;
             return Err("cannot encode a Send indication");
         }
-        self.out.push_back(m.raw);
+        self.emit(m.raw, now);
         self.tx_packets += 1;
         Ok(())
+    }
+
+    /// A transmit str0m wanted to send from a relayed address that is not (or no longer) the
+    /// live one: dropped, counted here (`tx_refused`).
+    pub fn refuse(&mut self) {
+        self.tx_refused += 1;
     }
 
     /// The `/api/state` facet.
@@ -1138,7 +1354,11 @@ impl TurnRelay {
             last_error: self.last_error.clone(),
             permissions: self.perms.values().filter(|p| p.permitted).count(),
             permissions_refused: self.permissions_refused,
-            channels: self.chans.values().filter(|c| !c.failed).count(),
+            channels: self
+                .chans
+                .values()
+                .filter(|c| !c.departed && c.failed_until.is_none())
+                .count(),
             rx_packets: self.rx_packets,
             tx_packets: self.tx_packets,
             tx_refused: self.tx_refused,

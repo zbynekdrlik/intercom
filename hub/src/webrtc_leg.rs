@@ -606,6 +606,44 @@ pub fn start_webrtc_turn(
     Ok((handle, pkt_tx))
 }
 
+/// Where a str0m transmit goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxRoute {
+    /// From a host candidate: the phones' socket, source-addressed.
+    Host,
+    /// From the live relayed address: wrapped for the TURN server.
+    Relay,
+    /// From anything else (an OLD relayed address during or after a re-allocation): dropped and
+    /// counted on the relay's `tx_refused`. Never the host socket: a non-local source address
+    /// there is EINVAL and a false `send_errors` warning (review of phase 3).
+    Drop,
+}
+
+/// The route of a transmit from `source`, given the host candidates and the live relayed address.
+pub fn transmit_route(
+    source: SocketAddr,
+    hosts: &[SocketAddr],
+    relayed: Option<SocketAddr>,
+) -> TxRoute {
+    if relayed == Some(source) {
+        TxRoute::Relay
+    } else if hosts.contains(&source) {
+        TxRoute::Host
+    } else {
+        TxRoute::Drop
+    }
+}
+
+/// A connected phone counts as on the relay (a credential rotation waits) while a datagram came
+/// through the relay within this long. `/api/state` `phones[].pair` is the path of its LAST
+/// datagram (str0m exposes the nominated pair only through its stats events, not cheaply).
+pub const RELAY_BUSY_WINDOW: Duration = Duration::from_secs(30);
+
+/// Whether a phone's last relayed datagram (`last`) is inside [`RELAY_BUSY_WINDOW`].
+pub fn relay_recent(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|t| now.saturating_duration_since(t) <= RELAY_BUSY_WINDOW)
+}
+
 /// The TURN relay's own socket: IPv4, an EPHEMERAL port, every interface. A new port per hub
 /// process is a new 5-tuple at the TURN server, so the predecessor's allocation (never released
 /// after a crash or a kill, kept for its lifetime) cannot answer this process's Allocate with 437.
@@ -773,6 +811,8 @@ struct Phone {
     peers: Vec<IpAddr>,
     /// Whether its last accepted datagram came through the hub's TURN relay (`None` before one).
     via_relay: Option<bool>,
+    /// When its last datagram came through the relay.
+    last_relay_rx: Option<Instant>,
 }
 
 struct PendingReservation {
@@ -980,6 +1020,9 @@ impl NetTask {
         if stun && phone.stun_at.is_none() {
             // accepts() matched the STUN message on this phone's ICE credentials.
             phone.stun_at = Some(now);
+        }
+        if via_relay {
+            phone.last_relay_rx = Some(now);
         }
         if phone.via_relay != Some(via_relay) {
             phone.via_relay = Some(via_relay);
@@ -1228,6 +1271,7 @@ impl NetTask {
             send_fail: SendFailures::default(),
             peers,
             via_relay: None,
+            last_relay_rx: None,
         });
         // Its offer's addresses get a TURN permission now, before its first check comes.
         self.update_turn_wanted(Instant::now());
@@ -1271,7 +1315,7 @@ impl NetTask {
         let busy = self
             .phones
             .iter()
-            .any(|p| p.connected && p.ending.is_none() && p.via_relay == Some(true));
+            .any(|p| p.connected && p.ending.is_none() && relay_recent(p.last_relay_rx, now));
         if let Some(turn) = self.turn.as_mut() {
             turn.handle_timeout(now, busy);
         }
@@ -1285,6 +1329,7 @@ impl NetTask {
             if let Some(t) = poll_phone(
                 phone,
                 &self.socket,
+                &self.candidates,
                 self.turn.as_mut(),
                 &self.slots,
                 &self.shared,
@@ -1506,6 +1551,7 @@ pub fn rtp_time_for(first: u64, tick: u64) -> MediaTime {
 fn poll_phone(
     phone: &mut Phone,
     socket: &tokio::net::UdpSocket,
+    hosts: &[SocketAddr],
     mut turn: Option<&mut TurnRelay>,
     slots: &RoomSlots,
     shared: &WebrtcShared,
@@ -1528,10 +1574,19 @@ fn poll_phone(
                 // From the relayed candidate: wrapped for the TURN server (the relay refuses a
                 // peer its permissions do not cover). str0m only ever answers a check or sends
                 // on a pair the phone validated (ICE-lite).
-                if let Some(relay) = turn.as_deref_mut() {
-                    if relay.relayed() == Some(t.source) {
-                        if let Err(e) = relay.send_to(t.destination, &t.contents, Instant::now()) {
-                            tracing::debug!(phone = %phone.id.short(), dest = %t.destination, error = e, "webrtc turn: relayed send refused");
+                let relayed = turn.as_deref().and_then(TurnRelay::relayed);
+                match transmit_route(t.source, hosts, relayed) {
+                    TxRoute::Host => {}
+                    TxRoute::Relay => {
+                        if let Some(relay) = turn.as_deref_mut() {
+                            // Refused (no permission): counted on `tx_refused`, no line per packet.
+                            let _ = relay.send_to(t.destination, &t.contents, Instant::now());
+                        }
+                        continue;
+                    }
+                    TxRoute::Drop => {
+                        if let Some(relay) = turn.as_deref_mut() {
+                            relay.refuse();
                         }
                         continue;
                     }
