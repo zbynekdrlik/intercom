@@ -76,7 +76,7 @@ async function hubState() {
 }
 
 test("two phones: each hears the cutter's tone, and A's mic reaches B but never A itself", async ({ browser }) => {
-  test.setTimeout(60000);
+  test.setTimeout(90000); // the ICE-quiet drop alone takes ~15 s (str0m's ICE-lite pair timeout)
   const ctxA = await browser.newContext();
   const ctxB = await browser.newContext();
   const a = await ctxA.newPage();
@@ -152,10 +152,21 @@ test("two phones: each hears the cutter's tone, and A's mic reaches B but never 
   await b.close({ runBeforeUnload: true });
   await expect.poll(async () => (await hubState()).webrtc.phones.map((p) => p.display)).toEqual(["Kamera 7"]);
   await ctxB.close();
-  // ... and a phone that vanishes without a word (no unload: a crashed tab, a lost network) is
-  // dropped by the hub once its ICE goes quiet.
-  await ctxA.close();
+  // ... and a phone that vanishes without a word is dropped by the hub once its ICE goes quiet.
+  // The renderer is crashed, so no pagehide, no DELETE and no DTLS close reach the hub: only the
+  // missing STUN checks do (closing the context would fire pagehide -> DELETE).
+  const cdp = await ctxA.newCDPSession(a);
+  // Page.crash never answers (its target is gone), so it is not awaited: the hub sees the
+  // phone's checks stop.
+  cdp.send("Page.crash").catch(() => {});
   await expect.poll(async () => (await hubState()).webrtc.phones.length, { timeout: 30000 }).toBe(0);
+  const ended = fs
+    .readFileSync(path.join(hubCtl.RUN_DIR, "hub.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.includes("phone session ended") && l.includes("Kamera 7"));
+  expect(ended.length, ended.join("\n")).toBe(1);
+  expect(ended[0], "dropped by ICE, not by a leave").toContain('"ICE disconnected"');
+  await ctxA.close();
 });
 
 test("killing the hub and starting it again reconnects the page by itself", async ({ page }) => {
@@ -173,9 +184,11 @@ test("killing the hub and starting it again reconnects the page by itself", asyn
   });
   await page.waitForTimeout(3000); // a few failed attempts against the dead hub
   hub = await hubCtl.startHub();
-  const outageTo = seen.length;
   // Back by itself: the 1 -> 4 s backoff brings it in within seconds, no reload.
   await expectConnected(page, 20000);
+  // The outage ends once the page is connected again: a request refused just before the hub
+  // answered may still be logged after startHub resolved.
+  const outageTo = seen.length;
 
   // And the audio flows again.
   const stopTone = startTone({ port: hubCtl.VBAN_PORT, stream: "prog", channels: 1, hz: 997 });

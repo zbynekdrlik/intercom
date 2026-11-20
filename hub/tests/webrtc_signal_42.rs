@@ -3,13 +3,16 @@
 //! transport seam the page reads.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use intercom_hub::matrix::{Matrix, ADAPTER_WEBRTC};
 use intercom_hub::webrtc_http::transport_json;
 use intercom_hub::webrtc_signal::{
-    clean_display, parse_display_body, parse_offer_body, PhoneId, SignalError, SlotTable,
-    WebrtcConfig, DEFAULT_DISPLAY, DEFAULT_MAX_PHONES, DEFAULT_UDP_BIND, MAX_DISPLAY_CHARS,
-    MAX_SDP_BYTES, MAX_SIGNAL_BODY_BYTES,
+    clean_display, client_key, filter_offer_candidates, is_json_content_type, is_lan_candidate,
+    parse_display_body, parse_offer_body, pending_cap, PhoneId, RateLimiter, RefusalLog,
+    SignalError, SlotTable, WebrtcConfig, DEFAULT_DISPLAY, DEFAULT_MAX_PHONES, DEFAULT_UDP_BIND,
+    MAX_DISPLAY_CHARS, MAX_OFFER_CANDIDATES, MAX_SDP_BYTES, MAX_SIGNAL_BODY_BYTES, OFFER_BURST,
+    OFFER_PER_S,
 };
 
 fn hub_toml(phones_role: &str, phones_adapter: &str, ch: (usize, usize), extra: &str) -> String {
@@ -173,32 +176,6 @@ fn both_deployed_strih_tomls_stay_on_janus_in_this_phase() {
 }
 
 #[test]
-fn host_candidates_come_from_the_config_then_the_bind_then_the_box() {
-    let bind_any: SocketAddr = "0.0.0.0:6992".parse().unwrap();
-    let lo: IpAddr = "127.0.0.1".parse().unwrap();
-    let lan: IpAddr = "10.77.9.202".parse().unwrap();
-    let dante: IpAddr = "169.254.10.2".parse().unwrap();
-    let dante_routed: IpAddr = "192.168.50.2".parse().unwrap();
-    let box_addrs = [lo, lan, dante, dante_routed, lan];
-    let cfg = WebrtcConfig::default();
-    // Discovered: loopback, link-local and the Dante leg out, duplicates once.
-    let got = cfg.candidate_ips(bind_any, &box_addrs, |ip| ip == dante_routed);
-    assert_eq!(got, vec![lan]);
-    // A specific bind is the only candidate.
-    let got = cfg.candidate_ips("127.0.0.1:6992".parse().unwrap(), &box_addrs, |_| false);
-    assert_eq!(got, vec![lo]);
-    // Configured host_ips win over both.
-    let cfg = WebrtcConfig {
-        host_ips: vec![dante_routed],
-        ..WebrtcConfig::default()
-    };
-    assert_eq!(
-        cfg.candidate_ips(bind_any, &box_addrs, |_| true),
-        vec![dante_routed]
-    );
-}
-
-#[test]
 fn phone_ids_are_128_random_bits_in_32_hex() {
     let a = PhoneId::random().unwrap();
     let b = PhoneId::random().unwrap();
@@ -341,4 +318,182 @@ fn the_page_reads_its_transport_from_api_phone() {
         transport_json(false),
         serde_json::json!({"transport": "janus"})
     );
+}
+
+// intercom#42 review 🟡5: the answer goes to anonymous POSTers, so the default host candidates are
+// the box's LAN addresses only.
+#[test]
+fn host_candidates_come_from_the_config_then_the_bind_then_the_lan() {
+    let bind_any: SocketAddr = "0.0.0.0:6992".parse().unwrap();
+    let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+    let box_addrs: Vec<(String, IpAddr)> = [
+        ("lo", "127.0.0.1"),
+        ("enp3s0", "10.77.9.202"),
+        ("enp3s0", "10.77.9.202"),
+        ("enp5s0", "192.168.50.2"), // the Dante NIC (the guard says so)
+        ("enp6s0", "169.254.10.2"), // link-local
+        ("docker0", "172.17.0.1"),
+        ("br-1a2b3c", "172.18.0.1"),
+        ("veth12ab", "172.19.0.1"),
+        ("tailscale0", "100.104.8.125"),
+        ("wlp2s0", "100.64.3.4"), // CGNAT range on a real NIC: still not the LAN
+        ("wlp2s0", "84.16.1.2"),  // a public address
+        ("enp7s0", "172.16.5.5"),
+    ]
+    .iter()
+    .map(|(n, a)| (n.to_string(), ip(a)))
+    .collect();
+    let cfg = WebrtcConfig::default();
+    let got = cfg.candidate_ips(bind_any, &box_addrs, |a| a == ip("192.168.50.2"));
+    assert_eq!(got, vec![ip("10.77.9.202"), ip("172.16.5.5")]);
+    // A specific bind is the only candidate.
+    let got = cfg.candidate_ips("127.0.0.1:6992".parse().unwrap(), &box_addrs, |_| false);
+    assert_eq!(got, vec![ip("127.0.0.1")]);
+    // Configured host_ips win over both.
+    let cfg = WebrtcConfig {
+        host_ips: vec![ip("84.16.1.2")],
+        ..WebrtcConfig::default()
+    };
+    assert_eq!(
+        cfg.candidate_ips(bind_any, &box_addrs, |_| true),
+        vec![ip("84.16.1.2")]
+    );
+    assert!(is_lan_candidate("eth0", ip("192.168.1.10")));
+    assert!(!is_lan_candidate("tun0", ip("10.8.0.2")));
+    assert!(!is_lan_candidate("eth0", ip("::1")));
+}
+
+#[test]
+fn unconnected_offers_may_hold_at_most_half_the_slots() {
+    assert_eq!(pending_cap(16), 8);
+    assert_eq!(pending_cap(4), 2);
+    assert_eq!(pending_cap(3), 1);
+    assert_eq!(pending_cap(1), 1);
+}
+
+#[test]
+fn the_rate_limit_is_a_token_bucket_per_client() {
+    let t0 = Instant::now();
+    let mut r = RateLimiter::new(OFFER_BURST, OFFER_PER_S);
+    for _ in 0..5 {
+        assert!(r.allow("cf:203.0.113.1", t0));
+    }
+    assert!(!r.allow("cf:203.0.113.1", t0), "the burst is spent");
+    assert!(
+        r.allow("cf:203.0.113.2", t0),
+        "another client has its own bucket"
+    );
+    assert!(!r.allow("cf:203.0.113.1", t0 + Duration::from_millis(1900)));
+    assert!(
+        r.allow("cf:203.0.113.1", t0 + Duration::from_millis(2000)),
+        "one every 2 s"
+    );
+    // A long pause refills to the burst, never beyond it.
+    let later = t0 + Duration::from_secs(3600);
+    for _ in 0..5 {
+        assert!(r.allow("cf:203.0.113.1", later));
+    }
+    assert!(!r.allow("cf:203.0.113.1", later));
+}
+
+#[test]
+fn the_rate_limit_key_is_cloudflares_client_then_nginxs_hop_then_the_peer() {
+    let peer: Option<IpAddr> = Some("10.77.9.1".parse().unwrap());
+    assert_eq!(
+        client_key(Some(" 203.0.113.9 "), Some("1.2.3.4"), peer),
+        "cf:203.0.113.9"
+    );
+    // A client cannot pick its key by prepending to X-Forwarded-For: the last hop counts.
+    assert_eq!(
+        client_key(None, Some("6.6.6.6, 10.77.9.50"), peer),
+        "xff:10.77.9.50"
+    );
+    assert_eq!(client_key(Some(""), None, peer), "peer:10.77.9.1");
+    assert_eq!(client_key(None, None, None), "peer:unknown");
+}
+
+#[test]
+fn refused_offers_are_logged_at_most_every_ten_seconds_with_the_count() {
+    let t0 = Instant::now();
+    let mut log = RefusalLog::default();
+    assert_eq!(log.note(t0), Some(1));
+    for i in 1..50 {
+        assert_eq!(log.note(t0 + Duration::from_millis(100 * i)), None);
+    }
+    assert_eq!(log.note(t0 + Duration::from_secs(10)), Some(50));
+    assert_eq!(log.note(t0 + Duration::from_secs(11)), None);
+}
+
+#[test]
+fn only_a_json_body_is_an_offer() {
+    assert!(is_json_content_type(Some("application/json")));
+    assert!(is_json_content_type(Some(
+        "Application/JSON; charset=utf-8"
+    )));
+    assert!(!is_json_content_type(Some("text/plain")));
+    assert!(!is_json_content_type(Some(
+        "application/x-www-form-urlencoded"
+    )));
+    assert!(!is_json_content_type(None));
+    assert_eq!(SignalError::RateLimited.status(), 429);
+    assert_eq!(SignalError::UnsupportedMediaType.status(), 415);
+}
+
+#[test]
+fn an_offer_may_name_the_phones_previous_id() {
+    let id = PhoneId::from_bytes([7; 16]);
+    let body = serde_json::json!({"sdp": "v=0", "replaces": id.to_string()});
+    let req = parse_offer_body(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(req.replaces, Some(id));
+    let body = serde_json::json!({"sdp": "v=0", "replaces": "not an id"});
+    let req = parse_offer_body(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(req.replaces, None, "a malformed claim is no claim");
+}
+
+// intercom#42 review 🔴2: the hub keeps only plausible offer candidates (it is ICE-lite and never
+// checks them anyway; phase 3 uses them for TURN permissions).
+#[test]
+fn implausible_offer_candidates_are_dropped() {
+    let own: Vec<SocketAddr> = vec!["10.77.9.202:6992".parse().unwrap()];
+    let sdp = [
+        "v=0",
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+        "a=candidate:1 1 udp 2122260223 4f2e1c9a-1234.local 54321 typ host generation 0",
+        "a=candidate:2 1 udp 1686052607 84.16.1.2 54322 typ srflx raddr 0.0.0.0 rport 0",
+        "a=candidate:3 1 tcp 1518280447 10.0.0.5 9 typ host tcptype active",
+        "a=candidate:4 1 udp 2122260223 10.0.0.5 53 typ host",
+        "a=candidate:5 1 udp 2122260223 10.77.9.202 6992 typ host",
+        "a=candidate:6 1 udp 2122260223 224.0.0.1 40000 typ host",
+        "a=candidate:7 1 udp 2122260223 0.0.0.0 40000 typ host",
+        "a=candidate:8 1 udp 2122260223 255.255.255.255 40000 typ host",
+        "a=candidate:9 1 udp 2122260223 not-an-ip 40000 typ host",
+        "a=candidate:10 1 udp 41885439 172.65.1.1 3478 typ relay raddr 84.16.1.2 rport 54322",
+        "a=ice-ufrag:abcd",
+        "",
+    ]
+    .join("\r\n");
+    let (out, dropped) = filter_offer_candidates(&sdp, &own);
+    assert_eq!(dropped, 7, "{out}");
+    for kept in ["candidate:1 ", "candidate:2 ", "candidate:10 "] {
+        assert!(out.contains(kept), "{kept} kept: {out}");
+    }
+    for gone in [
+        "candidate:3 ",
+        "candidate:4 ",
+        "candidate:5 ",
+        "candidate:6 ",
+        "candidate:7 ",
+        "candidate:8 ",
+        "candidate:9 ",
+    ] {
+        assert!(!out.contains(gone), "{gone} dropped: {out}");
+    }
+    assert!(out.starts_with("v=0\r\nm=audio") && out.ends_with("a=ice-ufrag:abcd\r\n"));
+    // At most MAX_OFFER_CANDIDATES are kept.
+    let many: String = (0..20)
+        .map(|i| format!("a=candidate:{i} 1 udp 1 84.16.1.{i} 50000 typ srflx\r\n"))
+        .collect();
+    let (out, dropped) = filter_offer_candidates(&many, &own);
+    assert_eq!(out.matches("a=candidate").count(), MAX_OFFER_CANDIDATES);
+    assert_eq!(dropped, 20 - MAX_OFFER_CANDIDATES);
 }

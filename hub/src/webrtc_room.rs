@@ -47,6 +47,8 @@ pub const PHONE_MIC_STALE: Duration = Duration::from_millis(500);
 pub struct TxPacket {
     pub slot: usize,
     pub generation: u64,
+    /// The room tick that made it (one per 20 ms): the RTP time is derived from it.
+    pub tick: u64,
     pub len: usize,
     pub data: [u8; OPUS_MAX_PACKET],
 }
@@ -237,6 +239,9 @@ pub struct PhonesRoom<S: PacketSink> {
     encoders: Vec<(u64, TxEncoder)>,
     sum: DecodedAudio,
     packet: TxPacket,
+    /// Room ticks run so far: every packet carries its tick, so a phone's RTP time follows the
+    /// room clock even across packets a full queue dropped (intercom#42 review).
+    ticks: u64,
 }
 
 impl<S: PacketSink> PhonesRoom<S> {
@@ -258,6 +263,7 @@ impl<S: PacketSink> PhonesRoom<S> {
             active: vec![false; n],
             outs: vec![vec![0; FRAME_48K]; n],
             encoders,
+            ticks: 0,
             sum: DecodedAudio {
                 stream_name: "webrtc-phones".to_string(),
                 channels: vec![Vec::with_capacity(FRAME_48K)],
@@ -266,6 +272,7 @@ impl<S: PacketSink> PhonesRoom<S> {
             packet: TxPacket {
                 slot: 0,
                 generation: 0,
+                tick: 0,
                 len: 0,
                 data: [0; OPUS_MAX_PACKET],
             },
@@ -295,6 +302,7 @@ impl<S: PacketSink> PhonesRoom<S> {
             }
         }
         stats.room_ticks.fetch_add(1, Ordering::Relaxed);
+        self.ticks += 1;
         if !any {
             return;
         }
@@ -325,6 +333,7 @@ impl<S: PacketSink> PhonesRoom<S> {
                 Ok(len) => {
                     self.packet.slot = slot;
                     self.packet.generation = generation;
+                    self.packet.tick = self.ticks;
                     self.packet.len = len;
                     if self.io.sink.offer(self.packet.clone()) {
                         stats.room_packets.fetch_add(1, Ordering::Relaxed);
