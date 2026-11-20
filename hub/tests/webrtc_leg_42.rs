@@ -1196,3 +1196,61 @@ fn one_key_may_hold_half_the_pending_cap_at_least_three() {
     assert_eq!(pending_cap_per_client(4), 3);
     assert_eq!(pending_cap_per_client(1), 3);
 }
+
+async fn post_as_body(
+    base: &str,
+    client_ip: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let r = ::reqwest::Client::new()
+        .post(format!("{base}/api/phone/offer"))
+        .header("x-forwarded-for", "127.0.0.1")
+        .header("cf-connecting-ip", client_ip)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+// Review round 5 🔴: a claim needs a phone that really CONNECTED. An attacker reads a pending
+// phone's id from its own answer; naming that id as `replaces` must not exempt the new offer from
+// the pending caps (else ~max_phones tokens fill the table with exempt never-connecting offers).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_never_connected_id_is_no_reconnect_claim() {
+    let hub = start_hub(4).await; // hub-wide pending cap 2
+    let (s, a) = post_as_body(
+        &hub.base,
+        "198.51.100.71",
+        serde_json::json!({"sdp": silent_offer()}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let a_id = a["id"].as_str().expect("an id").to_string();
+    assert_eq!(
+        post_as(
+            &hub.base,
+            "198.51.100.72",
+            serde_json::json!({"sdp": silent_offer()})
+        )
+        .await,
+        200
+    );
+    assert_eq!(
+        hub.shared.snapshot().phones_pending,
+        2,
+        "the pending cap is full"
+    );
+    // A third client names the pending (never connected) A: a fresh offer, refused like any other.
+    let s = post_as(
+        &hub.base,
+        "198.51.100.73",
+        serde_json::json!({"sdp": silent_offer(), "replaces": a_id}),
+    )
+    .await;
+    assert_eq!(
+        s, 503,
+        "a pending phone's id buys no exemption from the pending cap"
+    );
+}
