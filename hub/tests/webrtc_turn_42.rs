@@ -16,7 +16,7 @@ use fake_turn::{channel_data, data_indication, FakeTurn};
 use intercom_hub::webrtc_turn::{
     turn_udp_server, TurnCreds, TurnOptions, TurnPhase, TurnRelay, TURN_BACKOFF_MAX,
     TURN_BACKOFF_MIN, TURN_KEEPALIVE, TURN_MAX_CHANNEL_NUMBER, TURN_PERMISSION_REFRESH,
-    TURN_ROTATE_MARGIN, TURN_TX_TIMEOUT,
+    TURN_RETIRE_GRACE, TURN_ROTATE_MARGIN, TURN_TX_TIMEOUT,
 };
 
 const SERVER: &str = "203.0.113.10:3478";
@@ -58,10 +58,11 @@ fn pump(relay: &mut TurnRelay, srv: &mut FakeTurn, now: Instant) -> Vec<(SocketA
     let mut got = Vec::new();
     for _ in 0..100 {
         let mut any = false;
-        while let Some(d) = relay.poll_transmit() {
+        while let Some(tx) = relay.poll_transmit() {
             any = true;
-            for r in srv.handle(&d) {
-                if let Some(p) = relay.handle_datagram(&r, now) {
+            assert_eq!(tx.to, srv.addr, "everything goes to the TURN server");
+            for r in srv.handle(tx.epoch, &tx.data) {
+                if let Some(p) = relay.handle_datagram(tx.epoch, srv.addr, &r, now) {
                     got.push(p);
                 }
             }
@@ -71,6 +72,12 @@ fn pump(relay: &mut TurnRelay, srv: &mut FakeTurn, now: Instant) -> Vec<(SocketA
         }
     }
     panic!("the relay never went quiet");
+}
+
+/// A datagram from the TURN server on the live allocation's socket.
+fn inbound(relay: &mut TurnRelay, data: &[u8], now: Instant) -> Option<(SocketAddr, Vec<u8>)> {
+    let epoch = relay.live_epoch().expect("a live allocation");
+    relay.handle_datagram(epoch, sa(SERVER), data, now)
 }
 
 /// A relay allocated with alice at `t0`.
@@ -105,8 +112,15 @@ fn it_allocates_with_the_long_term_credential() {
     assert_eq!(srv.count("allocate"), 2);
     assert_eq!(srv.alloc_user.as_deref(), Some("alice"));
     assert_eq!(relay.relayed(), Some(sa(RELAYED)));
-    assert!(relay.is_server(sa(SERVER)));
-    assert!(!relay.is_server(sa("203.0.113.10:3479")));
+    assert_eq!(relay.server(), Some(sa(SERVER)));
+    // Only the server's address on the live socket counts.
+    let epoch = relay.live_epoch().unwrap();
+    let ind = data_indication(sa("198.51.100.1:1"), b"x");
+    assert_eq!(
+        relay.handle_datagram(epoch, sa("203.0.113.10:3479"), &ind, t0),
+        None
+    );
+    assert_eq!(relay.handle_datagram(epoch + 1, sa(SERVER), &ind, t0), None);
     let f = relay.facet(t0);
     assert_eq!(f.state, "allocated");
     assert_eq!(f.relayed.as_deref(), Some(RELAYED));
@@ -309,41 +323,6 @@ fn a_rotation_releases_and_reallocates_with_the_new_username_when_idle() {
 }
 
 #[test]
-fn a_release_the_server_drops_late_is_waited_for_not_counted_as_a_failure() {
-    let t0 = Instant::now();
-    let (mut relay, mut srv) = allocated(t0, opts());
-    srv.release_lag = 3; // coturn: the released allocation goes on its next timer pass
-    relay.set_credentials(creds("bob", "pw-b", t0 + Duration::from_secs(86_400)), t0);
-    relay.handle_timeout(t0, false);
-    pump(&mut relay, &mut srv, t0);
-    assert_eq!(
-        relay.phase(),
-        TurnPhase::Releasing,
-        "437 right after the release: settling"
-    );
-    let mut t = t0;
-    for _ in 0..10 {
-        t += Duration::from_millis(500);
-        relay.handle_timeout(t, false);
-        pump(&mut relay, &mut srv, t);
-    }
-    assert_eq!(relay.phase(), TurnPhase::Allocated);
-    assert_eq!(srv.alloc_user.as_deref(), Some("bob"));
-    let f = relay.facet(t);
-    assert_eq!((f.allocations, f.failures), (2, 0), "{f:?}");
-    // Outside the settle window a 437 is a real failure (another allocation holds the 5-tuple,
-    // e.g. the previous hub process's): backed off and counted.
-    let mut relay = TurnRelay::new(opts()).unwrap();
-    let mut srv = fake();
-    srv.fail_allocate = Some(437);
-    relay.set_credentials(creds("alice", "pw-a", t0 + Duration::from_secs(86_400)), t0);
-    relay.handle_timeout(t0, false);
-    pump(&mut relay, &mut srv, t0);
-    assert_eq!(relay.phase(), TurnPhase::Backoff);
-    assert_eq!(relay.facet(t0).failures, 1);
-}
-
-#[test]
 fn the_relayed_address_is_advertised_as_a_relay_candidate_below_every_host() {
     use intercom_hub::webrtc_turn::{advertise_relayed, RELAY_CANDIDATE_PRIORITY};
     let sdp = "v=0\r\n\
@@ -449,7 +428,7 @@ fn permissions_are_ipv4_bounded_and_refreshed_only_while_wanted() {
     assert_eq!(relay.facet(t0).permissions, 2);
 
     // Bounded: 20 wanted, at most max_permissions (8) asked for.
-    let many: Vec<IpAddr> = (1..=20u8).map(|i| IpAddr::from([198, 18, 0, i])).collect();
+    let many: Vec<IpAddr> = (1..=20u8).map(|i| IpAddr::from([11, 0, 0, i])).collect();
     relay.set_wanted(many.clone(), t0);
     pump(&mut relay, &mut srv, t0);
     let f = relay.facet(t0);
@@ -557,7 +536,7 @@ fn data_indications_and_channel_data_unwrap_to_the_peer() {
     pump(&mut relay, &mut srv, t0);
     let ind = srv.deliver_from(peer, b"stun-check").unwrap();
     assert_eq!(
-        relay.handle_datagram(&ind, t0),
+        inbound(&mut relay, &ind, t0),
         Some((peer, b"stun-check".to_vec()))
     );
     // Bind a channel by sending, then the server's ChannelData unwraps too.
@@ -568,22 +547,19 @@ fn data_indications_and_channel_data_unwrap_to_the_peer() {
         !rtc_stun::message::is_stun_message(&cd),
         "ChannelData, not STUN"
     );
-    assert_eq!(
-        relay.handle_datagram(&cd, t0),
-        Some((peer, b"srtp".to_vec()))
-    );
+    assert_eq!(inbound(&mut relay, &cd, t0), Some((peer, b"srtp".to_vec())));
     assert_eq!(relay.facet(t0).rx_packets, 2);
     // ChannelData on a channel the relay never bound, and a Data indication from an IP it never
     // permitted, are dropped.
-    assert_eq!(relay.handle_datagram(&channel_data(0x7ffe, b"x"), t0), None);
+    assert_eq!(inbound(&mut relay, &channel_data(0x7ffe, b"x"), t0), None);
     let stranger = sa("192.0.2.99:4000");
     assert_eq!(
-        relay.handle_datagram(&data_indication(stranger, b"x"), t0),
+        inbound(&mut relay, &data_indication(stranger, b"x"), t0),
         None
     );
     // Garbage is dropped.
-    assert_eq!(relay.handle_datagram(b"\x00\x01garbage", t0), None);
-    assert_eq!(relay.handle_datagram(&[], t0), None);
+    assert_eq!(inbound(&mut relay, b"\x00\x01garbage", t0), None);
+    assert_eq!(inbound(&mut relay, &[], t0), None);
 }
 
 #[test]
@@ -801,7 +777,7 @@ fn a_returning_peer_keeps_its_channel_number_and_its_channel_data_is_accepted() 
     relay.set_wanted([], t);
     // The server still delivers the departed peer's ChannelData (its permission lapses at 300 s).
     assert_eq!(
-        relay.handle_datagram(&channel_data(n1, b"late"), t),
+        inbound(&mut relay, &channel_data(n1, b"late"), t),
         Some((peer, b"late".to_vec()))
     );
     // It comes back (the same ip:port): the same number, no ChannelBind refused with 400.
@@ -957,97 +933,145 @@ fn a_phone_counts_as_on_the_relay_while_relay_datagrams_are_recent() {
     ));
 }
 
-/// Drive `relay` against `srv` in 100 ms steps from `from` until `until`; returns the end time.
-fn run_until(relay: &mut TurnRelay, srv: &mut FakeTurn, from: Instant, until: Instant) -> Instant {
-    let mut t = from;
-    while t < until {
+// ---- One socket per allocation (coordinator, 21.11.2026) ----------------------------------------
+
+#[test]
+fn every_new_allocation_talks_from_a_new_socket_and_never_meets_a_437() {
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    let first = relay.live_epoch().unwrap();
+    // The hub takes the allocation for lost while the server still holds it (a passing outage).
+    srv.silent_clients.insert(first);
+    let mut t = t0;
+    while t < t0 + TURN_KEEPALIVE + TURN_TX_TIMEOUT {
         t += Duration::from_millis(100);
         relay.handle_timeout(t, false);
-        pump(relay, srv, t);
+        pump(&mut relay, &mut srv, t);
     }
-    t
-}
-
-#[test]
-fn a_held_allocation_is_refreshed_back_with_its_relayed_address_after_a_passing_outage() {
-    // A passing outage: the keepalive goes unanswered, the hub takes the allocation for lost, but
-    // the server never lost it. The re-Allocate from the same 5-tuple gets 437; the hub then
-    // refreshes the held allocation (Readopt) and carries on with the SAME relayed address, no
-    // new allocation, no back-off.
-    let t0 = Instant::now();
-    let (mut relay, mut srv) = allocated(t0, opts());
-    let relayed = relay.relayed().unwrap();
-    srv.silent = true;
-    let t = run_until(
-        &mut relay,
-        &mut srv,
-        t0,
-        t0 + TURN_KEEPALIVE + TURN_TX_TIMEOUT,
-    );
-    assert_eq!(relay.phase(), TurnPhase::Allocating, "taken for lost");
-    assert_eq!(relay.facet(t).failures, 1);
-    srv.silent = false;
-    let refreshes_before = srv.count("refresh");
-    let t = run_until(&mut relay, &mut srv, t, t + Duration::from_millis(600));
+    // Allocated again at once from a NEW socket: no 437, no back-off, a new relayed address; the
+    // abandoned socket is no longer used (it expires on the server).
     assert_eq!(relay.phase(), TurnPhase::Allocated);
-    assert_eq!(relay.relayed(), Some(relayed), "the same relayed address");
+    let second = relay.live_epoch().unwrap();
+    assert_ne!(second, first);
+    assert_eq!(relay.relayed(), Some(srv.relayed_of(second)));
+    assert_eq!(relay.live_epochs(), vec![second]);
     let f = relay.facet(t);
-    assert_eq!(f.allocations, 1, "no new allocation: {f:?}");
-    assert_eq!(f.failures, 1, "the loss only, no back-off failure: {f:?}");
-    assert_eq!(f.refreshes, 1, "the held allocation was refreshed: {f:?}");
-    assert_eq!(srv.count("refresh"), refreshes_before + 1);
-    assert_eq!(srv.alloc_user.as_deref(), Some("alice"));
+    assert_eq!((f.allocations, f.failures), (2, 1), "{f:?}");
     assert!(
-        srv.seen
+        !srv.seen
             .iter()
-            .any(|s| s.method == "refresh" && s.lifetime == Some(600)),
-        "a Refresh asking a lifetime, never a release"
+            .any(|x| x.method == "refresh" && x.lifetime == Some(0)),
+        "a lost allocation is abandoned, not released"
     );
 }
 
 #[test]
-fn a_refused_readopt_falls_back_to_the_back_off_and_never_loops() {
+fn a_rotation_keeps_the_old_relay_working_until_the_new_one_is_allocated() {
     let t0 = Instant::now();
     let (mut relay, mut srv) = allocated(t0, opts());
-    srv.silent = true;
-    let t = run_until(
-        &mut relay,
-        &mut srv,
-        t0,
-        t0 + TURN_KEEPALIVE + TURN_TX_TIMEOUT,
-    );
-    assert_eq!(relay.phase(), TurnPhase::Allocating);
-    // The server holds the allocation (437 to an Allocate) but refuses its Refresh too.
-    srv.silent = false;
-    srv.fail_refresh = Some(403);
-    let t = run_until(&mut relay, &mut srv, t, t + Duration::from_millis(600));
-    assert_eq!(
-        relay.phase(),
-        TurnPhase::Backoff,
-        "the normal back-off path"
-    );
-    let f = relay.facet(t);
-    assert_eq!(f.failures, 2, "the loss, then the refused refresh: {f:?}");
-    assert!(f.last_error.unwrap().contains("403"));
-    // Two minutes on: every attempt waits its back-off (1, 2, 4 ... 60 s), so a handful of
-    // attempts, never a loop; the relay never claims an allocation it does not have.
-    let allocates = srv.count("allocate");
-    let refreshes = srv.count("refresh");
-    let mut t2 = t;
-    while t2 < t + Duration::from_secs(120) {
-        t2 += Duration::from_millis(100);
-        relay.handle_timeout(t2, false);
-        pump(&mut relay, &mut srv, t2);
-        assert_ne!(relay.phase(), TurnPhase::Allocated);
-    }
-    let attempts_allocate = srv.count("allocate") - allocates;
-    let attempts_refresh = srv.count("refresh") - refreshes;
-    // 1 + 2 + 4 + 8 + 16 + 32 + 60 s: at most 7 attempts in 120 s, each an unsigned + a signed
-    // Allocate, a Refresh only while the loss is recent (60 s).
+    let old = relay.live_epoch().unwrap();
+    let old_relayed = relay.relayed().unwrap();
+    let peer = sa("198.51.100.1:61000");
+    relay.set_wanted([peer.ip()], t0);
+    pump(&mut relay, &mut srv, t0);
+    // The new credential allocates from a new socket; the server is slow to answer it.
+    let t = t0 + Duration::from_secs(10);
+    relay.set_credentials(creds("bob", "pw-b", t + Duration::from_secs(86_400)), t);
+    srv.silent_clients.insert(old + 1);
+    relay.handle_timeout(t, false);
+    pump(&mut relay, &mut srv, t);
+    // Meanwhile the old relay still carries the phones: same relayed address, sends go through.
+    assert_eq!(relay.relayed(), Some(old_relayed));
+    assert_eq!(relay.live_epochs(), vec![old, old + 1]);
+    relay.send_to(peer, b"still", t).unwrap();
+    pump(&mut relay, &mut srv, t);
+    assert_eq!(srv.relayed_out.last().unwrap().1, b"still".to_vec());
     assert!(
-        (5..=14).contains(&attempts_allocate),
-        "{attempts_allocate} Allocates"
+        srv.released.is_empty(),
+        "nothing released before the switch"
     );
-    assert!(attempts_refresh <= 6, "{attempts_refresh} Refreshes");
-    assert!(relay.facet(t2).failures <= 2 + 8);
+    // The new allocation answers: the relayed candidate switches over, the old one is released
+    // (alice's signature, on its own socket) and its socket closes after a short grace.
+    srv.silent_clients.clear();
+    let t = t + Duration::from_millis(600);
+    relay.handle_timeout(t, false);
+    pump(&mut relay, &mut srv, t);
+    assert_eq!(relay.live_epoch(), Some(old + 1));
+    assert_eq!(relay.relayed(), Some(srv.relayed_of(old + 1)));
+    assert_eq!(srv.alloc_user.as_deref(), Some("bob"));
+    assert_eq!(srv.released, vec![(old, "alice".to_string())]);
+    assert!(
+        relay.live_epochs().contains(&old),
+        "the old socket lingers for the release"
+    );
+    let t = t + TURN_RETIRE_GRACE + Duration::from_millis(1);
+    relay.handle_timeout(t, false);
+    assert_eq!(relay.live_epochs(), vec![old + 1]);
+    let f = relay.facet(t);
+    assert_eq!((f.allocations, f.failures), (2, 0), "{f:?}");
+    // The phone's permission is asked on the new allocation too.
+    assert!(srv.perms.contains(&peer.ip()));
+}
+
+#[test]
+fn a_departed_channel_past_its_600_s_binding_is_rebound_before_channel_data() {
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    let peer = sa("198.51.100.1:61000");
+    relay.set_wanted([peer.ip()], t0);
+    pump(&mut relay, &mut srv, t0);
+    relay.send_to(peer, b"a", t0).unwrap();
+    pump(&mut relay, &mut srv, t0);
+    let (n1, _) = srv.binds[0];
+    relay.set_wanted([], t0 + Duration::from_secs(10));
+    // Keep the allocation itself alive (refreshes, keepalives) for ten minutes.
+    let mut t = t0;
+    while t < t0 + Duration::from_secs(601) {
+        t += Duration::from_secs(5);
+        relay.handle_timeout(t, false);
+        pump(&mut relay, &mut srv, t);
+    }
+    // The peer comes back after the server's 600 s binding ran out: the remembered number is
+    // bound AGAIN first (a Send indication meanwhile), never ChannelData on a dead binding.
+    relay.set_wanted([peer.ip()], t);
+    pump(&mut relay, &mut srv, t);
+    let binds = srv.binds.len();
+    relay.send_to(peer, b"back", t).unwrap();
+    pump(&mut relay, &mut srv, t);
+    assert_eq!(
+        srv.relayed_out.last().unwrap(),
+        &(peer, b"back".to_vec(), false)
+    );
+    assert_eq!(srv.binds.len(), binds + 1);
+    assert_eq!(
+        srv.binds.last().unwrap(),
+        &(n1, peer),
+        "the same number, rebound"
+    );
+    relay.send_to(peer, b"then", t).unwrap();
+    pump(&mut relay, &mut srv, t);
+    assert_eq!(
+        srv.relayed_out.last().unwrap(),
+        &(peer, b"then".to_vec(), true)
+    );
+}
+
+#[test]
+fn reserved_and_benchmark_ranges_get_no_permission_either() {
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    let ips: Vec<IpAddr> = [
+        "0.1.2.3",
+        "192.0.0.9",
+        "198.18.5.5",
+        "198.19.0.1",
+        "240.0.0.1",
+        "203.0.113.5",
+    ]
+    .iter()
+    .map(|s| s.parse().unwrap())
+    .collect();
+    relay.set_wanted(ips, t0);
+    pump(&mut relay, &mut srv, t0);
+    assert_eq!(srv.count("permission"), 1, "only the global address");
 }

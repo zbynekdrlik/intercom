@@ -58,6 +58,14 @@ fn answers(addr: SocketAddr) -> bool {
 }
 
 impl Coturn {
+    /// Freeze (SIGSTOP) or thaw (SIGCONT) the server: a passing outage. Its allocations live on.
+    pub fn pause(&self, paused: bool) {
+        let sig = if paused { libc::SIGSTOP } else { libc::SIGCONT };
+        // SAFETY: kill(2) on our own child's pid.
+        let rc = unsafe { libc::kill(self.child.id() as libc::pid_t, sig) };
+        assert_eq!(rc, 0, "kill({sig}) on turnserver");
+    }
+
     /// Start coturn with these long-term users; returns once it answers a Binding request.
     pub fn start(users: &[(&str, &str)]) -> Coturn {
         let dir = tempfile::tempdir().unwrap();

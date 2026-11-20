@@ -427,6 +427,51 @@ fn a_restarted_hub_allocates_at_once_while_the_old_allocation_still_lives() {
     });
 }
 
+/// A passing outage (coturn frozen past the keepalive's timeout): the hub takes the allocation for
+/// lost while coturn still holds it. The next Allocate goes from a NEW local socket, so it succeeds
+/// at once (no 437, no back-off): a new relayed address, `allocations` 2, `failures` 1 (the loss).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_allocation_is_replaced_from_a_new_socket_at_once_while_the_old_one_lives() {
+    let turn = Coturn::start(&[("hub", "hub-pw")]);
+    let hub = start_hub(loopback_opts()).await;
+    hub.handle
+        .set_turn_credentials(creds(&turn, "hub", "hub-pw"))
+        .await
+        .unwrap();
+    let first = wait_allocated(&hub, 1).await;
+    turn.pause(true);
+    // The keepalive (15 s) goes unanswered for its 7.5 s of retransmissions.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        let f = hub.shared.snapshot().turn.unwrap();
+        if f.failures >= 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the loss was never noticed: {f:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    turn.pause(false);
+    let t_back = Instant::now();
+    let second = wait_allocated(&hub, 2).await;
+    assert!(
+        t_back.elapsed() < Duration::from_secs(5),
+        "allocated again within seconds: {second:?}"
+    );
+    assert_eq!(
+        second.failures, 1,
+        "no 437, no back-off failure: {second:?}"
+    );
+    assert_ne!(
+        second.relayed, first.relayed,
+        "a new allocation: {second:?}"
+    );
+    assert!(first.local.is_some() && second.local.is_some());
+    assert_ne!(second.local, first.local, "a new local socket: {second:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_allocation_refreshes_and_rotates_its_credential_against_coturn() {
     let turn = Coturn::start(&[("hub-a", "pw-a"), ("hub-b", "pw-b")]);

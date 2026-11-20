@@ -1,5 +1,8 @@
 //! A fake TURN server in the test process (intercom#42 phase 3), sans-IO like the hub's client:
-//! `handle` takes one datagram the client sent and returns the server's answers. It speaks the
+//! `handle` takes one datagram a client sent (`client` = its 5-tuple: the hub's socket epoch) and
+//! returns the server's answers. The fake tracks ONE current allocation (`alloc_client`); an
+//! Allocate from another 5-tuple makes a new one (the old one is left to expire, untracked), any
+//! other request from a 5-tuple that holds no current allocation is 437. It speaks the
 //! long-term credential mechanism (401 with REALM + NONCE, then MESSAGE-INTEGRITY checked against
 //! the user table), Allocate / Refresh (LIFETIME 0 = release) / CreatePermission / ChannelBind, Send
 //! indications and ChannelData from the client, and builds Data indications and ChannelData to it.
@@ -61,6 +64,10 @@ pub struct FakeTurn {
     pub datagrams: usize,
     /// Answer nothing.
     pub silent: bool,
+    /// Answer nothing to these clients (5-tuples).
+    pub silent_clients: HashSet<u32>,
+    /// The client (5-tuple) the current allocation belongs to.
+    pub alloc_client: Option<u32>,
     /// Answer every Allocate with this error code.
     pub fail_allocate: Option<u16>,
     /// Answer every Refresh with this error code.
@@ -69,14 +76,12 @@ pub struct FakeTurn {
     pub fail_permission: Option<u16>,
     /// Answer the next authenticated request with 438 and a fresh nonce.
     pub stale_next: bool,
-    /// After a release, answer this many Allocates with 437 (coturn drops a released allocation
-    /// on its next timer pass, not at once).
-    pub release_lag: usize,
-    lingering: usize,
     /// Answer the next ChannelBind with this error code.
     pub fail_channel_bind_once: Option<u16>,
     /// Every ChannelBind the fake accepted: (number, peer), in order.
     pub binds: Vec<(u16, SocketAddr)>,
+    /// Every release (Refresh LIFETIME 0): (client, username).
+    pub released: Vec<(u32, String)>,
 }
 
 fn crypto() -> std::sync::Arc<dyn rtc_turn::crypto::RTCCryptoProvider> {
@@ -114,14 +119,15 @@ impl FakeTurn {
             seen: Vec::new(),
             datagrams: 0,
             silent: false,
+            silent_clients: HashSet::new(),
+            alloc_client: None,
             fail_allocate: None,
             fail_refresh: None,
             fail_permission: None,
             stale_next: false,
-            release_lag: 0,
-            lingering: 0,
             fail_channel_bind_once: None,
             binds: Vec::new(),
+            released: Vec::new(),
         }
     }
 
@@ -133,6 +139,7 @@ impl FakeTurn {
     /// The server lost the allocation (a restart, an expiry): the next refresh gets 437.
     pub fn forget_allocation(&mut self) {
         self.alloc_user = None;
+        self.alloc_client = None;
         self.perms.clear();
         self.channels.clear();
     }
@@ -168,18 +175,24 @@ impl FakeTurn {
         m.raw
     }
 
-    /// The client's datagram in, the server's answers out.
-    pub fn handle(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+    /// The relayed address the fake gives `client`'s allocation (one per 5-tuple).
+    pub fn relayed_of(&self, client: u32) -> SocketAddr {
+        SocketAddr::new(self.relayed.ip(), self.relayed.port() + client as u16)
+    }
+
+    /// `client`'s datagram in, the server's answers out.
+    pub fn handle(&mut self, client: u32, data: &[u8]) -> Vec<Vec<u8>> {
         self.datagrams += 1;
-        if self.silent {
+        if self.silent || self.silent_clients.contains(&client) {
             return Vec::new();
         }
+        let current = self.alloc_user.is_some() && self.alloc_client == Some(client);
         if ChannelData::is_channel_data(data) && !rtc_stun::message::is_stun_message(data) {
             let mut cd = ChannelData {
                 raw: data.to_vec(),
                 ..Default::default()
             };
-            if cd.decode().is_ok() {
+            if current && cd.decode().is_ok() {
                 if let Some(peer) = self.channels.get(&cd.number.0).copied() {
                     if self.perms.contains(&peer.ip()) {
                         self.relayed_out.push((peer, cd.data, true));
@@ -198,7 +211,7 @@ impl FakeTurn {
             let mut d = Data::default();
             if peer.get_from(&m).is_ok() && d.get_from(&m).is_ok() {
                 let peer = SocketAddr::new(peer.ip, peer.port);
-                if self.alloc_user.is_some() && self.perms.contains(&peer.ip()) {
+                if current && self.perms.contains(&peer.ip()) {
                     self.relayed_out.push((peer, d.0, false));
                 }
             }
@@ -237,11 +250,6 @@ impl FakeTurn {
             .unwrap();
             return vec![r.raw];
         }
-        // A released allocation that has not gone yet takes the 5-tuple (signed or not).
-        if m.typ.method == METHOD_ALLOCATE && self.lingering > 0 {
-            self.lingering -= 1;
-            return vec![self.error(&m, 437, false)];
-        }
         // Long-term credentials: no integrity -> 401 with the realm and nonce.
         if !m.contains(ATTR_MESSAGE_INTEGRITY) {
             return vec![self.error(&m, 401, true)];
@@ -271,17 +279,22 @@ impl FakeTurn {
                 if let Some(code) = self.fail_allocate {
                     return vec![self.error(&m, code, false)];
                 }
-                if self.alloc_user.is_some() {
+                if current {
                     return vec![self.error(&m, 437, false)];
                 }
+                // A new 5-tuple: a new allocation (the previous one is left to expire).
                 self.alloc_user = Some(user);
+                self.alloc_client = Some(client);
+                self.perms.clear();
+                self.channels.clear();
+                let relayed = self.relayed_of(client);
                 let mut r = Message::new();
                 r.build(&[
                     Box::new(m.transaction_id),
                     Box::new(MessageType::new(METHOD_ALLOCATE, class)),
                     Box::new(RelayedAddress {
-                        ip: self.relayed.ip(),
-                        port: self.relayed.port(),
+                        ip: relayed.ip(),
+                        port: relayed.port(),
                     }),
                     Box::new(XorMappedAddress {
                         ip: self.mapped.ip(),
@@ -297,15 +310,21 @@ impl FakeTurn {
                 if let Some(code) = self.fail_refresh {
                     return vec![self.error(&m, code, false)];
                 }
-                match &self.alloc_user {
-                    None => return vec![self.error(&m, 437, false)],
-                    Some(owner) if *owner != user => return vec![self.error(&m, 441, false)],
-                    _ => {}
-                }
                 let granted = lifetime.unwrap_or(self.lifetime_s).min(self.lifetime_s);
-                if granted == 0 {
-                    self.forget_allocation();
-                    self.lingering = self.release_lag;
+                if granted == 0 && !current {
+                    // The release of an older allocation (another 5-tuple): it goes, the current
+                    // one stays.
+                    self.released.push((client, user.clone()));
+                } else {
+                    match &self.alloc_user {
+                        _ if !current => return vec![self.error(&m, 437, false)],
+                        Some(owner) if *owner != user => return vec![self.error(&m, 441, false)],
+                        _ => {}
+                    }
+                    if granted == 0 {
+                        self.released.push((client, user.clone()));
+                        self.forget_allocation();
+                    }
                 }
                 let mut r = Message::new();
                 r.build(&[
@@ -322,7 +341,7 @@ impl FakeTurn {
                     return vec![self.error(&m, code, false)];
                 }
                 match &self.alloc_user {
-                    None => return vec![self.error(&m, 437, false)],
+                    _ if !current => return vec![self.error(&m, 437, false)],
                     Some(owner) if *owner != user => return vec![self.error(&m, 441, false)],
                     _ => {}
                 }
@@ -348,7 +367,7 @@ impl FakeTurn {
             }
             METHOD_CHANNEL_BIND => {
                 match &self.alloc_user {
-                    None => return vec![self.error(&m, 437, false)],
+                    _ if !current => return vec![self.error(&m, 437, false)],
                     Some(owner) if *owner != user => return vec![self.error(&m, 441, false)],
                     _ => {}
                 }
