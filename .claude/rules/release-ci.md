@@ -67,3 +67,9 @@ paths:
 - Since intercom#42 the `webrtc` project starts the REAL hub too, from the spec itself
   (`webrtc-hub.js`, `adapter = "webrtc"`), on the base port + 4..6 (HTTP, VBAN, WebRTC UDP); the
   same binary, nothing extra to wire on CI.
+- Since intercom#42 phase 3 the relay tests need coturn's `turnserver` (`$INTERCOM_TURNSERVER` or
+  PATH; missing = FAIL): `cargo test -p intercom-hub` (`webrtc_turn_relay_42`) and the `webrtc`
+  project's `webrtc-turn.spec.js` (a second hub on the base port + 7..9, coturn on 127.0.0.2 at
+  + 10, the fake TURN key API at + 11). CI apt-installs `coturn` in the rust, coverage and web-e2e
+  jobs; on dev1 run a `dpkg -x` copy through a wrapper (`.claude/rules/strih-intercom.md`, "The
+  hub's own TURN relay").

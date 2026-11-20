@@ -133,10 +133,14 @@ fn the_webrtc_table_is_validated_at_load() {
             "[webrtc]\nhost_ips = [\"0.0.0.0\"]\n",
             "not an address a phone can send to",
         ),
-        // The TURN relay is phase 3: the key is reserved and refused until then.
+        // Phase 3: `turn` names the relay's credential source, "cloudflare" or "off".
         (
             "[webrtc]\nturn = { url = \"turn:x\" }\n",
-            "reserved for the hub-side TURN relay",
+            "webrtc.turn must be \"cloudflare\" or \"off\"",
+        ),
+        (
+            "[webrtc]\nturn = \"coturn\"\n",
+            "webrtc.turn must be \"cloudflare\" or \"off\"",
         ),
         ("[webrtc]\nunknown_key = 1\n", "unknown field"),
         // [::] would deliver v4-mapped sources (review round 2).
@@ -158,6 +162,23 @@ fn the_webrtc_table_is_validated_at_load() {
     let w = m.webrtc.unwrap();
     assert_eq!(w.validate().unwrap(), "10.0.0.5:7000".parse().unwrap());
     assert_eq!(w.host_ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))]);
+}
+
+#[test]
+fn the_turn_key_selects_the_hub_side_relay_and_defaults_to_off() {
+    use intercom_hub::webrtc_signal::TurnMode;
+    for (extra, mode) in [
+        ("[webrtc]\n", TurnMode::Off),
+        ("[webrtc]\nturn = \"off\"\n", TurnMode::Off),
+        ("[webrtc]\nturn = \"cloudflare\"\n", TurnMode::Cloudflare),
+    ] {
+        let m = load(&hub_toml("phones", "webrtc", (2, 2), extra))
+            .unwrap_or_else(|e| panic!("{extra}: {e}"));
+        let w = m.webrtc.unwrap();
+        w.validate().unwrap();
+        assert_eq!(w.turn_mode(), mode, "{extra}");
+    }
+    assert_eq!(WebrtcConfig::default().turn_mode(), TurnMode::Off);
 }
 
 #[test]

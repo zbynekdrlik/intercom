@@ -69,6 +69,15 @@ jobs:
       - name: Ensure cmake (bundled libopus build)
         run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
+      # intercom#42 phase 3: the hub-side TURN relay tests run a REAL TURN server (coturn's
+      # turnserver as a user process on loopback, hub/tests/coturn); a missing one fails them.
+      - name: coturn (the TURN relay tests)
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends coturn
+          command -v turnserver
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -190,6 +199,15 @@ jobs:
       - name: Ensure cmake (bundled libopus build)
         run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
+      # intercom#42 phase 3: the hub-side TURN relay tests run a REAL TURN server (coturn's
+      # turnserver as a user process on loopback, hub/tests/coturn); a missing one fails them.
+      - name: coturn (the TURN relay tests)
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends coturn
+          command -v turnserver
+
       - name: Install coverage tools (prebuilt)
         uses: taiki-e/install-action@v2
         with:
@@ -257,6 +275,13 @@ jobs:
             apt-get install -y --no-install-recommends python3
           fi
           python3 --version
+      # intercom#42 phase 3: webrtc-turn.spec.js runs a REAL TURN server (coturn's turnserver).
+      - name: coturn (the forced-relay spec)
+        run: |
+          set -euo pipefail
+          apt-get -o Acquire::Retries=5 update
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends coturn
+          command -v turnserver
       - name: npm ci
         working-directory: tests/e2e
         run: npm ci

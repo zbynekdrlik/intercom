@@ -49,11 +49,25 @@ pub struct WebrtcConfig {
     /// How many phones may be connected at once; one more gets 503.
     #[serde(default = "default_max_phones")]
     pub max_phones: usize,
-    /// Reserved for the hub-side TURN relay (intercom#42 phase 3). Any value fails the load until
-    /// that phase lands, so a config never believes a relay is running when it is not.
+    /// The hub-side TURN relay (intercom#42 phase 3): `"cloudflare"` allocates the hub's own
+    /// relayed candidate from the box's Cloudflare TURN key (the `/api/ice` minter), `"off"` (the
+    /// default) offers host candidates only. Anything else fails the load.
     #[serde(default)]
     pub turn: Option<toml::Value>,
 }
+
+/// Where the hub's own relayed candidate comes from (`[webrtc].turn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMode {
+    /// Host candidates only.
+    Off,
+    /// One allocation on Cloudflare's TURN service, credentials from the box's TURN key.
+    Cloudflare,
+}
+
+/// The `[webrtc].turn` values.
+pub const TURN_MODE_CLOUDFLARE: &str = "cloudflare";
+pub const TURN_MODE_OFF: &str = "off";
 
 fn default_udp_bind() -> String {
     DEFAULT_UDP_BIND.to_string()
@@ -104,13 +118,25 @@ impl WebrtcConfig {
                 "webrtc.host_ips: {ip} is not an address a phone can send to"
             ));
         }
-        if self.turn.is_some() {
-            return Err(
-                "webrtc.turn is reserved for the hub-side TURN relay (intercom#42 phase 3) and not supported by this hub yet"
-                    .to_string(),
-            );
-        }
+        self.parse_turn_mode()?;
         Ok(bind)
+    }
+
+    fn parse_turn_mode(&self) -> Result<TurnMode, String> {
+        match &self.turn {
+            None => Ok(TurnMode::Off),
+            Some(toml::Value::String(s)) if s == TURN_MODE_OFF => Ok(TurnMode::Off),
+            Some(toml::Value::String(s)) if s == TURN_MODE_CLOUDFLARE => Ok(TurnMode::Cloudflare),
+            Some(other) => Err(format!(
+                "webrtc.turn must be \"{TURN_MODE_CLOUDFLARE}\" or \"{TURN_MODE_OFF}\", got {other}"
+            )),
+        }
+    }
+
+    /// The relay's credential source (a table that passed [`WebrtcConfig::validate`]; an invalid
+    /// value reads as off).
+    pub fn turn_mode(&self) -> TurnMode {
+        self.parse_turn_mode().unwrap_or(TurnMode::Off)
     }
 
     /// The host candidate IPs: the configured ones, else the bind's own IP, else the box's LAN
@@ -371,6 +397,28 @@ pub fn filter_offer_candidates(sdp: &str, own: &[SocketAddr]) -> (String, usize)
         out.push_str(line);
     }
     (out, dropped)
+}
+
+/// The IP addresses of an (already filtered) offer's `a=candidate:` lines, each once, in order;
+/// `.local` mDNS names are skipped. The hub's TURN relay asks a permission for each (phase 3), so
+/// the phone's checks can come through the relay.
+pub fn offer_candidate_ips(sdp: &str) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for line in sdp.lines() {
+        let Some(cand) = line.trim_end().strip_prefix("a=candidate:") else {
+            continue;
+        };
+        if let Some(ip) = cand
+            .split_whitespace()
+            .nth(4)
+            .and_then(|a| a.parse::<IpAddr>().ok())
+        {
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+    }
+    out
 }
 
 /// The most offer candidates the hub keeps.
