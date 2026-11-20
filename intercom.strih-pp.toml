@@ -1207,6 +1207,9 @@ out_ch = 2
 # 19.11.2026 (intercom#34, owner: the cutter rebalances the cans): the cutters' level sliders, a trim on
 # top of each point's gain_db (0 dB = this file). The hub serves them on its loopback control page
 # (http://127.0.0.1:8791/ on this box). lv1 routes nowhere into the cans here, so Program is dsg alone.
+# 20.11.2026 (intercom#38, owner: "strihac potrebuje lepsi mix"): one slider per source plus a
+# master (the whole cans output on top of the per-source sliders); `from` names the #34 group whose
+# saved value a new slider starts at.
 [[level]]
 name = "program"
 label = "Program"
@@ -1214,13 +1217,62 @@ dst = "cutters"
 sources = ["dsg_dante"]
 
 [[level]]
-name = "kamery"
-label = "Kamery"
+name = "cam1"
+label = "Kamera 1"
 dst = "cutters"
-sources = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+sources = ["cam1"]
+from = "kamery"
+
+[[level]]
+name = "cam2"
+label = "Kamera 2"
+dst = "cutters"
+sources = ["cam2"]
+from = "kamery"
+
+[[level]]
+name = "cam3"
+label = "Kamera 3"
+dst = "cutters"
+sources = ["cam3"]
+from = "kamery"
+
+[[level]]
+name = "cam4"
+label = "Kamera 4"
+dst = "cutters"
+sources = ["cam4"]
+from = "kamery"
+
+[[level]]
+name = "cam5"
+label = "Kamera 5"
+dst = "cutters"
+sources = ["cam5"]
+from = "kamery"
+
+[[level]]
+name = "cam6"
+label = "Kamera 6"
+dst = "cutters"
+sources = ["cam6"]
+from = "kamery"
+
+[[level]]
+name = "cam7"
+label = "Kamera 7"
+dst = "cutters"
+sources = ["cam7"]
+from = "kamery"
 
 [[level]]
 name = "telefony"
 label = "Telefóny"
 dst = "cutters"
 sources = ["phones"]
+
+[[level]]
+name = "master"
+label = "Master"
+dst = "cutters"
+master = true

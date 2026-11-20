@@ -8,8 +8,9 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 </head>
 <body>
-  <!-- intercom#34: the cutter's own balance of what plays in their headphones. Each slider trims
-       one group of sources on top of the hub's fixed routing (0 dB = the routing as shipped); a
+  <!-- intercom#34 + #38: the cutter's own mix of what plays in their headphones. One fader per
+       source (FOH, LV1, Click, each camera, the phones) trims it on top of the hub's fixed routing
+       (0 dB = the routing as shipped); the Master fader trims the whole output on top of them. A
        change takes effect at once and survives a hub restart. Served only on the notebook's
        loopback (http://127.0.0.1:8791/), never through the phone front. -->
   <header class="top">
@@ -20,7 +21,7 @@
   <p class="status" data-role="status" data-state="loading" role="status" aria-live="polite">Načítavam…</p>
 
   <main class="board">
-    <section class="strips" data-role="strips" aria-label="Posuvníky"></section>
+    <section class="strips" data-role="strips" aria-label="Mixér"></section>
 
     <section class="meter-wrap" aria-label="Výstup do slúchadiel">
       <div class="meter" data-role="meter" data-db="-120">
@@ -31,7 +32,7 @@
     </section>
   </main>
 
-  <p class="hint">0 dB = pôvodné nastavenie. Zmena platí hneď a ostane aj po reštarte.</p>
+  <p class="hint">Každý zdroj má svoj posuvník, Master stíši alebo zosilní celý výstup. 0 dB = pôvodné nastavenie. Zmena platí hneď a ostane aj po reštarte.</p>
 
   <template id="strip-template">
     <div class="strip" data-role="strip">

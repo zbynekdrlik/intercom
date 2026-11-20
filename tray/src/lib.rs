@@ -7,6 +7,8 @@
 //! `src/linux.rs` is the thin GTK + `tray-icon` shell around it (dstack's dtray pattern, which the
 //! strih boxes' tint2 systray already shows).
 
+pub mod mix_window;
+
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

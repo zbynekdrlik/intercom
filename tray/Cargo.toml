@@ -1,7 +1,7 @@
 [package]
 name = "intercom-tray"
 # Kept equal to the root [workspace.package] version (CI checks it; the release ships both).
-version = "1.9.27"
+version = "1.9.28"
 edition = "2021"
 publish = false
 description = "The strih notebook's tray icon for the intercom hub: its status and the cutters' level page (intercom#34)"
@@ -29,6 +29,13 @@ tray-icon = { version = "=0.21.2", default-features = false }
 # against libgtk-3-dev; the icon needs libayatana-appindicator3 at run time.
 gtk = "=0.18.2"
 glib = "=0.18.5"
+# The tray's own mix window (intercom#39): wry's WebKitGTK 4.1 WebView inside a plain gtk::Window,
+# in the tray's GTK loop (`build_gtk`, so no tao loop and no x11 child-window feature). wry 0.57.1
+# published 2026-10-23 uses gtk 0.18 like tray-icon; webkit2gtk is the exact version it pins, used
+# for the page's `load-failed` signal. Builds against libwebkit2gtk-4.1-dev; the boxes run
+# libwebkit2gtk-4.1-0.
+wry = { version = "=0.57.1", default-features = false, features = ["os-webview"] }
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 # Its own workspace (see the root Cargo.toml `exclude`): the hub's lockfile never sees GTK.
 [workspace]

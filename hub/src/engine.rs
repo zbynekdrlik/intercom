@@ -97,11 +97,15 @@ impl OutputBlock {
 /// The mix engine over a loaded [`Matrix`].
 pub struct Engine {
     matrix: Matrix,
+    /// Per participant id, the master slider trimming its whole output (intercom#38), built once
+    /// here so the real-time path only reads it.
+    master_of: Vec<Option<usize>>,
 }
 
 impl Engine {
     pub fn new(matrix: Matrix) -> Self {
-        Engine { matrix }
+        let master_of = matrix.levels.master_of(matrix.participants.len());
+        Engine { matrix, master_of }
     }
 
     pub fn matrix(&self) -> &Matrix {
@@ -143,6 +147,20 @@ impl Engine {
             for (i, slot) in dst_plane.iter_mut().enumerate().take(frames) {
                 let s = input.sample(point.src, point.in_ch, i);
                 *slot += s as f32 * gain;
+            }
+        }
+
+        // A master (intercom#38) trims the whole output after the sum, on top of the per-source
+        // trims: one relaxed atomic load per output participant per block, no lock. At exactly 1.0
+        // (0 dB) the planes are left untouched, so the mix stays bit-identical.
+        for (planes, master) in acc.iter_mut().zip(&self.master_of) {
+            let Some(i) = *master else { continue };
+            let m = levels.linear(i);
+            if m == 1.0 {
+                continue;
+            }
+            for v in planes.iter_mut().flat_map(|p| p.iter_mut()) {
+                *v *= m;
             }
         }
 
