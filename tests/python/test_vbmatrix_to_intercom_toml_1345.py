@@ -105,22 +105,34 @@ def test_model_shape_and_roles():
     assert by_name["cam1"]["out_channels"] == 2
 
 
-def test_phones_is_a_janus_participant():
-    # issue 1345 M3a: the phones participant is carried over the Janus audiobridge (adapter `janus`),
-    # replacing VDO.Ninja; it is the ONLY janus participant, and only on the phones role.
+def test_phones_is_the_webrtc_participant():
+    # intercom#42 phase 4: strih-snv's phones are the hub's own WebRTC leg (adapter `webrtc`), no
+    # Janus; it is the ONLY webrtc participant, there is no janus participant, and it keeps the
+    # 2-in / 2-out shape (the leg up/down-mixes mono<->stereo).
     _hub, parts, _points = _model()
     by_name = {p["name"]: p for p in parts}
-    assert by_name["phones"]["adapter"] == "janus"
-    janus = [p for p in parts if p["adapter"] == "janus"]
-    assert [p["name"] for p in janus] == ["phones"], janus
-    # The phones leg keeps its 2-in / 2-out shape (the adapter up/down-mixes mono<->stereo).
+    assert by_name["phones"]["adapter"] == "webrtc"
+    webrtc = [p for p in parts if p["adapter"] == "webrtc"]
+    assert [p["name"] for p in webrtc] == ["phones"], webrtc
+    assert [p for p in parts if p["adapter"] == "janus"] == []
     assert by_name["phones"]["in_channels"] == 2
     assert by_name["phones"]["out_channels"] == 2
+
+
+def test_webrtc_table_turns_the_cloudflare_relay_on_with_the_default_host_candidates():
+    # intercom#42 phase 4: the hub's own TURN relay (the venue uplink is CGNAT) from the box's
+    # existing Cloudflare TURN key; the fixed phones port; no host_ips, so the hub offers the box's
+    # LAN addresses minus the Dante leg it knows from [dlink] iface.
+    data = tomllib.loads(conv.convert(_xml()))
+    assert data["webrtc"] == {"udp_bind": "0.0.0.0:6992", "turn": "cloudflare"}
+    assert data["dlink"]["iface"] == "enp7s0.70"
 
 
 def test_janus_table_emitted_with_defaults_and_no_inlined_secret():
     # issue 1345 M3a: the converter emits the [janus] table with defaults; the room SECRET is never
     # inlined (the hub reads it from the 0600 room_secret_file at start).
+    # intercom#42 phase 4: kept while the phones are on webrtc, so the fallback is one word
+    # (`adapter = "janus"`) + a hub restart.
     data = tomllib.loads(conv.convert(_xml()))
     j = data["janus"]
     assert j["api_url"] == "http://127.0.0.1:8088/janus"

@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 
 use intercom_hub::inputs::input_buffers;
-use intercom_hub::matrix::{Matrix, ADAPTER_DLINK, ADAPTER_JANUS, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
+use intercom_hub::matrix::{
+    Matrix, ADAPTER_DLINK, ADAPTER_JANUS, ADAPTER_VBAN, ADAPTER_WEBRTC, PROGRAM_OUT_ROLE,
+};
 use intercom_hub::state::{HubState, JitterFacet, RuntimeStats};
 use intercom_hub::vban_io::BufferKind;
 use intercom_hub::vban_jitter::NetworkFillStats;
@@ -283,7 +285,7 @@ fn the_facet_takes_the_controllers_numbers() {
 fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
     // The checked-in strih-snv routing, through the real loader: every VBAN participant (the
     // camboxes and the program feeds) gets the VBAN resampler leg and the cutters' card capture the
-    // same leg (issue 1461); the Janus phones keep the local-capture ring; the program sink and
+    // same leg (issue 1461); the phones (Janus or, since intercom#42 phase 4, webrtc) the same leg; the program sink and
     // the `none` slots the plain one.
     let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let buffers = input_buffers(&m);
@@ -309,7 +311,8 @@ fn the_deployed_matrix_gives_every_crossing_the_resampler_leg() {
         let want = if p.adapter == ADAPTER_VBAN {
             vban_legs += 1;
             BufferKind::VbanLeg
-        } else if p.adapter == ADAPTER_JANUS {
+        } else if p.adapter == ADAPTER_JANUS || p.adapter == ADAPTER_WEBRTC {
+            // The phones' ingress, Janus or the in-hub WebRTC room (intercom#42 phase 4).
             BufferKind::JanusCapture
         } else if local_inputs.contains(&id) || p.adapter == ADAPTER_DLINK {
             // intercom#5: the hub's own Dante device is a foreign clock like the card's crystal.

@@ -10,8 +10,8 @@ use intercom_hub::webrtc_http::transport_json;
 use intercom_hub::webrtc_signal::{
     clean_display, client_key, filter_offer_candidates, is_json_content_type, is_lan_candidate,
     offer_rate, parse_display_body, parse_offer_body, pending_cap, PhoneId, RateLimiter,
-    RefusalLog, SignalError, SlotTable, WebrtcConfig, DEFAULT_DISPLAY, DEFAULT_MAX_PHONES,
-    DEFAULT_UDP_BIND, MAX_DISPLAY_CHARS, MAX_OFFER_CANDIDATES, MAX_SDP_BYTES,
+    RefusalLog, SignalError, SlotTable, TurnMode, WebrtcConfig, DEFAULT_DISPLAY,
+    DEFAULT_MAX_PHONES, DEFAULT_UDP_BIND, MAX_DISPLAY_CHARS, MAX_OFFER_CANDIDATES, MAX_SDP_BYTES,
     MAX_SIGNAL_BODY_BYTES,
 };
 
@@ -166,7 +166,6 @@ fn the_webrtc_table_is_validated_at_load() {
 
 #[test]
 fn the_turn_key_selects_the_hub_side_relay_and_defaults_to_off() {
-    use intercom_hub::webrtc_signal::TurnMode;
     for (extra, mode) in [
         ("[webrtc]\n", TurnMode::Off),
         ("[webrtc]\nturn = \"off\"\n", TurnMode::Off),
@@ -182,23 +181,29 @@ fn the_turn_key_selects_the_hub_side_relay_and_defaults_to_off() {
 }
 
 #[test]
-fn both_deployed_strih_tomls_stay_on_janus_in_this_phase() {
-    for (name, text) in [
-        ("strih-snv", include_str!("../../intercom.strih-snv.toml")),
-        ("strih-pp", include_str!("../../intercom.strih-pp.toml")),
-    ] {
-        let m = load(text).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert!(
-            m.janus_participant().is_some(),
-            "{name} keeps the janus phones leg"
-        );
-        assert_eq!(
-            m.webrtc_participant(),
-            None,
-            "{name}: the switch is phase 4"
-        );
-        assert!(m.webrtc.is_none(), "{name}");
-    }
+fn strih_snv_is_on_webrtc_and_strih_pp_stays_on_janus() {
+    // Phase 4: only strih-snv's phones switch, with the hub's Cloudflare TURN relay. It keeps its
+    // [janus] table, so going back is `adapter = "janus"` + a restart.
+    let snv = load(include_str!("../../intercom.strih-snv.toml")).expect("strih-snv");
+    assert!(
+        snv.webrtc_participant().is_some(),
+        "strih-snv: phones on webrtc"
+    );
+    assert_eq!(snv.janus_participant(), None, "strih-snv");
+    let w = snv.webrtc.as_ref().expect("strih-snv: the [webrtc] table");
+    assert_eq!(w.turn_mode(), TurnMode::Cloudflare, "strih-snv");
+    assert!(
+        snv.janus.is_some(),
+        "strih-snv keeps [janus] for the fallback"
+    );
+
+    let pp = load(include_str!("../../intercom.strih-pp.toml")).expect("strih-pp");
+    assert!(
+        pp.janus_participant().is_some(),
+        "strih-pp keeps the janus phones leg"
+    );
+    assert_eq!(pp.webrtc_participant(), None, "strih-pp");
+    assert!(pp.webrtc.is_none(), "strih-pp");
 }
 
 #[test]

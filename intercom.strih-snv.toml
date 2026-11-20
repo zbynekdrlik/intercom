@@ -16,6 +16,10 @@ room_secret_file = "/etc/intercom-hub/janus-room.secret"
 rtp_bind = "0.0.0.0:6990"
 codec = "opus"
 
+[webrtc]
+udp_bind = "0.0.0.0:6992"
+turn = "cloudflare"
+
 [video]
 ndi_source_name = "STRIH-SNV (interkom)"
 fps = 10
@@ -177,7 +181,7 @@ out_channels = 4
 [[participant]]
 name = "phones"
 role = "phones"
-adapter = "janus"
+adapter = "webrtc"
 in_channels = 2
 out_channels = 2
 
