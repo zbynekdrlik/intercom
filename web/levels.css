@@ -69,11 +69,24 @@ h1 { font-size: 1.4rem; margin: 0; }
 
 .strip-db { font-size: 0.78rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-.strip-slider {
-  writing-mode: vertical-lr;
-  direction: rtl;
+/* The fader: a horizontal range turned -90deg in an upright 40x260 box, so its max is at the top.
+   Never a vertical writing mode (WebKitGTK, the tray's window, draws it as a tiny horizontal slider) nor
+   the vertical slider appearance (deprecated in Chromium): intercom#38/#39, live 20.11.2026. */
+.strip-fader {
+  flex: none;
+  position: relative;
   width: 40px;
   height: 260px;
+}
+
+.strip-slider {
+  position: absolute;
+  left: -110px; /* (40 - 260) / 2 */
+  top: 110px; /* (260 - 40) / 2 */
+  width: 260px;
+  height: 40px;
+  margin: 0;
+  transform: rotate(-90deg);
   accent-color: var(--accent);
   cursor: pointer;
 }

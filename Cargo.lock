@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "intercom-hub"
-version = "1.9.28"
+version = "1.9.29"
 dependencies = [
  "anyhow",
  "axum",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "intercom-vban"
-version = "1.9.28"
+version = "1.9.29"
 dependencies = [
  "anyhow",
 ]

@@ -131,6 +131,32 @@ test("the cutter drags, steps and mutes the faders; the hub applies and stores t
   expect(consoleSeen).toEqual([]);
 });
 
+// intercom#38/#39 live 20.11.2026: the tray's window is WebKitGTK, which ignored the range's
+// `writing-mode: vertical-lr` and drew each fader as a tiny horizontal slider in the strip. A cutter
+// clicks where the fader is: the top of the strip's fader is the maximum, the bottom the minimum,
+// in every engine (the `levels-webkit` project runs this test in WebKit).
+test("a click at the top or bottom of a fader sets its max or min (every engine)", async ({ page, request }) => {
+  const seen = watchConsole(page);
+  await page.goto("/");
+  await expect(page.locator('[data-role="status"]')).toHaveAttribute("data-state", "good");
+  const slider = strip(page, "cam3").locator('[data-role="slider"]');
+  const box = await slider.boundingBox();
+  if (!box) throw new Error("the cam3 fader has no box");
+  expect(box.height, "the fader stands upright").toBeGreaterThan(box.width * 3);
+  const x = box.x + box.width / 2;
+  await page.mouse.click(x, box.y + 3);
+  await expect.poll(async () => (await apiLevel(request, "cam3")).db).toBeGreaterThanOrEqual(10);
+  await page.mouse.click(x, box.y + box.height - 3);
+  await expect.poll(async () => (await apiLevel(request, "cam3")).db).toBeLessThanOrEqual(-55);
+  await page.mouse.click(x, box.y + box.height / 2);
+  // The PUT goes out on `change`: wait for the hub to hold the middle value, like the two above.
+  await expect
+    .poll(async () => (await apiLevel(request, "cam3")).db, { message: "the middle of the fader is the middle of -60..+12" })
+    .toBeGreaterThan(-36);
+  expect((await apiLevel(request, "cam3")).db).toBeLessThan(-12);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("one camera's fader moves only that camera, the master its own value", async ({ page, request }) => {
   const consoleSeen = watchConsole(page);
   await page.goto("/");
