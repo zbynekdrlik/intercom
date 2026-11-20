@@ -656,6 +656,14 @@ struct TurnSock {
     reader: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for TurnSock {
+    /// Its reader goes with it (a closed allocation, or the network task ending): the socket is
+    /// closed once the last `Arc` (the reader's) is gone.
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
 /// A relay allocation's own socket: IPv4, an EPHEMERAL port, every interface, one per allocation
 /// (epoch), so every allocation is a new 5-tuple at the TURN server. The kernel picks the source
 /// address by route (the TURN server is on the internet, so the default route's address); that
@@ -995,6 +1003,11 @@ impl NetTask {
         let Some(turn) = self.turn.as_mut() else {
             return;
         };
+        if !turn.accepts(epoch, from) {
+            // Anyone but the TURN server, or a late answer on a retiring socket.
+            self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let got = turn.handle_datagram(epoch, from, data, now);
         let relayed = turn.relayed();
         if let (Some((peer, payload)), Some(relayed)) = (got, relayed) {
@@ -1533,7 +1546,7 @@ impl NetTask {
         self.turn_socks.retain(|epoch, s| {
             let kept = keep.contains(epoch);
             if !kept {
-                s.reader.abort();
+                // Dropping it aborts its reader (`Drop for TurnSock`).
                 tracing::debug!(epoch, local = %s.local, "webrtc turn: an old allocation's socket closed");
             }
             kept

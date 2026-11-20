@@ -1622,7 +1622,10 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
     plain `send_to` (the kernel picks the source by route, the default route's address, which stays
     the allocation's 5-tuple while the route holds), has `IP_PKTINFO` + the Dante guard
     (intercom#25), and a reader task hands its datagrams (epoch, source, bytes) to the network
-    task; the relay takes only its TURN server's exact address on a live allocation's socket. The
+    task (`Drop for TurnSock` aborts the reader, so a closed allocation or an ended task leaves no
+    reader behind); the relay takes only its TURN server's exact address on a live allocation's
+    socket (`TurnRelay::accepts`), anything else (another sender, a late answer on a retiring
+    socket) counts in `webrtc.rx_refused`. The
     live socket's local address is `webrtc.turn.local`. The relayed candidate's port is the
     server's, so the box firewall needs nothing new.
   - **Credentials:** `feed_turn_credentials` asks the same `TurnMinter` `/api/ice` serves (its
@@ -1642,8 +1645,13 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
     doubling to 60 s, reset by a success). **A LOST allocation** = a 437 or no answer on ANY later
     request (Refresh, CreatePermission, ChannelBind, the keepalive), a refused refresh, or an
     expiry (`TurnRelay::lost`): it is ABANDONED (no release on a dead path; it expires on the
-    server) and a new one is allocated AT ONCE from a new socket; a second loss within 60 s
-    (`TURN_LOSS_AT_ONCE_WINDOW`) backs off. **A ROTATION** (a new username from the minter)
+    server) and a new one is allocated AT ONCE from a new socket. **The back-off restarts only
+    after an allocation LIVED 60 s** (`TURN_LOSS_AT_ONCE_WINDOW`, `restart_backoff_if_settled`),
+    never on a mere successful Allocate: each further loss of a younger allocation waits the
+    back-off, which keeps doubling to 60 s (review of e6ed4df: a server answering no Binding, or a
+    437 on every CreatePermission, made it allocate about once a second forever, each abandoned
+    allocation an orphan on the server for 10 min, then 486). A credential change drops a rotation's
+    half-made allocation; one that is already up gets its best-effort release first. **A ROTATION** (a new username from the minter)
     allocates with the NEW credential on a new socket while the old allocation keeps carrying the
     phones (`webrtc.turn.rotating`), switches the answers' relayed candidate over once it is up,
     then sends a best-effort release (Refresh LIFETIME 0) with the OLD credential on the OLD socket

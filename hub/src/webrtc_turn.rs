@@ -18,9 +18,9 @@
 //!   request whenever nothing went to the server for [`TURN_KEEPALIVE`] (the venue NAT's mapping).
 //!   A refused or unanswered Allocate backs off 1 s -> 60 s. A LOST allocation (a 437 or no answer
 //!   on any other request, a refused refresh, an expiry) is ABANDONED (it expires on the server; no
-//!   release on a dead path) and a new one allocated at once from a new socket; a second loss
-//!   within [`TURN_LOSS_AT_ONCE_WINDOW`] backs off. One log line per state change, never per
-//!   packet.
+//!   release on a dead path) and a new one allocated at once from a new socket; further losses
+//!   before an allocation has lived [`TURN_LOSS_AT_ONCE_WINDOW`] wait the doubling back-off. One
+//!   log line per state change, never per packet.
 //! - **A credential rotation** (a new username from the minter) allocates with the NEW credential
 //!   on a new socket while the old allocation keeps carrying the phones, switches the answers'
 //!   relayed candidate over once it is up, then releases the old allocation with the OLD
@@ -115,8 +115,10 @@ pub const TURN_MAX_CHANNEL_NUMBER: u16 = 0x4FFF;
 pub const TURN_CHANNEL_REMEMBER: Duration = Duration::from_secs(900);
 /// A refused ChannelBind is tried again after this (Send indications meanwhile).
 pub const TURN_CHANNEL_RETRY: Duration = Duration::from_secs(30);
-/// A lost allocation is replaced at once, unless another was lost this recently (then the
-/// back-off applies: no tight loop against a server that keeps losing it).
+/// An allocation that lived this long counts as settled: its loss is replaced at once and the
+/// back-off restarts at the minimum. A younger one's loss (after the first) waits the back-off,
+/// which keeps doubling (no tight loop against a server that keeps losing allocations, each one
+/// an orphan on the server for its lifetime).
 pub const TURN_LOSS_AT_ONCE_WINDOW: Duration = Duration::from_secs(60);
 
 /// One credential set for the hub's allocation. `Debug` never prints the password.
@@ -1007,7 +1009,12 @@ pub struct TurnRelay {
     backoff: Duration,
     retry_at: Option<Instant>,
     rotate_after: Option<Instant>,
-    last_loss: Option<Instant>,
+    /// Losses since the last allocation that lived past [`TURN_LOSS_AT_ONCE_WINDOW`]: only the
+    /// first is replaced at once, each further one waits the (growing) back-off.
+    quick_losses: u32,
+    /// When the live allocation came up: the back-off restarts only once one has lived past
+    /// [`TURN_LOSS_AT_ONCE_WINDOW`] (a short-lived success keeps growing it).
+    allocated_at: Option<Instant>,
     /// The last phase logged.
     shown: TurnPhase,
     out: VecDeque<TurnTransmit>,
@@ -1039,7 +1046,8 @@ impl TurnRelay {
             backoff: TURN_BACKOFF_MIN,
             retry_at: None,
             rotate_after: None,
-            last_loss: None,
+            quick_losses: 0,
+            allocated_at: None,
             shown: TurnPhase::Waiting,
             out: VecDeque::new(),
             allocations: 0,
@@ -1178,14 +1186,50 @@ impl TurnRelay {
         self.backoff = (self.backoff * 2).min(TURN_BACKOFF_MAX);
     }
 
+    /// The back-off restarts at the minimum once the live allocation has lived past
+    /// [`TURN_LOSS_AT_ONCE_WINDOW`]; a younger one keeps it where it is.
+    fn restart_backoff_if_settled(&mut self, now: Instant) {
+        if self
+            .allocated_at
+            .is_some_and(|a| now.saturating_duration_since(a) >= TURN_LOSS_AT_ONCE_WINDOW)
+        {
+            self.backoff = TURN_BACKOFF_MIN;
+            self.quick_losses = 0;
+        }
+    }
+
+    /// Drop a rotation's new allocation that is not wanted any more; one already up gets its
+    /// best-effort release on its own socket, which closes after the grace.
+    fn drop_next(&mut self, now: Instant) {
+        if let Some(mut next) = self.next.take() {
+            if next.allocated() {
+                self.retire(&mut next, now);
+            }
+        }
+    }
+
+    /// Release `old` on its own socket (best effort) and keep that socket for the grace.
+    fn retire(&mut self, old: &mut Session, now: Instant) {
+        old.release(now);
+        for data in old.out.drain(..) {
+            self.out.push_back(TurnTransmit {
+                epoch: old.epoch,
+                to: old.creds.server,
+                data,
+            });
+        }
+        self.retiring.push((old.epoch, now + TURN_RETIRE_GRACE));
+    }
+
     /// The live allocation is gone: abandoned (it expires on the server), a new one at once on a
-    /// new socket (a rotation's new allocation, when one is being made, takes over), unless one
-    /// was lost within [`TURN_LOSS_AT_ONCE_WINDOW`] (then the back-off).
+    /// new socket (a rotation's new allocation, when one is being made, takes over), unless an
+    /// earlier loss came since the last allocation that lived [`TURN_LOSS_AT_ONCE_WINDOW`] (then
+    /// the doubling back-off).
     fn lost(&mut self, reason: String, now: Instant) {
-        let recent = self
-            .last_loss
-            .is_some_and(|l| now.saturating_duration_since(l) < TURN_LOSS_AT_ONCE_WINDOW);
-        self.last_loss = Some(now);
+        self.restart_backoff_if_settled(now);
+        self.allocated_at = None;
+        let recent = self.quick_losses > 0;
+        self.quick_losses += 1;
         self.failures += 1;
         tracing::warn!(error = %reason, "webrtc turn: the allocation is lost, allocating again from a new socket (counted on /api/state webrtc.turn.failures)");
         self.last_error = Some(reason);
@@ -1205,8 +1249,10 @@ impl TurnRelay {
         match ev {
             Ev::Data(..) => {}
             Ev::Allocated => {
+                // The back-off is NOT reset here: an allocation lost again soon after its success
+                // keeps growing it (see `restart_backoff_if_settled`).
                 self.allocations += 1;
-                self.backoff = TURN_BACKOFF_MIN;
+                self.allocated_at = Some(now);
                 self.retry_at = None;
                 let max = self.opts.max_channels;
                 if let Some(s) = self.live.as_mut() {
@@ -1232,16 +1278,9 @@ impl TurnRelay {
                     return;
                 };
                 new.set_wanted(&self.wanted, now, self.opts.max_channels);
+                self.allocated_at = Some(now);
                 if let Some(mut old) = self.live.replace(new) {
-                    old.release(now);
-                    for data in old.out.drain(..) {
-                        self.out.push_back(TurnTransmit {
-                            epoch: old.epoch,
-                            to: old.creds.server,
-                            data,
-                        });
-                    }
-                    self.retiring.push((old.epoch, now + TURN_RETIRE_GRACE));
+                    self.retire(&mut old, now);
                 }
                 let relayed = self.relayed().map(|r| r.to_string()).unwrap_or_default();
                 tracing::info!(%relayed, "webrtc turn: credential rotated, the new allocation carries the answers (phones on the old relay reconnect)");
@@ -1283,7 +1322,7 @@ impl TurnRelay {
         self.creds = Some(creds);
         self.unavailable = false;
         self.rotate_after = None;
-        self.next = None;
+        self.drop_next(now);
         match &self.live {
             Some(s) if s.allocated() => {
                 tracing::info!("webrtc turn: a new credential, the rotation allocates with it next to the live relay");
@@ -1367,6 +1406,7 @@ impl TurnRelay {
     /// waits, never past the old credential's expiry margin).
     pub fn handle_timeout(&mut self, now: Instant, busy: bool) {
         self.retiring.retain(|(_, until)| *until > now);
+        self.restart_backoff_if_settled(now);
         if self.live.is_none() && self.retry_at.is_some_and(|r| now >= r) {
             self.start_live(now);
         }
@@ -1418,6 +1458,16 @@ impl TurnRelay {
         }
     }
 
+    /// Whether a datagram from `from` on the socket of allocation `epoch` is the relay's: its TURN
+    /// server's exact address on the live allocation's socket or a rotation's new one. Anything
+    /// else (another sender, a late answer on a retiring socket) is the network task's to count.
+    pub fn accepts(&self, epoch: u32, from: SocketAddr) -> bool {
+        self.live
+            .iter()
+            .chain(self.next.iter())
+            .any(|s| s.epoch == epoch && s.creds.server == from)
+    }
+
     /// One datagram from `from` on the socket of allocation `epoch`. Only the TURN server's address
     /// on a live session's socket counts. Data indications and ChannelData come back as
     /// `(peer, payload)` (feed it to str0m from `peer` to the relayed address); responses move the
@@ -1433,6 +1483,9 @@ impl TurnRelay {
             s.as_ref()
                 .is_some_and(|s| s.epoch == epoch && s.creds.server == from)
         };
+        if !self.accepts(epoch, from) {
+            return None;
+        }
         let mut got = None;
         if is(&self.live) {
             let ev = self.live.as_mut().and_then(|s| s.datagram(data, now));
