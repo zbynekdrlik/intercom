@@ -14,7 +14,8 @@ use intercom_hub::vban_io::BufferKind;
 
 #[test]
 fn janus_participants_get_the_resampler_leg() {
-    let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
+    // intercom#42 phase 4: strih-snv's phones moved to webrtc; strih-pp keeps the Janus leg.
+    let m = Matrix::from_toml(include_str!("../../intercom.strih-pp.toml")).unwrap();
     let buffers = input_buffers(&m);
     let janus: Vec<usize> = m
         .participants

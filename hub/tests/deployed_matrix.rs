@@ -6,6 +6,7 @@
 
 use intercom_hub::janus_rtp::JanusCodec;
 use intercom_hub::matrix::{Matrix, ADAPTER_ALSA, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
+use intercom_hub::webrtc_signal::TurnMode;
 
 const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-snv.toml");
 
@@ -117,21 +118,47 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         "program references must never reach a cambox output"
     );
 
-    // issue 1345 M3a: the deployed matrix carries the Janus audiobridge edge — the phones
-    // participant is the single `janus` participant, and the `[janus]` table parsed with defaults.
+    // intercom#42 phase 4: strih-snv's phones are the hub's own WebRTC leg (no Janus), with the
+    // hub's Cloudflare TURN relay for the phones on mobile data (the venue uplink is CGNAT).
     let phones = m
-        .janus_participant()
-        .expect("a janus participant (phones) is present");
+        .webrtc_participant()
+        .expect("a webrtc participant (phones) is present");
     assert_eq!(m.participants[phones].name, "phones");
     assert_eq!(m.participants[phones].role, "phones");
-    let j = m.janus.as_ref().expect("the [janus] table is present");
+    assert_eq!(
+        m.janus_participant(),
+        None,
+        "the phones leg is webrtc, not janus"
+    );
+    let w = m.webrtc.as_ref().expect("the [webrtc] table is present");
+    assert_eq!(w.validate(), Ok("0.0.0.0:6992".parse().unwrap()));
+    assert_eq!(w.turn_mode(), TurnMode::Cloudflare);
+    // The default host candidates: the box's LAN addresses minus the Dante leg, which the hub
+    // knows from the [dlink] iface (the Dante guard), so no explicit host_ips is needed.
+    assert!(
+        w.host_ips.is_empty(),
+        "host_ips stays the hub's LAN-only default"
+    );
+    assert_eq!(w.max_phones, 16);
+    assert_eq!(
+        m.dlink.as_ref().map(|d| d.iface.as_str()),
+        Some("enp7s0.70"),
+        "the Dante NIC the default host candidates exclude"
+    );
+
+    // The fallback stays one word away (`adapter = "janus"` + a restart): the [janus] table is
+    // kept, unused while the phones are on webrtc.
+    let j = m
+        .janus
+        .as_ref()
+        .expect("the [janus] table is kept for the fallback");
     assert_eq!(j.room, 1000);
     assert_eq!(j.rtp_bind, "0.0.0.0:6990");
     assert_eq!(
         j.room_secret_file.as_deref(),
         Some("/etc/intercom-hub/janus-room.secret")
     );
-    // Issue 1345 (25.9.2026): the deployed phones leg is Opus with in-band FEC, not PCMU.
+    // Issue 1345 (25.9.2026): the Janus phones leg is Opus with in-band FEC, not PCMU.
     assert_eq!(j.codec, JanusCodec::Opus);
 
     // issue 1439 phase 2 (owner ROZHODNUTE 22.10.2026): the hub is the intercom only and forwards nothing
