@@ -337,3 +337,57 @@ fn a_mic_back_after_a_stall_starts_over() {
     assert!(slots.push_mic(0, 1, &[500; 960], back));
     assert!(slots.mic_rate_ppm(0).abs() < 1000.0);
 }
+
+/// A queue that takes every other packet.
+struct EveryOther(Arc<Mutex<Vec<TxPacket>>>, bool);
+
+impl PacketSink for EveryOther {
+    fn offer(&mut self, packet: TxPacket) -> bool {
+        self.1 = !self.1;
+        if self.1 {
+            self.0.lock().unwrap().push(packet);
+        }
+        self.1
+    }
+}
+
+// intercom#42 review: a packet the full queue dropped must still move the phone's RTP clock, so
+// every packet carries the room tick it was made in.
+#[test]
+fn every_packet_carries_its_room_tick_dropped_ones_included() {
+    let bus = Arc::new(Mutex::new(PacedRing::new(
+        RING_TARGET_FRAMES,
+        RING_CAP_FRAMES,
+    )));
+    let slots = Arc::new(RoomSlots::new(1));
+    let jitter = Arc::new(Mutex::new(vec![
+        JitterBuffer::new(4096),
+        JitterBuffer::janus_capture(8192, 2048, 48_000).with_min_channels(2),
+    ]));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let stats = Arc::new(WebrtcShared::new("127.0.0.1:6992".into(), vec![], 1));
+    let mut room = PhonesRoom::new(RoomIo {
+        bus,
+        slots: slots.clone(),
+        jitter,
+        phones_id: 1,
+        sink: EveryOther(sent.clone(), false),
+        stats: stats.clone(),
+    })
+    .unwrap();
+    let t0 = Instant::now();
+    // Two ticks before the phone exists still count on the room clock.
+    room.tick(t0);
+    room.tick(t0 + Duration::from_millis(20));
+    slots.open(0, 9);
+    for k in 2..12u64 {
+        room.tick(t0 + Duration::from_millis(20 * k));
+    }
+    let ticks: Vec<u64> = sent.lock().unwrap().iter().map(|p| p.tick).collect();
+    assert_eq!(
+        ticks,
+        vec![3, 5, 7, 9, 11],
+        "every other packet dropped, the ticks go on"
+    );
+    assert_eq!(stats.snapshot().room_dropped, 5);
+}
