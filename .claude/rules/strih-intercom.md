@@ -1461,7 +1461,9 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   - A RECONNECT is an offer whose `replaces` names a live phone (dropped at once, "replaced by its
     reconnect") or one connected within the last 120 s (`RECENT_WINDOW`). It is exempt from every
     cap and spends no rate token, so a whole crew comes back at once after a blip. The PWA sends
-    its last id as `replaces`.
+    the id of its last session that CONNECTED as `replaces` (round 4: `lastPhoneId` is set on
+    connect, never on an answer, so the page always names the claim the hub keeps). A reconnecting
+    phone that is adopted but not connected yet is not a pending offer either.
   - A claim is SPENT by its use (round 2): a `recent` entry is removed when it admits an offer, a
     replaced phone's id never enters `recent`, one id has at most one open reservation. It is
     GIVEN BACK (round 3, its original time, still inside the 120 s) when the offer it admitted is
@@ -1470,12 +1472,21 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   - A FRESH offer needs a token from its key's bucket (`RateLimiter`, `offer_rate(max_phones)`:
     burst `max_phones` (at least 5), one a second; looked at with `peek` in the handler, spent
     only when the offer got a slot; at most 4096 buckets, least-recently-used eviction, never a
-    shared one), may be one of at most `MAX_PENDING_PER_CLIENT` = 3 PENDING (not yet connected)
-    fresh offers of its key (connected phones never count), 429 beyond, and the hub-wide pending
-    offers may hold at most `pending_cap` = half the slots (503), with the 3 s STUN deadline
-    freeing them: that is the flood guard. Measured: 16 phones behind one key all connect (paced
-    by the page's retries), all 16 reconnect at once on their first try, and a flood from that
-    key neither passes the caps nor knocks one off.
+    shared one), may be one of at most `pending_cap_per_client` = half the hub-wide pending cap
+    (at least 3; 4 on a 16-slot hub) PENDING fresh offers of its key (connected phones never
+    count), 429 beyond, and the hub-wide pending fresh offers may hold at most `pending_cap` = half
+    the slots (503), with the 3 s STUN deadline freeing them: that is the real flood guard; the
+    per-key one only keeps one key from taking all of it. The page's reconnect delay has +-30 %
+    jitter (1 -> 4 s cap kept), so a crew does not come back in step. Measured: 16 phones behind
+    one key all connect, all 16 reconnect at once on their first try, a flood from that key
+    neither passes the caps nor knocks one off, and after a hub RESTART (no claims) 10 phones
+    behind one key retrying with the page's backoff in step (no jitter, the worst case) are all
+    connected in ~3 s (7.1 s with the round-3 cap of 3).
+  - **Accepted: the peek/spend race.** The handler looks at the bucket (`peek`) before the media
+    task decides, and spends the token (`spend`) only after a fresh offer got its slot, so two
+    concurrent offers of one key can both pass a bucket holding one token. Bounded: every such
+    offer still needs room under the per-key and the hub-wide pending caps, and a spend on an
+    empty bucket is a no-op (never a debt).
   Every refusal counts in `offers_refused` (`offers_rate_limited` for the 429s); a warning names
   the count at most every 10 s (`RefusalLog`), never a line per request.
 - **The client key (`client_key`, review round 2 🟡1).** The hub listens on `0.0.0.0:8790`, so a
@@ -1566,12 +1577,13 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   never-connecting offers from 10 addresses hold only the pending cap; a reconnect with `replaces`
   is admitted during it; a new phone connects once the flood's slots expire after 3 s), 415 and the
   per-client 429, an offer naming a foreign address that never gets a datagram, the RTP tick
-  arithmetic, `is_stun`; round 2: a reconnect claim spent once (recent and live), at most 3
-  sessions per client and forged LAN headers that do not change the key, `SendFailures`; round 3:
+  arithmetic, `is_stun`; round 2: a reconnect claim spent once (recent and live), a key's
+  share of the pending offers and forged LAN headers that do not change the key, `SendFailures`; round 3:
   16 phones behind one venue key connect, all reconnect at once and survive a flood from that
   key, a flood with free slots stays inside the caps, a claim comes back after a never-connected
   or a failed reconnect, per-phone send failures, `peek`/`spend`, `offer_rate`, the canonical
-  key), and the
+  key; round 4: 10 phones behind one key back within 6 s after a restart (page backoff, no
+  jitter), reconnects in flight never hold the pending cap, `pending_cap_per_client`), and the
   Playwright `webrtc` project (`webrtc.spec.js` + `webrtc-hub.js` + `webrtc.toml`, the REAL
   binary on the base port + 4..6, started and SIGKILLed by the spec itself): two phones, a VBAN tone
   reaches both meters, A's fake mic reaches B and never A, mic OFF silences B, rename, a closed page

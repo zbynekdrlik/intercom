@@ -54,10 +54,13 @@ pub const RESERVATION_DEADLINE: Duration = Duration::from_secs(5);
 pub const RECENT_WINDOW: Duration = Duration::from_secs(120);
 /// At most this many recently connected ids are remembered.
 pub const RECENT_MAX: usize = 256;
-/// At most this many PENDING (not yet connected) fresh sessions per client key: 429 beyond (review
-/// rounds 2 and 3). Connected phones never count: a whole venue's Wi-Fi reaches the hub through
-/// cloudflared under ONE key, and its crew may all be connected at once.
-pub const MAX_PENDING_PER_CLIENT: usize = 3;
+/// How many PENDING (not yet connected) fresh offers one client key may hold: half the hub-wide
+/// pending cap, at least 3; 429 beyond (review rounds 2-4). Connected phones never count: a whole
+/// venue's Wi-Fi reaches the hub through cloudflared under ONE key. The hub-wide pending cap is the
+/// real flood guard; this one only keeps one key from taking all of it.
+pub fn pending_cap_per_client(max_phones: usize) -> usize {
+    (pending_cap(max_phones) / 2).max(3)
+}
 /// The end reason of a phone a reconnect replaced: its id is not a reconnect claim again.
 const REPLACED: &str = "replaced by its reconnect";
 /// How long the pending-commands queue is.
@@ -722,7 +725,9 @@ impl NetTask {
     fn pending(&self) -> usize {
         self.phones
             .iter()
-            .filter(|p| !p.connected && p.ending.is_none())
+            // A reconnecting phone (it spent a claim) is not a fresh offer: a crew-wide reconnect
+            // never holds the cap against a new phone (review round 4).
+            .filter(|p| !p.connected && p.ending.is_none() && p.claim.is_none())
             .count()
             + self
                 .reservations
@@ -785,7 +790,7 @@ impl NetTask {
     /// reconnect: exempt from the hub-wide pending cap, the per-client pending cap and the rate
     /// bucket (review round 3: a venue's whole crew comes back at once under one key after a
     /// restart). One open reservation per claimed id. A fresh offer needs a token and may be one
-    /// of at most [`MAX_PENDING_PER_CLIENT`] pending ones of its client. Returns the reservation
+    /// of at most [`pending_cap_per_client`] pending ones of its client. Returns the reservation
     /// and whether it is a reconnect.
     fn reserve(
         &mut self,
@@ -830,7 +835,7 @@ impl NetTask {
                     .iter()
                     .filter(|r| r.claim.is_none() && r.client == client)
                     .count();
-            if pending_of_client >= MAX_PENDING_PER_CLIENT {
+            if pending_of_client >= pending_cap_per_client(self.table.capacity()) {
                 return Err(SignalError::RateLimited);
             }
             if self.pending() >= pending_cap(self.table.capacity()) {
@@ -1063,13 +1068,7 @@ impl NetTask {
                         );
                     } else {
                         // Its reconnect claim stays valid for the phone's next try.
-                        if let Some((id, since)) = phone.claim {
-                            if now.saturating_duration_since(since) <= RECENT_WINDOW
-                                && !self.recent.iter().any(|(r, _)| *r == id)
-                            {
-                                self.recent.push_back((id, since));
-                            }
-                        }
+                        self.give_back(phone.claim, now);
                         self.shared
                             .sessions_never_connected
                             .fetch_add(1, Ordering::Relaxed);

@@ -258,9 +258,10 @@ let iceTimer = null;
 // The native (in-hub WebRTC) session, intercom#42: its PeerConnection and the id the hub gave it.
 let nativePc = null;
 let phoneId = null;
-// The id of this page's last native session that the hub answered: the next offer names it as
+// The id of this page's last native session that really CONNECTED: the next offer names it as
 // `replaces`, so the hub counts a reconnect as an established phone, never as one of the
-// anonymous offers it caps (intercom#42 review).
+// anonymous offers it caps (intercom#42 review). Set only on connect (review round 4): a session
+// that never connects leaves the previous claim in place, which is exactly the one the hub keeps.
 let lastPhoneId = null;
 
 // The live PeerConnection of either transport (the media watchdog and the mic read it).
@@ -375,6 +376,7 @@ async function startNative(my, iceServers) {
     if (my !== gen) return;
     const state = pc.connectionState;
     if (state === "connected") {
+      if (phoneId) lastPhoneId = phoneId;
       clearTimeout(iceTimer);
       mediaUp = true;
       onConnected();
@@ -418,7 +420,6 @@ async function startNative(my, iceServers) {
       return;
     }
     phoneId = body.id;
-    lastPhoneId = body.id;
     joined = true;
     await pc.setRemoteDescription({ type: "answer", sdp: body.sdp });
   } catch (e) {
@@ -470,7 +471,9 @@ function teardownSession() {
 
 function scheduleReconnect() {
   teardownSession();
-  const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  // +-30 % jitter (review round 4): after a hub restart a whole crew does not come back in step.
+  const jitter = 0.7 + 0.6 * Math.random();
+  const delay = Math.round(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt * jitter));
   reconnectAttempt += 1;
   reconnectAt = Date.now() + delay;
   renderReconnectCountdown();
