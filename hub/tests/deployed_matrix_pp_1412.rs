@@ -35,10 +35,7 @@ fn strih_pp_matrix_loads_as_the_camera_intercom_without_a_program_out() {
     let sliders: Vec<&str> = m.levels.specs().iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         sliders,
-        [
-            "program", "cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "telefony",
-            "master"
-        ]
+        ["program", "cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "telefony", "master"]
     );
     assert!(m.janus.is_some(), "the phones leg");
     assert_eq!(

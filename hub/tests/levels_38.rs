@@ -261,7 +261,11 @@ fn the_master_resolves_onto_the_whole_output_and_claims_no_point() {
         assert_ne!(l, MASTER);
     }
     // The talkback legs are no slider's.
-    assert!(m.points.iter().filter(|p| p.dst != c).all(|p| p.level.is_none()));
+    assert!(m
+        .points
+        .iter()
+        .filter(|p| p.dst != c)
+        .all(|p| p.level.is_none()));
 }
 
 #[test]
@@ -293,9 +297,7 @@ fn a_second_master_for_one_output_is_refused() {
 
 #[test]
 fn a_master_into_an_output_without_points_is_refused() {
-    let e = refused(
-        "\n[[level]]\nname = \"m\"\nlabel = \"M\"\ndst = \"prog\"\nmaster = true\n",
-    );
+    let e = refused("\n[[level]]\nname = \"m\"\nlabel = \"M\"\ndst = \"prog\"\nmaster = true\n");
     // prog has no outputs at all: the dst check says so first.
     assert!(e.contains("has no output channels"), "{e}");
 }
@@ -312,7 +314,10 @@ fn a_from_naming_a_slider_of_this_config_or_a_bad_name_is_refused() {
         "\n[[level]]\nname = \"a\"\nlabel = \"A\"\ndst = \"cutters\"\nsources = [\"cam1\"]\n\
          \n[[level]]\nname = \"b\"\nlabel = \"B\"\ndst = \"cutters\"\nsources = [\"cam2\"]\nfrom = \"a\"\n",
     );
-    assert!(e.contains("'from' names 'a', a slider of this config"), "{e}");
+    assert!(
+        e.contains("'from' names 'a', a slider of this config"),
+        "{e}"
+    );
     let e = refused(
         "\n[[level]]\nname = \"b\"\nlabel = \"B\"\ndst = \"cutters\"\nsources = [\"cam2\"]\nfrom = \"Bad Name\"\n",
     );
@@ -328,9 +333,16 @@ fn at_0_db_with_a_master_the_mix_is_bit_identical_to_the_matrix_without_sliders(
     let a = Engine::new(with.clone()).mix_block(&input(&with), 4);
     let b = Engine::new(without.clone()).mix_block(&input(&without), 4);
     for id in 0..with.participants.len() {
-        assert_eq!(a.interleaved(id, 4), b.interleaved(id, 4), "participant {id}");
+        assert_eq!(
+            a.interleaved(id, 4),
+            b.interleaved(id, 4),
+            "participant {id}"
+        );
     }
-    assert_eq!(cans(&with, &Engine::new(with.clone())), expected(1.0, 1.0, 1.0, 1.0, 1.0));
+    assert_eq!(
+        cans(&with, &Engine::new(with.clone())),
+        expected(1.0, 1.0, 1.0, 1.0, 1.0)
+    );
 }
 
 #[test]
@@ -355,12 +367,21 @@ fn the_master_trims_the_whole_output_on_top_of_the_source_trims() {
     let e = Engine::new(m.clone());
     let talk = talkback(&m, &e);
     m.levels.set(MASTER, -6.0, false).unwrap();
-    assert_eq!(cans(&m, &e), expected(1.0, 1.0, 1.0, 1.0, gain_linear(-6.0)));
+    assert_eq!(
+        cans(&m, &e),
+        expected(1.0, 1.0, 1.0, 1.0, gain_linear(-6.0))
+    );
     m.levels.set(CAM1, -6.0, false).unwrap();
     m.levels.set(FOH, 3.0, false).unwrap();
     assert_eq!(
         cans(&m, &e),
-        expected(gain_linear(3.0), 1.0, gain_linear(-6.0), 1.0, gain_linear(-6.0))
+        expected(
+            gain_linear(3.0),
+            1.0,
+            gain_linear(-6.0),
+            1.0,
+            gain_linear(-6.0)
+        )
     );
     // The cameramen's talkback is no part of the cutters' output.
     assert_eq!(talkback(&m, &e), talk);
@@ -373,7 +394,10 @@ fn a_master_boost_clamps_at_full_scale() {
     m.levels.set(MASTER, 12.0, false).unwrap();
     let got = cans(&m, &e);
     assert_eq!(got, expected(1.0, 1.0, 1.0, 1.0, gain_linear(12.0)));
-    assert!(got.iter().flatten().any(|&s| s == i16::MAX || s == i16::MIN));
+    assert!(got
+        .iter()
+        .flatten()
+        .any(|&s| s == i16::MAX || s == i16::MIN));
 }
 
 #[test]
@@ -398,7 +422,8 @@ fn a_muted_master_silences_the_output_and_keeps_its_db_and_the_others() {
 
 // ---- the #34 state file migrates ------------------------------------------------------------
 
-const OLD_FILE: &str = "# intercom-hub level sliders (intercom#34); written by the hub on every change.\n\
+const OLD_FILE: &str =
+    "# intercom-hub level sliders (intercom#34); written by the hub on every change.\n\
 [levels.click]\ndb = -2.0\nmuted = false\n\n\
 [levels.kamery]\ndb = -30.0\nmuted = true\n\n\
 [levels.program]\ndb = -4.5\nmuted = false\n\n\
@@ -409,15 +434,31 @@ fn a_group_value_carries_over_to_its_new_per_source_sliders() {
     let m = matrix();
     let r = m.levels.apply_stored(OLD_FILE).unwrap();
     let st = m.levels.states();
-    assert_eq!((st[FOH].db, st[FOH].muted), (-4.5, false), "foh from program");
-    assert_eq!((st[CLICK].db, st[CLICK].muted), (-2.0, false), "click keeps its name");
-    assert_eq!((st[CAM1].db, st[CAM1].muted), (-30.0, true), "cam1 from kamery");
+    assert_eq!(
+        (st[FOH].db, st[FOH].muted),
+        (-4.5, false),
+        "foh from program"
+    );
+    assert_eq!(
+        (st[CLICK].db, st[CLICK].muted),
+        (-2.0, false),
+        "click keeps its name"
+    );
+    assert_eq!(
+        (st[CAM1].db, st[CAM1].muted),
+        (-30.0, true),
+        "cam1 from kamery"
+    );
     assert_eq!(
         (st[CAM2].db, st[CAM2].muted),
         (-20.0, true),
         "cam2 from kamery, clamped into its -20 dB floor"
     );
-    assert_eq!((st[MASTER].db, st[MASTER].muted), (0.0, false), "the master is new: 0 dB");
+    assert_eq!(
+        (st[MASTER].db, st[MASTER].muted),
+        (0.0, false),
+        "the master is new: 0 dB"
+    );
     assert_eq!(m.levels.linear(CAM1), 0.0);
     assert_eq!(m.levels.linear(FOH), gain_linear(-4.5));
     assert_eq!(
@@ -438,7 +479,9 @@ fn a_new_sliders_own_stored_value_wins_over_its_group() {
     let m = matrix();
     let r = m
         .levels
-        .apply_stored(&format!("{OLD_FILE}\n[levels.cam1]\ndb = -1.5\nmuted = false\n"))
+        .apply_stored(&format!(
+            "{OLD_FILE}\n[levels.cam1]\ndb = -1.5\nmuted = false\n"
+        ))
         .unwrap();
     let st = m.levels.states();
     assert_eq!((st[CAM1].db, st[CAM1].muted), (-1.5, false));
@@ -484,8 +527,8 @@ fn a_file_without_old_groups_or_new_names_keeps_0_db() {
 fn the_api_marks_the_master_additively() {
     let m = matrix();
     m.levels.set(MASTER, -2.0, false).unwrap();
-    let body = serde_json::to_value(levels_body(&m.levels, &HubState::snapshot(&m, "t", &[])))
-        .unwrap();
+    let body =
+        serde_json::to_value(levels_body(&m.levels, &HubState::snapshot(&m, "t", &[]))).unwrap();
     let levels = body["levels"].as_array().unwrap();
     assert_eq!(levels.len(), 5);
     assert_eq!(levels[MASTER]["name"], "master");
@@ -544,7 +587,10 @@ fn strih_snv_has_a_slider_per_source_and_a_master() {
     assert_eq!(shape(&m), want);
     let master = m.levels.specs().last().unwrap();
     let c = m.id_of("cutters").unwrap();
-    assert_eq!(master.points, m.points.iter().filter(|p| p.dst == c).count());
+    assert_eq!(
+        master.points,
+        m.points.iter().filter(|p| p.dst == c).count()
+    );
     assert_eq!(master.points, 44);
 }
 

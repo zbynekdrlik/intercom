@@ -353,8 +353,18 @@ fn strih_snv_has_a_slider_per_source_and_a_master() {
     assert_eq!(
         labels,
         [
-            "FOH", "LV1", "Click", "Kamera 1", "Kamera 2", "Kamera 3", "Kamera 4", "Kamera 5",
-            "Kamera 6", "Kamera 7", "Telefóny", "Master"
+            "FOH",
+            "LV1",
+            "Click",
+            "Kamera 1",
+            "Kamera 2",
+            "Kamera 3",
+            "Kamera 4",
+            "Kamera 5",
+            "Kamera 6",
+            "Kamera 7",
+            "Telefóny",
+            "Master"
         ]
     );
     every_cutters_point_is_trimmed(&m);
