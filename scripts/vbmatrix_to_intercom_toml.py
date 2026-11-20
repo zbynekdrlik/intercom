@@ -24,7 +24,9 @@ Slot → hub participant mapping (derived from the XML's own attributes, not a h
   `program_out` pipewire sink is gone from this matrix, and from strih-pp's since 24.10.2026; the hub
   still supports one).
 
-Adapters: VBAN legs are live; the `phones` participant is `janus` (M3a); the `cutters` (MiniFuse)
+Adapters: VBAN legs are live; the `phones` participant is the hub's own WebRTC leg (`webrtc`,
+intercom#42 phase 4, with the `[webrtc]` table; it was `janus` since M3a, whose `[janus]` table is
+still emitted so going back is `adapter = "janus"` + a hub restart); the `cutters` (MiniFuse)
 open the card directly through ALSA (`alsa`, issue 1438: arecord for the operator talkback mic,
 aplay for their own N-1 bus to the cans, on `hw:CARD=M4,DEV=0`, no PipeWire node; issue 1344 had
 them on two `pw-cat` children). The remaining interface participants (speakers/line34) stay
@@ -63,6 +65,17 @@ JANUS = {
     "room_secret_file": "/etc/intercom-hub/janus-room.secret",
     "rtp_bind": "0.0.0.0:6990",
     "codec": "opus",
+}
+
+# The in-hub WebRTC phone leg (intercom#42 phase 4), emitted as the `[webrtc]` table for the `phones`
+# participant (adapter `webrtc`). `turn = "cloudflare"`: the hub's own relayed candidate on Cloudflare's
+# TURN (the venue uplink is CGNAT), minted from the box's existing TURN key (the same `--turn-config`
+# minter `/api/ice` uses). `udp_bind` is the hub's default fixed port. No `host_ips`: the hub offers the
+# box's LAN addresses and leaves out the Dante leg, which it knows from `[dlink] iface`. `max_phones`
+# stays the hub's default (16).
+WEBRTC = {
+    "udp_bind": "0.0.0.0:6992",
+    "turn": "cloudflare",
 }
 
 # The Interkom picture (MJPEG) config emitted into the `[video]` table (issue 1345 M3c). The hub
@@ -275,12 +288,12 @@ def build_model(xml_text):
             add("line34", "line34", "none", 0)
             slot_to_part[uniq] = "line34"
 
-    # Phones (the OBS/VDO.Ninja side, VAIO1) — the first online VAIOSlot. Since issue 1345 M3a the
-    # phones participant is carried over the Janus audiobridge (adapter `janus`), not VB-Matrix/VDO;
-    # its `[janus]` config table is emitted by render().
+    # Phones (the OBS/VDO.Ninja side, VAIO1) — the first online VAIOSlot. Since intercom#42 phase 4
+    # the phones are the hub's own WebRTC leg (adapter `webrtc`; Janus since issue 1345 M3a); the
+    # `[webrtc]` table and the fallback's `[janus]` table are emitted by render().
     for e in root.iter("VAIOSlot"):
         if e.get("online") == "1":
-            add("phones", "phones", "janus", 0)
+            add("phones", "phones", "webrtc", 0)
             slot_to_part[e.get("uniq")] = "phones"
             break
 
@@ -421,14 +434,21 @@ def render(model):
     out.append(f'block_frames = {hub["block_frames"]}')
     out.append("")
 
-    # The Janus audiobridge edge (issue 1345 M3a) — the phones participant's plain-RTP leg. The
-    # room secret is NEVER inlined; the hub reads it from `room_secret_file` (0600) at start.
+    # The Janus audiobridge edge (issue 1345 M3a), unused while the phones are on webrtc and kept
+    # for the fallback (`adapter = "janus"` + a restart). The room secret is NEVER inlined; the hub
+    # reads it from `room_secret_file` (0600) at start.
     out.append("[janus]")
     out.append(f'api_url = "{JANUS["api_url"]}"')
     out.append(f'room = {JANUS["room"]}')
     out.append(f'room_secret_file = "{JANUS["room_secret_file"]}"')
     out.append(f'rtp_bind = "{JANUS["rtp_bind"]}"')
     out.append(f'codec = "{JANUS["codec"]}"')
+    out.append("")
+
+    # The in-hub WebRTC phone leg (intercom#42 phase 4) with the hub's Cloudflare TURN relay.
+    out.append("[webrtc]")
+    out.append(f'udp_bind = "{WEBRTC["udp_bind"]}"')
+    out.append(f'turn = "{WEBRTC["turn"]}"')
     out.append("")
 
     # The Interkom picture (issue 1345 M3c) — the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe.

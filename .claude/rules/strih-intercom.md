@@ -112,7 +112,8 @@ online VAIO1 → phones; VASIO8 → NOTHING since issue 1439 phase 2 (it was **p
 and `program_monitor` in M1: the strih OBS now takes the console's VBAN program itself, so the converter
 drops VASIO8 and its points, `.claude/rules/obs-vban-receive.md` "The strih role").
 Per-participant `in_channels`/`out_channels` = the max channel routed (this preserves cam2's 8-ch
-input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); `cutters`
+input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `webrtc` since intercom#42 phase 4 (`janus` since M3a;
+its `[janus]` table is still emitted for the fallback, "Phase 4 — strih-snv on webrtc"); `cutters`
 (MiniFuse) is the `alsa` card leg since issue 1438 (card ID `M4`, aplay + arecord on the hw PCM, no
 PipeWire; `.claude/rules/strih-intercom-alsa-leg.md`; issue 1344 had it on `pipewire`);
 `speakers`/`line34` stay `adapter = "none"`.
@@ -1419,13 +1420,14 @@ signalling with it. A skipped frame is dropped, never queued. Tests: `hub/tests/
   showed the live cam1 picture through the HTTPS front at ~9.3 fps; stop the transient hub right
   after — it is a second sender of stream `cam1` into cam1's headset.
 
-## The in-hub WebRTC phone leg (intercom#42, phases 1-3)
+## The in-hub WebRTC phone leg (intercom#42, phases 1-4)
 
 Owner decision B (20.11.2026): the hub ITSELF is the phones' WebRTC endpoint, no Janus. Design:
 issue 42 comment 7041415746. Per box `adapter = "webrtc"` on the `phones` participant; `janus`
 stays the fallback by config until an event ran clean (phase 4 switches strih-snv; phase 3 added
-the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still `janus`, pinned by
-`webrtc_signal_42.rs`).
+the hub-side TURN relay, "The hub's own TURN relay" below; since phase 4 strih-snv is on `webrtc`
+and strih-pp stays on `janus`, pinned by `webrtc_signal_42.rs`, "Phase 4 — strih-snv on webrtc" at
+the end).
 
 - **Crate:** `str0m = "=0.25.0"`, `default-features = false`, `features = ["rust-crypto"]`
   (sans-IO ICE + DTLS + SRTP; pinned exactly, pre-1.0). No openssl. **But `rust-crypto` is not
@@ -1749,3 +1751,40 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
 - **Gotchas:** a top-level `display` binding inside `tracing::info!(... = %display ...)` collides
   with tracing's `display` helper (E0277): rename the binding. Chromium answers a stereo
   `opus/48000/2` rtpmap; the hub encodes and decodes mono, which Opus allows.
+
+### Phase 4 — strih-snv on webrtc (intercom#42)
+
+- **The switch.** The converter (`WEBRTC`, `render()`) emits for strih-snv the `phones`
+  participant `adapter = "webrtc"` and `[webrtc]` `udp_bind = "0.0.0.0:6992"`, `turn =
+  "cloudflare"`; `max_phones` and `host_ips` stay the hub's defaults. strih-pp (hand-edited) stays
+  on `janus`. Pinned by `deployed_matrix.rs`, `webrtc_signal_42.rs` and the converter pytest.
+- **Host candidates on strih-snv: the default is right, no `host_ips`.** The box has `enp7s0`
+  10.77.9.202 (the LAN) and `enp7s0.70` 10.77.7.202 (the Dante VLAN). Both are RFC 1918, so
+  `is_lan_candidate` alone would offer both. The hub drops the Dante one through `is_excluded` =
+  `DanteGuard::is_dante`: the guard is built from `[dlink] iface = "enp7s0.70"` (its addresses and
+  subnet) before `start_webrtc_leg` reads the interfaces. tailscale / docker interfaces are left out
+  by name. A literal `host_ips` would pin a DHCP address into a generated file. Check after the
+  deploy: `/api/state` `webrtc.host_candidates` lists only `10.77.9.202:6992`.
+- **TURN credentials: nothing new on the box.** `turn = "cloudflare"` takes its credentials from the
+  same `TurnMinter` `/api/ice` and Janus's `/api/turn-rest` already use (`--turn-config`, default
+  `/etc/intercom-hub/turn.toml`, read through the unit's `turn.toml` systemd credential drop-in that
+  camera-box's setup-strih writes). A box without the key reads `webrtc.turn.state = off` with the
+  reason; the phones on the venue Wi-Fi still connect on the host candidate.
+- **The `[janus]` table stays, unused.** `Matrix::from_toml` loads it next to a `webrtc` phones
+  participant (only a janus PARTICIPANT is exclusive with webrtc); `main.rs` starts the Janus
+  adapter and the `/janus` relay only with a janus participant AND the table. `--check-config`:
+  `intercom.strih-snv.toml loads (15 participants, 212 points)`.
+- **The fallback:** on the box, set the phones participant back to `adapter = "janus"` in
+  `/etc/intercom-hub/intercom.toml` AND delete its `[webrtc]` table (the matrix refuses a `[webrtc]`
+  table with no webrtc participant), then restart the hub. The Janus service and its room were never
+  removed. The phones' page asks `/api/phone` before every session, so a reload (or its own
+  reconnect) moves it to the other leg.
+- **Live checks after the deploy (the supervisor, in this order):**
+  1. `curl -s http://strih-snv:8790/api/state | jq .webrtc.turn` -> `state: "allocated"` with a
+     `relayed` address, `failures` 0, and `.webrtc.host_candidates` = the LAN address only.
+  2. A browser through the tunnel (`https://interkom.newlevel.media/?relay=1`): it connects, and
+     `/api/state` `webrtc.phones[].pair` reads `relay` for it (the forced-relay path through
+     Cloudflare's TURN), with a clean console.
+  3. Later, a real phone on mobile data after the hub sat IDLE (no phone) for more than 5 min:
+     it connects at once with `pair: relay` and `webrtc.turn.failures` unchanged (the keepalive held
+     the CGNAT mapping; a loss would show a `lost, allocating again` journal line).
