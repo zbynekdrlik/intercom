@@ -1433,7 +1433,8 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   themselves are RustCrypto. CI already has cmake (libopus). Chromium 131 interoperates (DTLS up in
   ~60 ms on localhost).
 - **Config** (`webrtc_signal::WebrtcConfig`, `deny_unknown_fields`): `[webrtc]` `udp_bind`
-  (default `0.0.0.0:6992`, a fixed port, never a Dante address), `host_ips` (default: the bind's IP
+  (default `0.0.0.0:6992`, a fixed port, IPv4 only (`[::]` would deliver v4-mapped sources and no
+  `IP_PKTINFO` destination), never a Dante address), `host_ips` (default: the bind's IP
   when specific, else the box's LAN addresses only, `is_lan_candidate`: RFC 1918 IPv4 on a real
   interface, never loopback, link-local, 100.64/10 (the tailnet), a public address, a
   `docker`/`br-`/`veth`/`virbr`/`tailscale`/`tun`/`wg`... interface or the Dante leg; the answer
@@ -1450,17 +1451,30 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
 - **The offer route is public** (cloudflared, no credential; review round 1 🔴1, 🟡3, 🟡4). It
   checks in the cheapest order: `Content-Type: application/json` or 415 (a page elsewhere then
   needs a CORS preflight, which the hub never answers), a token bucket per client or 429
-  (`RateLimiter`, 5 at once then one per 2 s; key `client_key`: `CF-Connecting-IP`, else the LAST
-  `X-Forwarded-For` hop, the one the box's nginx appended, else the TCP peer), the body limits (413
-  / 400), then a slot on the media task (`Reserve`, 503), and only then the SDP parse, the DTLS
+  (`RateLimiter`, 5 at once then one per 2 s, at most 4096 buckets with least-recently-used
+  eviction: a new client always gets a bucket of its own, never a shared one), the body limits (413
+  / 400), then a slot on the media task (`Reserve`: at most `MAX_SESSIONS_PER_CLIENT` = 3 live or
+  pending sessions per client, 429 beyond; 503 without a slot), and only then the SDP parse, the DTLS
   certificate and the answer on the blocking pool (`RtcFactory::answer` in `spawn_blocking`), the
   ready `Rtc` handed back (`Adopt`; a failed build `Release`s; a reservation nobody adopts is freed
   after 5 s). Offers whose phone has not connected may hold at most `pending_cap` = half the slots;
   an offer whose `replaces` names a live phone (dropped at once, "replaced by its reconnect") or
   one connected within the last 120 s (`RECENT_WINDOW`) is a reconnect and is not held to that cap,
-  so a flood never locks out a reconnecting phone. The PWA sends its last id as `replaces`. Every
-  refusal counts in `offers_refused` (`offers_rate_limited` for the 429s); a warning names the
-  count at most every 10 s (`RefusalLog`), never a line per request.
+  so a flood never locks out a reconnecting phone. A claim is SPENT by its use (review round 2
+  🟡2): a `recent` entry is removed when it admits an offer, a replaced phone's id never enters
+  `recent`, and one id has at most one open reservation. The PWA sends its last id as `replaces`.
+  Every refusal counts in `offers_refused` (`offers_rate_limited` for the 429s); a warning names
+  the count at most every 10 s (`RefusalLog`), never a line per request.
+- **The client key (`client_key`, review round 2 🟡1).** The hub listens on `0.0.0.0:8790`, so a
+  LAN host can skip the box's nginx and send any header. A forwarding header counts ONLY when the
+  TCP peer is loopback (the box's nginx, which sets `X-Forwarded-For $remote_addr`: its last hop);
+  `CF-Connecting-IP` counts only when that nginx-set address is itself loopback (cloudflared on the
+  box); a header that is not one IP address, or any other peer, keys on the TCP peer. IPv6 is keyed
+  by its /64 (a v4-mapped peer by its IPv4). The test server passes the peer like the hub's own
+  accept loop (`into_make_service_with_connect_info`). **Follow-up (not this repo):** binding the
+  hub's HTTP port to loopback only (nginx and cloudflared both live on the box) would close the
+  nginx bypass for good; camera-box provisioning owns `[hub].bind` / the box's front, so it stays
+  `0.0.0.0:8790` here.
 - **Network task** (`webrtc_leg.rs`, tokio): ONE UDP socket, every phone's `Rtc`; `IP_PKTINFO`
   gives each datagram's destination (str0m needs it to pair a local candidate) and the Dante guard
   drops the Dante leg first; `Rtc::accepts` demuxes. Every send names its source
@@ -1494,14 +1508,27 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   pushes the ring (unchanged) and clones the facet's `Arc`.
 - **`/api/state` `webrtc`** (top level, omitted without the leg; `WebrtcStateRef` serializes the
   shared counters when the snapshot is serialized): udp_bind, host_candidates, max_phones,
-  phones_connected, phones_pending, sessions_started/ended, offers_refused, offers_rate_limited,
+  phones_connected, phones_pending, sessions_started/ended, sessions_never_connected, send_errors,
+  offers_refused, offers_rate_limited,
   rx_refused, room_ticks/packets/dropped/
   encode_errors, bus_underflows/overflow_trims/rate_ppm/asrc_phase_frames, tx_interval_ms_sd/max,
   and per phone id (8 hex), display, slot, ice_state, connected, age_s, rx/tx_packets,
   rx_lost_frames, mic_active (a packet above ~-60 dBFS within 1 s: a disabled track sends digital
   silence), mic_rate_ppm. The seed snapshot carries it too (a fresh hub answers with it at once).
-- **Journal:** one line per session start / end (why, packets, lost frames), ICE state change,
-  rename and error; never per packet.
+- **Journal:** a session is logged at info only once its phone CONNECTS ("phone session started
+  (ICE + DTLS up)") and when a connected one ends (why, packets, lost frames); an accepted offer is
+  a debug line, and offers that end without connecting are a summary line at most every 10 s with
+  the count (`sessions_never_connected` on `/api/state`), never a line each (review round 2 🔵4).
+  ICE state changes, renames and errors are logged; never a line per packet. A send the kernel
+  refuses (not a full buffer) warns once when sending starts to fail and logs once when it works
+  again, both with the count (`SendFailures`, `send_errors` on `/api/state`).
+- **Accepted residual: a forged-source STUN reflection (review round 2 🔵6).** A host that can send
+  UDP with a forged source address AND knows an offer's ICE credentials (its ufrag + password, which
+  only the offer's own client and the hub see) can make the hub answer a binding request "to" a
+  victim. The answer is about the size of the request (~1x, no amplification), it needs a live
+  offer (3 s without a valid check, 13 s with), DTLS and media need a two-way path the forger does
+  not have, and source forging is a LAN-only capability on the venue network, which the hub already
+  treats as trusted (the VBAN legs accept any LAN sender, issue 1431). Accepted, not mitigated.
 - **PWA** (`web/app.js`): `fetchTransport()` before EVERY session (a failed read keeps the last
   answer, default `janus`); `webrtc` -> `startNative`: one `RTCPeerConnection` (the `/api/ice`
   servers when TURN is on), one `sendrecv` audio transceiver with an empty sender (or the kept mic
@@ -1519,7 +1546,8 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   never-connecting offers from 10 addresses hold only the pending cap; a reconnect with `replaces`
   is admitted during it; a new phone connects once the flood's slots expire after 3 s), 415 and the
   per-client 429, an offer naming a foreign address that never gets a datagram, the RTP tick
-  arithmetic, `is_stun`), and the
+  arithmetic, `is_stun`; round 2: a reconnect claim spent once (recent and live), at most 3
+  sessions per client and forged LAN headers that do not change the key, `SendFailures`), and the
   Playwright `webrtc` project (`webrtc.spec.js` + `webrtc-hub.js` + `webrtc.toml`, the REAL
   binary on the base port + 4..6, started and SIGKILLed by the spec itself): two phones, a VBAN tone
   reaches both meters, A's fake mic reaches B and never A, mic OFF silences B, rename, a closed page

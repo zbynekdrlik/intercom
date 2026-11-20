@@ -163,7 +163,7 @@ async fn offer(
         parse_offer_body(&body)
     })();
     let result = match checked {
-        Ok(req) => leg.offer(req).await,
+        Ok(req) => leg.offer(req, client.clone()).await,
         Err(e) => Err(e),
     };
     match result {

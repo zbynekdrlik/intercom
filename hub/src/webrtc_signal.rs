@@ -80,6 +80,13 @@ impl WebrtcConfig {
             .udp_bind
             .parse()
             .map_err(|e| format!("webrtc.udp_bind '{}': {e}", self.udp_bind))?;
+        if !bind.is_ipv4() {
+            // [::] would deliver v4-mapped sources and no IP_PKTINFO destination (review round 2).
+            return Err(format!(
+                "webrtc.udp_bind '{}' must be an IPv4 address",
+                self.udp_bind
+            ));
+        }
         if bind.port() == 0 {
             return Err(format!(
                 "webrtc.udp_bind '{}' needs a fixed port: the answer advertises it",
@@ -172,62 +179,106 @@ pub fn pending_cap(max_phones: usize) -> usize {
     (max_phones / 2).max(1)
 }
 
-/// The rate-limit key of a request: Cloudflare's client address (every phone through the tunnel
-/// has the tunnel's peer address), else the last `X-Forwarded-For` hop (the one the box's own
-/// nginx appended), else the TCP peer.
+/// The rate-limit and per-client key of a request (review round 2 🟡1). The hub listens on all
+/// addresses, so a LAN client can reach it without the box's nginx and send any header it likes:
+///
+/// - a forwarding header counts ONLY when the TCP peer is loopback, i.e. the box's own nginx,
+///   which sets `X-Forwarded-For $remote_addr` (one address: the last hop is it);
+/// - `CF-Connecting-IP` counts only when that nginx-set address is itself loopback, i.e. the
+///   request came from cloudflared on the box (every phone through the tunnel shares that peer);
+/// - anything else, or a header that is not one IP address, keys on the TCP peer.
+///
+/// An IPv6 address is keyed by its /64 (a client rotates freely inside its own prefix).
 pub fn client_key(cf: Option<&str>, xff: Option<&str>, peer: Option<IpAddr>) -> String {
-    if let Some(cf) = cf.map(str::trim).filter(|s| !s.is_empty()) {
-        return format!("cf:{}", cf.chars().take(64).collect::<String>());
+    let Some(peer) = peer else {
+        return "unknown".to_string();
+    };
+    let parse = |s: Option<&str>| -> Option<IpAddr> { s?.trim().parse().ok() };
+    let mut ip = peer;
+    if peer.is_loopback() {
+        if let Some(hop) = parse(xff.and_then(|x| x.rsplit(',').next())) {
+            ip = hop;
+            if hop.is_loopback() {
+                if let Some(c) = parse(cf) {
+                    ip = c;
+                }
+            }
+        }
     }
-    if let Some(last) = xff
-        .and_then(|x| x.rsplit(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return format!("xff:{}", last.chars().take(64).collect::<String>());
-    }
-    match peer {
-        Some(ip) => format!("peer:{ip}"),
-        None => "peer:unknown".to_string(),
-    }
+    key_of(ip)
+}
+
+/// One client: an IPv4 address, or an IPv6 /64.
+fn key_of(ip: IpAddr) -> String {
+    let ip = match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                return format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]);
+            }
+        },
+        v4 => v4,
+    };
+    ip.to_string()
 }
 
 /// A token bucket per client key: `burst` offers at once, then one every `1 / per_s` seconds.
-/// Keys idle for a minute are forgotten; past `MAX_KEYS` keys every new one shares one bucket.
+/// At most `max_keys` buckets are kept; a new key evicts the least recently used one, so every
+/// client always has a bucket of its own (never a shared overflow bucket an attacker could drain).
 #[derive(Debug)]
 pub struct RateLimiter {
     buckets: std::collections::HashMap<String, (f64, std::time::Instant)>,
     burst: f64,
     per_s: f64,
+    max_keys: usize,
 }
 
 /// The offer rate limit: 5 at once, then one every 2 s per client.
 pub const OFFER_BURST: f64 = 5.0;
 pub const OFFER_PER_S: f64 = 0.5;
+/// The rate limiter's default key capacity.
+pub const RATE_LIMIT_KEYS: usize = 4096;
 
 impl RateLimiter {
-    const MAX_KEYS: usize = 1024;
-    const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
-
     pub fn new(burst: f64, per_s: f64) -> Self {
+        Self::with_capacity(burst, per_s, RATE_LIMIT_KEYS)
+    }
+
+    /// A limiter keeping at most `max_keys` buckets (at least one).
+    pub fn with_capacity(burst: f64, per_s: f64, max_keys: usize) -> Self {
         RateLimiter {
             buckets: std::collections::HashMap::new(),
             burst,
             per_s,
+            max_keys: max_keys.max(1),
         }
+    }
+
+    /// Buckets kept now.
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// No bucket yet.
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
     }
 
     /// May `key` make one more request at `now`? A yes spends a token.
     pub fn allow(&mut self, key: &str, now: std::time::Instant) -> bool {
-        if self.buckets.len() >= Self::MAX_KEYS {
-            self.buckets
-                .retain(|_, (_, last)| now.saturating_duration_since(*last) < Self::IDLE);
+        if !self.buckets.contains_key(key) && self.buckets.len() >= self.max_keys {
+            // Evict the least recently used bucket (an O(n) scan, bounded by max_keys and only
+            // on a new key, which the rate of new TCP peers bounds in turn).
+            if let Some(lru) = self
+                .buckets
+                .iter()
+                .min_by_key(|(_, (_, last))| *last)
+                .map(|(k, _)| k.clone())
+            {
+                self.buckets.remove(&lru);
+            }
         }
-        let key = if self.buckets.len() >= Self::MAX_KEYS && !self.buckets.contains_key(key) {
-            "overflow"
-        } else {
-            key
-        };
         let (tokens, last) = self
             .buckets
             .entry(key.to_string())

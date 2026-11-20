@@ -39,7 +39,7 @@ use crate::janus_rtp::JanusCodec;
 use crate::vban_jitter::NetworkFillStats;
 use crate::webrtc_room::{RoomSlots, TxPacket};
 use crate::webrtc_signal::{
-    filter_offer_candidates, pending_cap, OfferRequest, PhoneId, SignalError, SlotTable,
+    filter_offer_candidates, pending_cap, OfferRequest, PhoneId, RefusalLog, SignalError, SlotTable,
 };
 
 /// An offer's slot is held this long for the phone's first valid STUN binding request (the
@@ -54,6 +54,10 @@ pub const RESERVATION_DEADLINE: Duration = Duration::from_secs(5);
 pub const RECENT_WINDOW: Duration = Duration::from_secs(120);
 /// At most this many recently connected ids are remembered.
 pub const RECENT_MAX: usize = 256;
+/// At most this many live or pending sessions per client key (review round 2 🟡3): 429 beyond.
+pub const MAX_SESSIONS_PER_CLIENT: usize = 3;
+/// The end reason of a phone a reconnect replaced: its id is not a reconnect claim again.
+const REPLACED: &str = "replaced by its reconnect";
 /// How long the pending-commands queue is.
 pub const COMMAND_QUEUE: usize = 64;
 /// A mic counts as active while a packet with sound came within this long.
@@ -77,6 +81,8 @@ pub struct WebrtcShared {
     pub offers_refused: AtomicU64,
     pub offers_rate_limited: AtomicU64,
     pub phones_pending: AtomicU64,
+    pub sessions_never_connected: AtomicU64,
+    pub send_errors: AtomicU64,
     pub rx_refused: AtomicU64,
     pub room_ticks: AtomicU64,
     pub room_packets: AtomicU64,
@@ -129,6 +135,10 @@ pub struct WebrtcFacet {
     pub offers_rate_limited: u64,
     /// Slots held by offers whose phone has not connected yet (at most half of `max_phones`).
     pub phones_pending: u64,
+    /// Accepted offers that ended without their phone ever connecting (logged as a summary).
+    pub sessions_never_connected: u64,
+    /// Sends the kernel refused (not a full buffer): a warning per change of state, not per packet.
+    pub send_errors: u64,
     /// Datagrams no phone accepted (stray, late, or for a phone that left).
     pub rx_refused: u64,
     /// Room ticks (one per 20 ms), the packets they handed to the network task, and the ones the
@@ -181,6 +191,8 @@ impl WebrtcShared {
             offers_refused: ld(&self.offers_refused),
             offers_rate_limited: ld(&self.offers_rate_limited),
             phones_pending: ld(&self.phones_pending),
+            sessions_never_connected: ld(&self.sessions_never_connected),
+            send_errors: ld(&self.send_errors),
             rx_refused: ld(&self.rx_refused),
             room_ticks: ld(&self.room_ticks),
             room_packets: ld(&self.room_packets),
@@ -297,6 +309,7 @@ impl RtcFactory {
 enum Command {
     Reserve {
         replaces: Option<PhoneId>,
+        client: String,
         reply: oneshot::Sender<Result<Reservation, SignalError>>,
     },
     Adopt {
@@ -355,10 +368,14 @@ impl WebrtcHandle {
     /// A phone's offer: the capacity first (on the media task, a few µs), the SDP parse, the
     /// certificate and the answer on the blocking pool, then the ready `Rtc` goes to the media
     /// task. Returns the phone's id and the hub's answer.
-    pub async fn offer(&self, req: OfferRequest) -> Result<Answered, SignalError> {
+    pub async fn offer(&self, req: OfferRequest, client: String) -> Result<Answered, SignalError> {
         let replaces = req.replaces;
         let reservation = self
-            .ask(|reply| Command::Reserve { replaces, reply })
+            .ask(|reply| Command::Reserve {
+                replaces,
+                client,
+                reply,
+            })
             .await?;
         let factory = self.factory.clone();
         let sdp = req.sdp;
@@ -441,6 +458,8 @@ pub fn start_webrtc(
         phones: Vec::new(),
         reservations: Vec::new(),
         recent: VecDeque::new(),
+        unconnected_log: RefusalLog::default(),
+        send_fail: SendFailures::default(),
         table: SlotTable::new(cfg.max_phones),
         slots: cfg.slots,
         shared: cfg.shared,
@@ -521,6 +540,8 @@ struct Phone {
     ending: Option<&'static str>,
     /// Its ICE state or connection changed since the facet was last published.
     changed: bool,
+    /// The client key its offer came from (`webrtc_signal::client_key`).
+    client: String,
 }
 
 struct PendingReservation {
@@ -528,6 +549,40 @@ struct PendingReservation {
     deadline: Instant,
     /// A reconnecting phone's offer (`replaces` matched): not held to the pending cap.
     reconnect: bool,
+    /// The id the offer named, if any: at most one open reservation per id.
+    replaces: Option<PhoneId>,
+    client: String,
+}
+
+/// The source-addressed sends' health: a warning when sending starts to fail, an info line when
+/// it works again, each with the count, never a line per packet (review round 2 🔵5).
+#[derive(Debug, Default)]
+pub struct SendFailures {
+    failing: bool,
+    count: u64,
+}
+
+impl SendFailures {
+    /// A send failed: `Some(failures so far)` when this starts a failing run (warn now).
+    pub fn fail(&mut self) -> Option<u64> {
+        self.count += 1;
+        if self.failing {
+            None
+        } else {
+            self.failing = true;
+            Some(self.count)
+        }
+    }
+
+    /// A send went out: `Some(failures so far)` when this ends a failing run (log the recovery).
+    pub fn ok(&mut self) -> Option<u64> {
+        if self.failing {
+            self.failing = false;
+            Some(self.count)
+        } else {
+            None
+        }
+    }
 }
 
 struct NetTask {
@@ -543,6 +598,9 @@ struct NetTask {
     slots: Arc<RoomSlots>,
     shared: Arc<WebrtcShared>,
     guard: Arc<DanteGuard>,
+    /// Offers that ended without connecting: one summary line at most every 10 s.
+    unconnected_log: RefusalLog,
+    send_fail: SendFailures,
 }
 
 fn ice_name(s: IceConnectionState) -> &'static str {
@@ -653,8 +711,12 @@ impl NetTask {
 
     fn command(&mut self, cmd: Command) {
         match cmd {
-            Command::Reserve { replaces, reply } => {
-                let r = self.reserve(replaces);
+            Command::Reserve {
+                replaces,
+                client,
+                reply,
+            } => {
+                let r = self.reserve(replaces, client);
                 let _ = reply.send(r);
             }
             Command::Adopt {
@@ -695,19 +757,46 @@ impl NetTask {
         }
     }
 
-    /// Set a slot aside for an offer. A `replaces` naming a live phone drops that phone first; one
-    /// naming a live or recently connected phone is a reconnect, never held to the pending cap.
-    fn reserve(&mut self, replaces: Option<PhoneId>) -> Result<Reservation, SignalError> {
+    /// Set a slot aside for an offer from `client`. A `replaces` naming a live phone drops that
+    /// phone first; one naming a recently connected phone consumes that claim. Either makes the
+    /// offer a reconnect, never held to the pending cap; one open reservation per named id at
+    /// most (review round 2 🟡2). Every client may hold [`MAX_SESSIONS_PER_CLIENT`] live or pending
+    /// sessions (🟡3).
+    fn reserve(
+        &mut self,
+        replaces: Option<PhoneId>,
+        client: String,
+    ) -> Result<Reservation, SignalError> {
         let now = Instant::now();
         let mut reconnect = false;
         if let Some(old) = replaces {
-            if let Some(i) = self.phones.iter().position(|p| p.id == old) {
-                self.phones[i].ending = Some("replaced by its reconnect");
+            if self.reservations.iter().any(|r| r.replaces == Some(old)) {
+                // A second offer for the same id while the first is open: no reconnect.
+            } else if let Some(i) = self
+                .phones
+                .iter()
+                .position(|p| p.id == old && p.ending.is_none())
+            {
+                self.phones[i].ending = Some(REPLACED);
                 self.sweep(now);
                 reconnect = true;
-            } else {
-                reconnect = self.recent.iter().any(|(id, _)| *id == old);
+            } else if let Some(i) = self.recent.iter().position(|(id, _)| *id == old) {
+                self.recent.remove(i);
+                reconnect = true;
             }
+        }
+        let held = self
+            .phones
+            .iter()
+            .filter(|p| p.ending.is_none() && p.client == client)
+            .count()
+            + self
+                .reservations
+                .iter()
+                .filter(|r| r.client == client)
+                .count();
+        if held >= MAX_SESSIONS_PER_CLIENT {
+            return Err(SignalError::RateLimited);
         }
         if !reconnect && self.pending() >= pending_cap(self.table.capacity()) {
             return Err(SignalError::Full);
@@ -720,6 +809,8 @@ impl NetTask {
             r,
             deadline: now + RESERVATION_DEADLINE,
             reconnect,
+            replaces: replaces.filter(|_| reconnect),
+            client,
         });
         Ok(r)
     }
@@ -736,7 +827,7 @@ impl NetTask {
             // The reservation expired while the answer was built.
             return Err(SignalError::Unavailable);
         };
-        self.reservations.swap_remove(i);
+        let client = self.reservations.swap_remove(i).client;
         let id = match PhoneId::random() {
             Ok(id) => id,
             Err(e) => {
@@ -755,12 +846,13 @@ impl NetTask {
         };
         self.slots.open(r.slot, r.generation);
         self.shared.sessions_started.fetch_add(1, Ordering::Relaxed);
-        tracing::info!(
+        // The session is logged at info once the phone connects (review round 2 🔵4): an offer
+        // from the public route that never connects is only a debug line and a summary count.
+        tracing::debug!(
             phone = %id.short(),
             display = %name,
             slot = r.slot,
-            phones = self.table.in_use(),
-            "webrtc: phone session started"
+            "webrtc: offer accepted, waiting for the phone's ICE check"
         );
         self.phones.push(Phone {
             id,
@@ -782,6 +874,7 @@ impl NetTask {
             last_sound: None,
             ending: None,
             changed: false,
+            client,
         });
         self.publish();
         Ok(id)
@@ -826,7 +919,13 @@ impl NetTask {
                     phone.ending.get_or_insert("rtc error");
                 }
             }
-            if let Some(t) = poll_phone(phone, &self.socket, &self.slots) {
+            if let Some(t) = poll_phone(
+                phone,
+                &self.socket,
+                &self.slots,
+                &mut self.send_fail,
+                &self.shared,
+            ) {
                 next = next.min(t);
             }
             if phone.ending.is_none() && !phone.connected {
@@ -899,18 +998,32 @@ impl NetTask {
                     self.table.free(phone.slot, phone.generation);
                     self.shared.sessions_ended.fetch_add(1, Ordering::Relaxed);
                     if phone.connected {
-                        self.recent.push_back((phone.id, now));
+                        // A replaced phone's id was its reconnect's claim: spent.
+                        if why != REPLACED {
+                            self.recent.push_back((phone.id, now));
+                        }
+                        tracing::info!(
+                            phone = %phone.id.short(),
+                            display = %phone.display,
+                            why,
+                            age_s = phone.created.elapsed().as_secs(),
+                            rx_packets = phone.rx_packets,
+                            tx_packets = phone.tx_packets,
+                            rx_lost_frames = phone.rx_lost_frames,
+                            "webrtc: phone session ended"
+                        );
+                    } else {
+                        self.shared
+                            .sessions_never_connected
+                            .fetch_add(1, Ordering::Relaxed);
+                        if let Some(count) = self.unconnected_log.note(now) {
+                            tracing::info!(
+                                ended_since_last_line = count,
+                                last_reason = why,
+                                "webrtc: offers ended without their phone connecting (counted on /api/state webrtc.sessions_never_connected)"
+                            );
+                        }
                     }
-                    tracing::info!(
-                        phone = %phone.id.short(),
-                        display = %phone.display,
-                        why,
-                        age_s = phone.created.elapsed().as_secs(),
-                        rx_packets = phone.rx_packets,
-                        tx_packets = phone.tx_packets,
-                        rx_lost_frames = phone.rx_lost_frames,
-                        "webrtc: phone session ended"
-                    );
                 }
             }
         }
@@ -970,6 +1083,8 @@ fn poll_phone(
     phone: &mut Phone,
     socket: &tokio::net::UdpSocket,
     slots: &RoomSlots,
+    fails: &mut SendFailures,
+    shared: &WebrtcShared,
 ) -> Option<Instant> {
     loop {
         if !phone.rtc.is_alive() {
@@ -993,11 +1108,25 @@ fn poll_phone(
                     IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4),
                     _ => None,
                 };
-                if let Err(e) =
-                    crate::pktinfo::try_send_from(socket, &t.contents, t.destination, src)
-                {
-                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                        tracing::debug!(phone = %phone.id.short(), dest = %t.destination, error = %e, "webrtc: send failed");
+                match crate::pktinfo::try_send_from(socket, &t.contents, t.destination, src) {
+                    Ok(_) => {
+                        if let Some(count) = fails.ok() {
+                            tracing::info!(failures = count, "webrtc: sending works again");
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => {
+                        shared.send_errors.fetch_add(1, Ordering::Relaxed);
+                        if let Some(count) = fails.fail() {
+                            tracing::warn!(
+                                phone = %phone.id.short(),
+                                dest = %t.destination,
+                                source = ?src,
+                                error = %e,
+                                failures = count,
+                                "webrtc: sending failed (logged again when it works; counted on /api/state webrtc.send_errors)"
+                            );
+                        }
                     }
                 }
             }
@@ -1019,7 +1148,12 @@ fn handle_event(phone: &mut Phone, ev: Event, slots: &RoomSlots) {
         Event::Connected => {
             phone.connected = true;
             phone.changed = true;
-            tracing::info!(phone = %phone.id.short(), display = %phone.display, "webrtc: phone connected (ICE + DTLS up)");
+            tracing::info!(
+                phone = %phone.id.short(),
+                display = %phone.display,
+                slot = phone.slot,
+                "webrtc: phone session started (ICE + DTLS up)"
+            );
         }
         Event::MediaAdded(m) => {
             if m.kind == MediaKind::Audio && phone.mid.is_none() {
