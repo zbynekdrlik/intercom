@@ -1075,3 +1075,107 @@ fn reserved_and_benchmark_ranges_get_no_permission_either() {
     pump(&mut relay, &mut srv, t0);
     assert_eq!(srv.count("permission"), 1, "only the global address");
 }
+
+#[test]
+fn allocations_lost_right_after_success_back_off_up_to_the_cap() {
+    // A server that loses every allocation at once (a 437 on the first CreatePermission): each
+    // re-allocation succeeds and is lost again. The back-off must not restart at 1 s after every
+    // short-lived success, or the hub would allocate about once a second forever and leave an
+    // orphan allocation on the server each time.
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    let mut t = t0;
+    let mut waits = Vec::new();
+    for k in 0..12u8 {
+        srv.forget_allocation();
+        relay.set_wanted([IpAddr::from([11, 0, 1, k])], t);
+        pump(&mut relay, &mut srv, t);
+        let lost_at = t;
+        while relay.phase() != TurnPhase::Allocated {
+            t += Duration::from_millis(100);
+            relay.handle_timeout(t, false);
+            pump(&mut relay, &mut srv, t);
+            assert!(
+                t - lost_at < Duration::from_secs(120),
+                "never allocated again"
+            );
+        }
+        waits.push(t - lost_at);
+    }
+    assert!(
+        waits[0] < Duration::from_secs(1),
+        "the first loss: at once ({waits:?})"
+    );
+    assert!(
+        waits.windows(2).all(|w| w[1] >= w[0]),
+        "never shrinking: {waits:?}"
+    );
+    assert!(waits[5] >= Duration::from_secs(16), "{waits:?}");
+    let last = *waits.last().unwrap();
+    assert!(
+        last >= TURN_BACKOFF_MAX && last <= TURN_BACKOFF_MAX + Duration::from_secs(1),
+        "capped at {TURN_BACKOFF_MAX:?}: {waits:?}"
+    );
+}
+
+#[test]
+fn an_allocation_that_lived_past_the_window_restarts_the_back_off() {
+    // After a long healthy run, a loss is the first in a while: allocated again at once, and a
+    // failure right after waits only the minimum again.
+    let t0 = Instant::now();
+    let (mut relay, mut srv) = allocated(t0, opts());
+    srv.forget_allocation();
+    relay.set_wanted(["11.0.2.1".parse::<IpAddr>().unwrap()], t0);
+    pump(&mut relay, &mut srv, t0);
+    srv.forget_allocation();
+    relay.set_wanted(["11.0.2.2".parse::<IpAddr>().unwrap()], t0);
+    pump(&mut relay, &mut srv, t0);
+    assert_eq!(
+        relay.phase(),
+        TurnPhase::Backoff,
+        "a second quick loss backs off"
+    );
+    let mut t = t0;
+    while relay.phase() != TurnPhase::Allocated {
+        t += Duration::from_millis(100);
+        relay.handle_timeout(t, false);
+        pump(&mut relay, &mut srv, t);
+    }
+    // It now lives two minutes (refreshes and keepalives answered).
+    let healthy_from = t;
+    while t < healthy_from + Duration::from_secs(120) {
+        t += Duration::from_secs(5);
+        relay.handle_timeout(t, false);
+        pump(&mut relay, &mut srv, t);
+    }
+    srv.forget_allocation();
+    srv.fail_allocate = Some(486);
+    relay.set_wanted(["11.0.2.3".parse::<IpAddr>().unwrap()], t);
+    pump(&mut relay, &mut srv, t);
+    assert_eq!(relay.phase(), TurnPhase::Backoff);
+    assert_eq!(
+        relay.poll_timeout(),
+        Some(t + TURN_BACKOFF_MIN),
+        "the minimum again"
+    );
+}
+
+#[test]
+fn only_the_servers_address_on_a_live_allocations_socket_is_accepted() {
+    let t0 = Instant::now();
+    let (relay, srv) = allocated(t0, opts());
+    let epoch = relay.live_epoch().unwrap();
+    assert!(relay.accepts(epoch, srv.addr));
+    assert!(
+        !relay.accepts(epoch, sa("203.0.113.10:3479")),
+        "another port"
+    );
+    assert!(
+        !relay.accepts(epoch, sa("198.51.100.99:3478")),
+        "another host"
+    );
+    assert!(
+        !relay.accepts(epoch + 1, srv.addr),
+        "a socket the relay no longer uses"
+    );
+}
