@@ -318,43 +318,57 @@ fn every_cutters_point_is_trimmed(m: &Matrix) {
             p.in_ch,
             p.out_ch
         );
+        assert!(
+            !m.levels.specs()[p.level.unwrap()].master,
+            "a point's slider is a source slider, never the master"
+        );
     }
 }
 
+// intercom#38 replaced the four group sliders with one slider per source plus a master: the pins
+// below follow the new names; what they guard is unchanged (every cutters point is trimmed by
+// exactly one SOURCE slider, `every_cutters_point_is_trimmed`; the master trims the whole output
+// and claims no point, pinned in `levels_38.rs`).
+fn cam_sliders(points_each: usize) -> Vec<(String, Vec<String>, usize)> {
+    cams()
+        .into_iter()
+        .map(|c| (c.clone(), vec![c], points_each))
+        .collect()
+}
+
 #[test]
-fn strih_snv_has_program_click_cameras_and_phones() {
+fn strih_snv_has_a_slider_per_source_and_a_master() {
     let m = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml")).unwrap();
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let mut want = vec![
+        ("foh".into(), s(&["foh_dante:1", "foh_dante:2"]), 4),
+        ("lv1".into(), s(&["lv1"]), 4),
+        ("click".into(), s(&["foh_dante:3"]), 4),
+    ];
+    want.extend(cam_sliders(4));
+    want.push(("telefony".into(), s(&["phones"]), 4));
+    want.push(("master".into(), vec![], 44));
+    assert_eq!(trimmed_into_cutters(&m), want);
+    let labels: Vec<&str> = m.levels.specs().iter().map(|s| s.label.as_str()).collect();
     assert_eq!(
-        trimmed_into_cutters(&m),
-        vec![
-            (
-                "program".into(),
-                s(&["foh_dante:1", "foh_dante:2", "lv1"]),
-                8
-            ),
-            ("click".into(), s(&["foh_dante:3"]), 4),
-            ("kamery".into(), cams(), 28),
-            ("telefony".into(), s(&["phones"]), 4),
+        labels,
+        [
+            "FOH", "LV1", "Click", "Kamera 1", "Kamera 2", "Kamera 3", "Kamera 4", "Kamera 5",
+            "Kamera 6", "Kamera 7", "Telefóny", "Master"
         ]
     );
-    let labels: Vec<&str> = m.levels.specs().iter().map(|s| s.label.as_str()).collect();
-    assert_eq!(labels, ["Program", "Click", "Kamery", "Telefóny"]);
     every_cutters_point_is_trimmed(&m);
     assert_eq!(m.hub.control_bind, "127.0.0.1:8791");
 }
 
 #[test]
-fn strih_pp_has_program_cameras_and_phones() {
+fn strih_pp_has_a_slider_per_source_and_a_master() {
     let m = Matrix::from_toml(include_str!("../../intercom.strih-pp.toml")).unwrap();
-    assert_eq!(
-        trimmed_into_cutters(&m),
-        vec![
-            ("program".into(), vec!["dsg_dante".to_string()], 2),
-            ("kamery".into(), cams(), 14),
-            ("telefony".into(), vec!["phones".to_string()], 2),
-        ]
-    );
+    let mut want = vec![("program".into(), vec!["dsg_dante".to_string()], 2)];
+    want.extend(cam_sliders(2));
+    want.push(("telefony".into(), vec!["phones".to_string()], 2));
+    want.push(("master".into(), vec![], 18));
+    assert_eq!(trimmed_into_cutters(&m), want);
     every_cutters_point_is_trimmed(&m);
 }
 
