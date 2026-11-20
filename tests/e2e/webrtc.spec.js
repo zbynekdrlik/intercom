@@ -1,0 +1,202 @@
+// @ts-check
+// The in-hub WebRTC phone leg end to end (intercom#42): the REAL web client against the REAL
+// intercom-hub binary with `adapter = "webrtc"` (webrtc.toml, started and stopped here through
+// webrtc-hub.js). No Janus anywhere: the page reads `GET /api/phone` -> webrtc and talks to the
+// hub's own WebRTC endpoint with a native RTCPeerConnection. Two Chromium pages are two phones with
+// Chromium's fake microphone; a VBAN tone sent into the hub is the cutter's voice.
+const fs = require("fs");
+const path = require("path");
+const { test, expect } = require("@playwright/test");
+const hubCtl = require("./webrtc-hub");
+const { startTone } = require("./vban-tone");
+
+let hub = null;
+
+test.beforeAll(async () => {
+  hubCtl.renderConfig();
+  hub = await hubCtl.startHub();
+});
+
+test.afterAll(async () => {
+  if (hub) await hub.stop();
+});
+
+// Before app.js: the service worker never registers (the phone.spec.js pattern) and the name is
+// preset, so the name sheet does not cover the page.
+async function preparePage(page, name) {
+  // The picture is not under test here and this hub has no [video] (its /interkom.mjpeg answers
+  // 503, which the browser logs): serve one still frame instead (picture-sw.spec.js covers it).
+  const still = fs.readFileSync(path.join(__dirname, "fixtures", "picture-0.jpg"));
+  await page.route("**/interkom.mjpeg*", (route) =>
+    route.fulfill({ status: 200, contentType: "image/jpeg", body: still })
+  );
+  await page.addInitScript((n) => {
+    if (navigator.serviceWorker) {
+      Object.defineProperty(navigator.serviceWorker, "register", {
+        value: () => new Promise(() => {}),
+        configurable: true,
+      });
+    }
+    try {
+      localStorage.setItem("interkom.display", n);
+    } catch (e) {
+      // private mode: the name sheet would show and the test fail loudly.
+    }
+  }, name);
+}
+
+function watchConsole(page) {
+  const seen = [];
+  page.on("console", (msg) => seen.push(`${msg.type()}: ${msg.text()}`));
+  page.on("pageerror", (err) => seen.push(`pageerror: ${err.message}`));
+  return seen;
+}
+
+async function expectConnected(page, timeout = 15000) {
+  const conn = page.locator('[data-role="conn"]');
+  await expect(conn).toHaveAttribute("data-state", "connected", { timeout });
+  await expect(conn).toContainText("Pripojené");
+}
+
+// The highest level a meter showed while sampling it every 100 ms for `ms`.
+async function meterMax(page, role, ms) {
+  const loc = page.locator(`[data-role="${role}"]`);
+  let max = -120;
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    max = Math.max(max, Number(await loc.getAttribute("data-db")));
+    await page.waitForTimeout(100);
+  }
+  return max;
+}
+
+async function hubState() {
+  const r = await fetch(`${hubCtl.BASE_URL}/api/state`);
+  return r.json();
+}
+
+test("two phones: each hears the cutter's tone, and A's mic reaches B but never A itself", async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctxA = await browser.newContext();
+  const ctxB = await browser.newContext();
+  const a = await ctxA.newPage();
+  const b = await ctxB.newPage();
+  const seenA = watchConsole(a);
+  const seenB = watchConsole(b);
+  await preparePage(a, "Kamera A");
+  await preparePage(b, "Kamera B");
+  await a.goto("/");
+  await b.goto("/");
+  await expectConnected(a);
+  await expectConnected(b);
+
+  // The hub really carries two phones, by name, on its own WebRTC leg (not Janus).
+  await expect
+    .poll(async () => {
+      const st = await hubState();
+      return (st.webrtc && st.webrtc.phones.filter((p) => p.connected).map((p) => p.display).sort()) || [];
+    })
+    .toEqual(["Kamera A", "Kamera B"]);
+  expect(await a.evaluate(() => transport)).toBe("webrtc");
+
+  // Quiet room: nobody talks, both incoming meters sit at silence.
+  expect(await meterMax(a, "meter-in", 1500)).toBeLessThan(-70);
+  expect(await meterMax(b, "meter-in", 1500)).toBeLessThan(-70);
+
+  // The cutter's voice (a VBAN tone into the hub) reaches BOTH phones.
+  const stopTone = startTone({ port: hubCtl.VBAN_PORT, stream: "prog", channels: 1, hz: 997 });
+  try {
+    await expect(a.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "true", { timeout: 10000 });
+    await expect(b.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "true", { timeout: 10000 });
+    await expect(a.locator('[data-role="meter-in-state"]')).toHaveText("hovorí");
+  } finally {
+    stopTone();
+  }
+  await expect(a.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "false", { timeout: 10000 });
+  await expect(b.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "false", { timeout: 10000 });
+
+  // A turns the mic on: B hears A (Chromium's fake microphone), A never hears itself (N-1).
+  const micA = a.locator('[data-role="mic-toggle"]');
+  await micA.click();
+  await expect(micA).toHaveAttribute("data-muted", "false");
+  await expect(a.locator('[data-role="mic-hint"]')).toContainText("Počujú ťa");
+  expect(await meterMax(b, "meter-in", 4000), "B hears A's mic").toBeGreaterThan(-50);
+  expect(await meterMax(a, "meter-in", 3000), "A never hears its own mic").toBeLessThan(-70);
+  await expect
+    .poll(async () => {
+      const st = await hubState();
+      const pa = st.webrtc.phones.find((p) => p.display === "Kamera A");
+      return pa && pa.mic_active;
+    })
+    .toBe(true);
+
+  // Mic OFF = the track is disabled, no renegotiation: B's incoming goes quiet again.
+  await micA.click();
+  await expect(micA).toHaveAttribute("data-muted", "true");
+  await expect(b.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "false", { timeout: 10000 });
+  expect(await meterMax(b, "meter-in", 2000)).toBeLessThan(-70);
+
+  // A renames itself: the hub shows the new name.
+  await a.locator('[data-role="settings-open"]').click();
+  await a.locator('[data-role="name-change"]').click();
+  await a.locator('[data-role="name"]').fill("Kamera 7");
+  await a.locator('[data-role="name-form"] button[type="submit"]').click();
+  await expect
+    .poll(async () => (await hubState()).webrtc.phones.map((p) => p.display).sort())
+    .toEqual(["Kamera 7", "Kamera B"]);
+
+  expect(seenA, "browser console must stay completely clean").toEqual([]);
+  expect(seenB, "browser console must stay completely clean").toEqual([]);
+
+  // Closing a page frees its slot at once (pagehide -> DELETE /api/phone/<id>) ...
+  await b.close({ runBeforeUnload: true });
+  await expect.poll(async () => (await hubState()).webrtc.phones.map((p) => p.display)).toEqual(["Kamera 7"]);
+  await ctxB.close();
+  // ... and a phone that vanishes without a word (no unload: a crashed tab, a lost network) is
+  // dropped by the hub once its ICE goes quiet.
+  await ctxA.close();
+  await expect.poll(async () => (await hubState()).webrtc.phones.length, { timeout: 30000 }).toBe(0);
+});
+
+test("killing the hub and starting it again reconnects the page by itself", async ({ page }) => {
+  test.setTimeout(90000);
+  const seen = watchConsole(page);
+  await preparePage(page, "Kamera R");
+  await page.goto("/");
+  await expectConnected(page);
+
+  const conn = page.locator('[data-role="conn"]');
+  const outageFrom = seen.length;
+  await hub.stop("SIGKILL");
+  await expect(conn, "the dead hub is noticed within seconds").toHaveAttribute("data-state", "reconnecting", {
+    timeout: 15000,
+  });
+  await page.waitForTimeout(3000); // a few failed attempts against the dead hub
+  hub = await hubCtl.startHub();
+  const outageTo = seen.length;
+  // Back by itself: the 1 -> 4 s backoff brings it in within seconds, no reload.
+  await expectConnected(page, 20000);
+
+  // And the audio flows again.
+  const stopTone = startTone({ port: hubCtl.VBAN_PORT, stream: "prog", channels: 1, hz: 997 });
+  try {
+    await expect(page.locator('[data-role="meter-in"]')).toHaveAttribute("data-active", "true", { timeout: 10000 });
+  } finally {
+    stopTone();
+  }
+  await expect
+    .poll(async () => (await hubState()).webrtc.phones.filter((p) => p.connected).map((p) => p.display))
+    .toEqual(["Kamera R"]);
+
+  // While the hub was DOWN the browser itself logs its network line for each refused request
+  // (network class, never a JS error; the phone.spec.js Janus outage logs the same). Outside that
+  // window nothing at all.
+  const outside = [...seen.slice(0, outageFrom), ...seen.slice(outageTo)];
+  expect(outside, "browser console must stay clean outside the outage").toEqual([]);
+  const during = seen.slice(outageFrom, outageTo);
+  for (const line of during) {
+    expect(line, "only the browser's own network lines while the hub is down").toMatch(
+      /^error: Failed to load resource: net::ERR_CONNECTION_REFUSED$/
+    );
+  }
+});
