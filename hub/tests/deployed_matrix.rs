@@ -25,9 +25,16 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
         212,
         "expected the 216-point VB-Matrix grid minus VASIO8's 4"
     );
-    // intercom#34: the cutters' four level sliders (the points they trim: tests/levels_34.rs).
+    // intercom#34: the cutters' level sliders (the points they trim: tests/levels_34.rs); since
+    // intercom#38 one per source plus the master (tests/levels_38.rs), not the four groups.
     let sliders: Vec<&str> = m.levels.specs().iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(sliders, ["program", "click", "kamery", "telefony"]);
+    assert_eq!(
+        sliders,
+        [
+            "foh", "lv1", "click", "cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7",
+            "telefony", "master"
+        ]
+    );
 
     // intercom#5: the four declared FOH subscriptions reach dstack's device config.
     let dev = m

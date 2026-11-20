@@ -1488,10 +1488,18 @@ out_ch = 4
 gain_db = -8.0
 
 [[level]]
-name = "program"
-label = "Program"
+name = "foh"
+label = "FOH"
 dst = "cutters"
-sources = ["foh_dante:1", "foh_dante:2", "lv1"]
+sources = ["foh_dante:1", "foh_dante:2"]
+from = "program"
+
+[[level]]
+name = "lv1"
+label = "LV1"
+dst = "cutters"
+sources = ["lv1"]
+from = "program"
 
 [[level]]
 name = "click"
@@ -1500,14 +1508,63 @@ dst = "cutters"
 sources = ["foh_dante:3"]
 
 [[level]]
-name = "kamery"
-label = "Kamery"
+name = "cam1"
+label = "Kamera 1"
 dst = "cutters"
-sources = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+sources = ["cam1"]
+from = "kamery"
+
+[[level]]
+name = "cam2"
+label = "Kamera 2"
+dst = "cutters"
+sources = ["cam2"]
+from = "kamery"
+
+[[level]]
+name = "cam3"
+label = "Kamera 3"
+dst = "cutters"
+sources = ["cam3"]
+from = "kamery"
+
+[[level]]
+name = "cam4"
+label = "Kamera 4"
+dst = "cutters"
+sources = ["cam4"]
+from = "kamery"
+
+[[level]]
+name = "cam5"
+label = "Kamera 5"
+dst = "cutters"
+sources = ["cam5"]
+from = "kamery"
+
+[[level]]
+name = "cam6"
+label = "Kamera 6"
+dst = "cutters"
+sources = ["cam6"]
+from = "kamery"
+
+[[level]]
+name = "cam7"
+label = "Kamera 7"
+dst = "cutters"
+sources = ["cam7"]
+from = "kamery"
 
 [[level]]
 name = "telefony"
 label = "Telefóny"
 dst = "cutters"
 sources = ["phones"]
+
+[[level]]
+name = "master"
+label = "Master"
+dst = "cutters"
+master = true
 

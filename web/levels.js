@@ -1,6 +1,7 @@
 // The cutter's level sliders (intercom#34), served by the hub's loopback control listener.
 //
-// GET /api/levels builds one strip per slider; moving a slider or the mute button PUTs
+// GET /api/levels builds one channel strip per slider (intercom#38: one per source, the master last,
+// set apart: it trims the whole output on top of the others); moving a slider or the mute button PUTs
 // /api/levels/<name> {db, muted}. One request per strip is in flight at a time: a newer value that
 // arrives meanwhile is sent right after it, so the hub always ends on the last position. A 1 s poll
 // keeps the output meter live and picks up a change made from another window (never while this
@@ -107,6 +108,8 @@ function buildStrip(level) {
     timer: null,
   };
   el.dataset.name = level.name;
+  el.dataset.master = String(level.master === true);
+  el.classList.toggle("is-master", level.master === true);
   el.querySelector('[data-role="label"]').textContent = level.label;
   slider.min = String(level.min_db);
   slider.max = String(level.max_db);

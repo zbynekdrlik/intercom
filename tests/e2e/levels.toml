@@ -1,7 +1,8 @@
-# The level-sliders E2E hub (intercom#34): a minimal routing on loopback ports, two sliders into the
-# cutters. start-levels-hub.js fills the @...@ placeholders (ports, the state file in a fresh
-# scratch dir) and starts the real intercom-hub on the result. No VBAN leg sends anywhere (no
-# participant has a VBAN output), no Janus, no picture, no Dante device.
+# The level-sliders E2E hub (intercom#34, per source since intercom#38): a minimal routing on
+# loopback ports shaped like strih-snv's cutters mix, one slider per source plus a master.
+# start-levels-hub.js fills the @...@ placeholders (ports, the state file in a fresh scratch dir)
+# and starts the real intercom-hub on the result. No VBAN leg sends anywhere (no participant has a
+# VBAN output), no Janus, no picture, no Dante device.
 
 [hub]
 bind = "127.0.0.1:@HTTP_PORT@"
@@ -17,6 +18,78 @@ role = "program_ref"
 adapter = "vban"
 in_stream = "prog"
 in_channels = 3
+out_channels = 0
+
+[[participant]]
+name = "lv1"
+role = "program_ref"
+adapter = "vban"
+in_stream = "lv1"
+in_channels = 2
+out_channels = 0
+
+[[participant]]
+name = "cam1"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam1"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam2"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam2"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam3"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam3"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam4"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam4"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam5"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam5"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam6"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam6"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "cam7"
+role = "program_ref"
+adapter = "vban"
+in_stream = "cam7"
+in_channels = 1
+out_channels = 0
+
+[[participant]]
+name = "phones"
+role = "program_ref"
+adapter = "vban"
+in_stream = "phones"
+in_channels = 2
 out_channels = 0
 
 [[participant]]
@@ -54,14 +127,191 @@ dst = "cutters"
 out_ch = 2
 gain_db = -10.0
 
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam1"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam2"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam3"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam4"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam5"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam6"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "cam7"
+in_ch = 1
+dst = "cutters"
+out_ch = 2
+
+[[point]]
+src = "phones"
+in_ch = 1
+dst = "cutters"
+out_ch = 1
+
+[[point]]
+src = "phones"
+in_ch = 2
+dst = "cutters"
+out_ch = 2
+
 [[level]]
-name = "program"
-label = "Program"
+name = "foh"
+label = "FOH"
 dst = "cutters"
 sources = ["prog:1", "prog:2"]
+from = "program"
+
+[[level]]
+name = "lv1"
+label = "LV1"
+dst = "cutters"
+sources = ["lv1"]
+from = "program"
 
 [[level]]
 name = "click"
 label = "Click"
 dst = "cutters"
 sources = ["prog:3"]
+
+[[level]]
+name = "cam1"
+label = "Kamera 1"
+dst = "cutters"
+sources = ["cam1"]
+from = "kamery"
+
+[[level]]
+name = "cam2"
+label = "Kamera 2"
+dst = "cutters"
+sources = ["cam2"]
+from = "kamery"
+
+[[level]]
+name = "cam3"
+label = "Kamera 3"
+dst = "cutters"
+sources = ["cam3"]
+from = "kamery"
+
+[[level]]
+name = "cam4"
+label = "Kamera 4"
+dst = "cutters"
+sources = ["cam4"]
+from = "kamery"
+
+[[level]]
+name = "cam5"
+label = "Kamera 5"
+dst = "cutters"
+sources = ["cam5"]
+from = "kamery"
+
+[[level]]
+name = "cam6"
+label = "Kamera 6"
+dst = "cutters"
+sources = ["cam6"]
+from = "kamery"
+
+[[level]]
+name = "cam7"
+label = "Kamera 7"
+dst = "cutters"
+sources = ["cam7"]
+from = "kamery"
+
+[[level]]
+name = "telefony"
+label = "Telefóny"
+dst = "cutters"
+sources = ["phones"]
+
+[[level]]
+name = "master"
+label = "Master"
+dst = "cutters"
+master = true

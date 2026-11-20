@@ -126,12 +126,24 @@ DLINK_PARTICIPANT = {
 # top of the point's own gain_db (0 dB = this routing as generated); the hub serves them on its
 # loopback control page. A source is a participant (every channel) or `name:channel`. Names are
 # the API path (a-z 0-9 _ -), labels are what the cutter reads.
-LEVELS = [
-    {"name": "program", "label": "Program", "dst": "cutters", "sources": ["foh_dante:1", "foh_dante:2", "lv1"]},
-    {"name": "click", "label": "Click", "dst": "cutters", "sources": ["foh_dante:3"]},
-    {"name": "kamery", "label": "Kamery", "dst": "cutters", "sources": [f"cam{i}" for i in range(1, 8)]},
-    {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]},
-]
+# intercom#38 (owner 20.11.2026: "strihac potrebuje lepsi mix kde vie nastavit viacej hlasitosti"):
+# one slider per source plus a master (`master`: no sources, it trims the whole dst output on top of
+# the per-source sliders). `from` names the #34 group whose saved value a new slider starts at.
+LEVELS = (
+    [
+        {"name": "foh", "label": "FOH", "dst": "cutters", "sources": ["foh_dante:1", "foh_dante:2"], "from": "program"},
+        {"name": "lv1", "label": "LV1", "dst": "cutters", "sources": ["lv1"], "from": "program"},
+        {"name": "click", "label": "Click", "dst": "cutters", "sources": ["foh_dante:3"]},
+    ]
+    + [
+        {"name": f"cam{i}", "label": f"Kamera {i}", "dst": "cutters", "sources": [f"cam{i}"], "from": "kamery"}
+        for i in range(1, 8)
+    ]
+    + [
+        {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]},
+        {"name": "master", "label": "Master", "dst": "cutters", "master": True},
+    ]
+)
 
 # Participant emit order: camboxes, then the program references, then the interface participants.
 _ROLE_ORDER = {
@@ -371,7 +383,14 @@ def _fmt_gain(g):
 
 def _check_level(level, points):
     """Fail the generation when a slider source routes nothing into its dst (the hub would refuse
-    the TOML at load; the converter says it first, naming the slider)."""
+    the TOML at load; the converter says it first, naming the slider). A master (intercom#38) takes
+    no sources and needs at least one point into its dst."""
+    if level.get("master"):
+        if level.get("sources"):
+            raise ValueError(f"level {level['name']!r}: a master takes no sources")
+        if not any(pt["dst"] == level["dst"] for pt in points):
+            raise ValueError(f"level {level['name']!r}: master has no point into {level['dst']!r}")
+        return
     for src in level["sources"]:
         name, _, ch = src.partition(":")
         hits = [
@@ -491,8 +510,13 @@ def render(model):
         out.append(f"name = {json.dumps(level['name'])}")
         out.append(f"label = {json.dumps(level['label'], ensure_ascii=False)}")
         out.append(f"dst = {json.dumps(level['dst'])}")
-        joined = ", ".join(json.dumps(src) for src in level["sources"])
-        out.append(f"sources = [{joined}]")
+        if level.get("master"):
+            out.append("master = true")
+        else:
+            joined = ", ".join(json.dumps(src) for src in level["sources"])
+            out.append(f"sources = [{joined}]")
+        if level.get("from"):
+            out.append(f"from = {json.dumps(level['from'])}")
         out.append("")
 
     return "\n".join(out) + "\n"

@@ -54,11 +54,21 @@ pub struct LevelToml {
     pub name: String,
     pub label: String,
     pub dst: String,
+    /// The trimmed sources; empty (omitted) on a master.
+    #[serde(default)]
     pub sources: Vec<String>,
     #[serde(default = "default_min_db")]
     pub min_db: f32,
     #[serde(default = "default_max_db")]
     pub max_db: f32,
+    /// intercom#38: a master trims the whole `dst` output (every point into it) on top of the
+    /// per-source sliders. It takes no `sources` and claims no point; one per `dst`.
+    #[serde(default)]
+    pub master: bool,
+    /// intercom#38: the old slider (a #34 group) whose stored value this slider starts at when
+    /// the state file has none of its own (`program` -> `foh`, `kamery` -> `cam1`).
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 /// One resolved slider.
@@ -73,8 +83,12 @@ pub struct LevelSpec {
     pub sources: Vec<String>,
     pub min_db: f32,
     pub max_db: f32,
-    /// How many matrix points the slider trims.
+    /// How many matrix points the slider trims (a master: every point into `dst`).
     pub points: usize,
+    /// A master trims the whole `dst` output after the point sum ([`Levels::master_of`]).
+    pub master: bool,
+    /// The old slider whose stored value this one starts at (the #34 migration).
+    pub from: Option<String>,
 }
 
 /// One slider's live value. `linear` is all the real-time thread reads.
@@ -140,6 +154,8 @@ pub struct LevelState {
     pub min_db: f32,
     pub max_db: f32,
     pub points: usize,
+    /// intercom#38, additive: the whole-output master (no sources).
+    pub master: bool,
 }
 
 /// What one change did (for the log line and the response).
@@ -181,8 +197,10 @@ pub fn resolve(
     index: &HashMap<String, usize>,
     points: &mut [Point],
 ) -> Result<Levels> {
-    let mut specs = Vec::with_capacity(raw.len());
+    let mut specs: Vec<LevelSpec> = Vec::with_capacity(raw.len());
     let mut names = std::collections::HashSet::new();
+    // Every slider of this config: a `from` must name an OLD slider, never one of these.
+    let current: std::collections::HashSet<String> = raw.iter().map(|l| l.name.clone()).collect();
     for (slot, l) in raw.into_iter().enumerate() {
         let who = format!("level '{}'", l.name);
         if !valid_name(&l.name) {
@@ -213,6 +231,75 @@ pub fn resolve(
         if participants[dst].out_channels == 0 {
             bail!("{who}: dst '{}' has no output channels", l.dst);
         }
+        if let Some(f) = &l.from {
+            if !valid_name(f) {
+                bail!("{who}: 'from' must be 1..={MAX_NAME_LEN} of a-z 0-9 _ - (an old slider's name)");
+            }
+            if current.contains(f) {
+                bail!("{who}: 'from' names '{f}', a slider of this config (it carries over an OLD slider's stored value only)");
+            }
+        }
+        let claimed = if l.master {
+            resolve_master(&l, &who, dst, &specs, points)?
+        } else {
+            claim_sources(&l, &who, (slot, dst), (participants, index), &specs, points)?
+        };
+        specs.push(LevelSpec {
+            name: l.name,
+            label: l.label,
+            dst,
+            dst_name: participants[dst].name.clone(),
+            sources: l.sources,
+            min_db: l.min_db,
+            max_db: l.max_db,
+            points: claimed,
+            master: l.master,
+            from: l.from,
+        });
+    }
+    let values: Vec<LevelValue> = specs.iter().map(|_| LevelValue::unity()).collect();
+    Ok(Levels {
+        specs: specs.into(),
+        values: values.into(),
+        writer: Arc::new(Mutex::new(())),
+    })
+}
+
+/// A master: no sources, at most one per `dst`, and `dst` must have points. Claims no point (the
+/// engine trims the whole output after the sum); returns how many points it covers.
+fn resolve_master(
+    l: &LevelToml,
+    who: &str,
+    dst: usize,
+    specs: &[LevelSpec],
+    points: &[Point],
+) -> Result<usize> {
+    if !l.sources.is_empty() {
+        bail!(
+            "{who}: a master takes no sources (it trims every point into '{}')",
+            l.dst
+        );
+    }
+    if let Some(other) = specs.iter().find(|s| s.master && s.dst == dst) {
+        bail!("{who}: '{}' already has a master ('{}')", l.dst, other.name);
+    }
+    let n = points.iter().filter(|p| p.dst == dst).count();
+    if n == 0 {
+        bail!("{who}: no point into '{}'", l.dst);
+    }
+    Ok(n)
+}
+
+/// A source slider: claim every point from its sources into `dst` (`Point::level = slot`).
+fn claim_sources(
+    l: &LevelToml,
+    who: &str,
+    (slot, dst): (usize, usize),
+    (participants, index): (&[Participant], &HashMap<String, usize>),
+    specs: &[LevelSpec],
+    points: &mut [Point],
+) -> Result<usize> {
+    {
         if l.sources.is_empty() {
             bail!("{who}: needs at least one source");
         }
@@ -253,23 +340,8 @@ pub fn resolve(
             }
             claimed += hits;
         }
-        specs.push(LevelSpec {
-            name: l.name,
-            label: l.label,
-            dst,
-            dst_name: participants[dst].name.clone(),
-            sources: l.sources,
-            min_db: l.min_db,
-            max_db: l.max_db,
-            points: claimed,
-        });
+        Ok(claimed)
     }
-    let values: Vec<LevelValue> = specs.iter().map(|_| LevelValue::unity()).collect();
-    Ok(Levels {
-        specs: specs.into(),
-        values: values.into(),
-        writer: Arc::new(Mutex::new(())),
-    })
 }
 
 impl Levels {
@@ -357,6 +429,7 @@ impl Levels {
                     min_db: s.min_db,
                     max_db: s.max_db,
                     points: s.points,
+                    master: s.master,
                 }
             })
             .collect()
@@ -379,26 +452,59 @@ impl Levels {
     }
 
     /// Apply a stored state file's text: known names take their value clamped into the slider's
-    /// range; unknown names are reported. A text that does not parse changes nothing.
+    /// range; a slider the file does not name takes its `from` slider's stored value (the #34
+    /// groups -> the #38 per-source sliders), clamped the same way; names that are neither a
+    /// slider nor any slider's `from` are reported. A text that does not parse changes nothing.
     pub fn apply_stored(&self, text: &str) -> Result<StoredReport> {
         let stored: StoredFile = toml::from_str(text).context("parse the levels state file")?;
         let mut report = StoredReport::default();
-        for (name, v) in stored.levels {
-            let Some(i) = self.index_of(&name) else {
-                report.unknown.push(name);
-                continue;
-            };
+        let take = |i: usize, v: &StoredLevel, report: &mut StoredReport| {
             let spec = &self.specs[i];
-            let stored = v.db as f32;
-            let db = if stored.is_finite() { stored } else { 0.0 };
+            let raw = v.db as f32;
+            let db = if raw.is_finite() { raw } else { 0.0 };
             let clamped = db.clamp(spec.min_db, spec.max_db);
-            if clamped != stored {
-                report.clamped.push(name.clone());
+            if clamped != raw {
+                report.clamped.push(spec.name.clone());
             }
             self.store(i, clamped, v.muted);
-            report.taken.push((name, clamped, v.muted));
+            report.taken.push((spec.name.clone(), clamped, v.muted));
+        };
+        for (name, v) in &stored.levels {
+            match self.index_of(name) {
+                Some(i) => take(i, v, &mut report),
+                None if self.specs.iter().any(|s| s.from.as_deref() == Some(name)) => {}
+                None => report.unknown.push(name.clone()),
+            }
+        }
+        for (i, spec) in self.specs.iter().enumerate() {
+            if stored.levels.contains_key(&spec.name) {
+                continue;
+            }
+            let Some((from, v)) = spec
+                .from
+                .as_ref()
+                .and_then(|f| stored.levels.get(f).map(|v| (f, v)))
+            else {
+                continue;
+            };
+            take(i, v, &mut report);
+            report.migrated.push((spec.name.clone(), from.clone()));
         }
         Ok(report)
+    }
+
+    /// Per participant id (`participants` long), the master slider trimming that output, if any.
+    /// Built once (the engine's constructor), never on the real-time thread.
+    pub fn master_of(&self, participants: usize) -> Vec<Option<usize>> {
+        let mut out = vec![None; participants];
+        for (i, s) in self.specs.iter().enumerate() {
+            if s.master {
+                if let Some(slot) = out.get_mut(s.dst) {
+                    *slot = Some(i);
+                }
+            }
+        }
+        out
     }
 
     /// Read the state file at start. A missing file keeps every slider at 0 dB; an unreadable or
@@ -426,8 +532,11 @@ impl Levels {
                 for name in &r.clamped {
                     tracing::warn!(level = %name, "levels: stored value outside the slider's range, clamped");
                 }
-                for name in &r.unknown {
-                    tracing::warn!(level = %name, path = %path.display(), "levels: the state file names a slider this config has not, ignored");
+                for (name, from) in &r.migrated {
+                    tracing::info!(level = %name, from = %from, "levels: no stored value of its own, started at its old slider's value (intercom#38)");
+                }
+                if !r.unknown.is_empty() {
+                    tracing::warn!(names = ?r.unknown, path = %path.display(), "levels: the state file names sliders this config has not (and no slider takes over), ignored");
                 }
             }
             Err(e) => {
@@ -468,6 +577,8 @@ pub struct StoredReport {
     pub taken: Vec<(String, f32, bool)>,
     pub clamped: Vec<String>,
     pub unknown: Vec<String>,
+    /// (slider, the old name it took its value from) — intercom#38.
+    pub migrated: Vec<(String, String)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

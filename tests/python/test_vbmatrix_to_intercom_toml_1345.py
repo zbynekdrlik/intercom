@@ -299,16 +299,16 @@ def test_dlink_names_with_quotes_and_backslashes_stay_valid_toml(monkeypatch):
 
 
 def test_the_cutters_level_sliders_are_emitted_34():
-    # intercom#34: four sliders into the cutters' cans, every cutters point trimmed by exactly one.
+    # intercom#34: sliders into the cutters' cans, every cutters point trimmed by exactly one SOURCE
+    # slider. intercom#38 replaced the four groups with one slider per source + a master (no
+    # sources, it trims the whole output): the name list moved to the #38 test below; the
+    # coverage check here is unchanged and skips the master.
     data = tomllib.loads(conv.convert(_xml()))
-    levels = {lv["name"]: lv for lv in data["level"]}
-    assert list(levels) == ["program", "click", "kamery", "telefony"]
-    assert levels["program"]["sources"] == ["foh_dante:1", "foh_dante:2", "lv1"]
-    assert levels["click"]["sources"] == ["foh_dante:3"]
-    assert levels["kamery"]["sources"] == [f"cam{i}" for i in range(1, 8)]
-    assert levels["telefony"] == {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]}
     claimed = {}
     for lv in data["level"]:
+        if lv.get("master"):
+            assert "sources" not in lv
+            continue
         for src in lv["sources"]:
             name, _, ch = src.partition(":")
             for pt in data["point"]:
@@ -318,6 +318,47 @@ def test_the_cutters_level_sliders_are_emitted_34():
                     claimed[key] = lv["name"]
     into_cutters = {(pt["src"], pt["in_ch"], pt["out_ch"]) for pt in data["point"] if pt["dst"] == "cutters"}
     assert set(claimed) == into_cutters
+
+
+def test_one_slider_per_source_and_a_master_are_emitted_38():
+    # intercom#38 (owner 20.11.2026: "strihac potrebuje lepsi mix ..."): FOH, LV1, Click, Kamera
+    # 1..7, Telefony, Master. `from` names the #34 group a new slider takes its saved value from.
+    data = tomllib.loads(conv.convert(_xml()))
+    levels = data["level"]
+    assert [lv["name"] for lv in levels] == (
+        ["foh", "lv1", "click"] + [f"cam{i}" for i in range(1, 8)] + ["telefony", "master"]
+    )
+    by = {lv["name"]: lv for lv in levels}
+    assert by["foh"] == {
+        "name": "foh",
+        "label": "FOH",
+        "dst": "cutters",
+        "sources": ["foh_dante:1", "foh_dante:2"],
+        "from": "program",
+    }
+    assert by["lv1"] == {"name": "lv1", "label": "LV1", "dst": "cutters", "sources": ["lv1"], "from": "program"}
+    assert by["click"] == {"name": "click", "label": "Click", "dst": "cutters", "sources": ["foh_dante:3"]}
+    for i in range(1, 8):
+        assert by[f"cam{i}"] == {
+            "name": f"cam{i}",
+            "label": f"Kamera {i}",
+            "dst": "cutters",
+            "sources": [f"cam{i}"],
+            "from": "kamery",
+        }
+    assert by["telefony"] == {"name": "telefony", "label": "Telefóny", "dst": "cutters", "sources": ["phones"]}
+    assert by["master"] == {"name": "master", "label": "Master", "dst": "cutters", "master": True}
+
+
+def test_a_master_with_sources_or_into_an_output_without_points_fails_the_generation_38(monkeypatch):
+    monkeypatch.setattr(
+        conv, "LEVELS", [{"name": "m", "label": "M", "dst": "cutters", "master": True, "sources": ["lv1"]}]
+    )
+    with pytest.raises(ValueError, match="a master takes no sources"):
+        conv.convert(_xml())
+    monkeypatch.setattr(conv, "LEVELS", [{"name": "m", "label": "M", "dst": "nobody", "master": True}])
+    with pytest.raises(ValueError, match="no point into 'nobody'"):
+        conv.convert(_xml())
 
 
 def test_a_level_source_without_a_point_into_its_dst_fails_the_generation_34(monkeypatch):
