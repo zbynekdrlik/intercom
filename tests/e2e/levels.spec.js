@@ -149,9 +149,11 @@ test("a click at the top or bottom of a fader sets its max or min (every engine)
   await page.mouse.click(x, box.y + box.height - 3);
   await expect.poll(async () => (await apiLevel(request, "cam3")).db).toBeLessThanOrEqual(-55);
   await page.mouse.click(x, box.y + box.height / 2);
-  const mid = (await apiLevel(request, "cam3")).db;
-  expect(mid, "the middle of the fader is the middle of -60..+12").toBeGreaterThan(-36);
-  expect(mid).toBeLessThan(-12);
+  // The PUT goes out on `change`: wait for the hub to hold the middle value, like the two above.
+  await expect
+    .poll(async () => (await apiLevel(request, "cam3")).db, { message: "the middle of the fader is the middle of -60..+12" })
+    .toBeGreaterThan(-36);
+  expect((await apiLevel(request, "cam3")).db).toBeLessThan(-12);
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
