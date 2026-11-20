@@ -153,9 +153,17 @@ comment 7038129667.
   playwright test --project=levels` (from a script file). Playwright starts EVERY `webServer` for
   any `--project`, so even a `--project=phone` run needs the release binary (or
   `INTERCOM_HUB_BIN`); a missing one fails the run loudly, never skips.
-- Gotcha: a vertical range (`writing-mode: vertical-lr; direction: rtl`) puts max at the top; a
-  Playwright drag from the bottom edge first lands mid-range (the first `input` read about -28 dB on
-  Chromium 131), so assert the end value, not the path.
+- **The fader is a horizontal range turned -90deg inside an upright 40x260 `.strip-fader` box**
+  (max at the top). NEVER `writing-mode: vertical-lr` on the range: the tray's window is WebKitGTK
+  (2.52.6 on the boxes), which ignores it and draws a tiny horizontal slider (live 20.11.2026);
+  Playwright's WebKit and Chromium both honour it, so no browser test saw it. Not `appearance:
+  slider-vertical` either (deprecated in Chromium: a console warning). Pinned statically in
+  `tests/python/test_levels_fader_webkitgtk_39.py`; the click geometry (top = max, bottom = min,
+  middle = mid) in `levels.spec.js` "every engine", run in Chromium and the `levels-webkit` project.
+  Check a page change in REAL WebKitGTK: the tray `--open --url http://127.0.0.1:<port>/` under
+  `xvfb-run` + `import -window root` (the smoke recipe in the tray section).
+- Gotcha: a Playwright drag from the bottom edge of a fader first lands mid-range, so assert the end
+  value, not the path.
 
 ## The tray icon `intercom-tray` (owner 19.11.2026: "ikonka na otvorenie dole v bare")
 
