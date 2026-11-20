@@ -193,7 +193,11 @@ pub fn client_key(cf: Option<&str>, xff: Option<&str>, peer: Option<IpAddr>) -> 
     let Some(peer) = peer else {
         return "unknown".to_string();
     };
-    let parse = |s: Option<&str>| -> Option<IpAddr> { s?.trim().parse().ok() };
+    // Canonical first, so `::ffff:127.0.0.1` is the loopback it is (review round 3).
+    let parse = |s: Option<&str>| -> Option<IpAddr> {
+        s?.trim().parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
+    };
+    let peer = peer.to_canonical();
     let mut ip = peer;
     if peer.is_loopback() {
         if let Some(hop) = parse(xff.and_then(|x| x.rsplit(',').next())) {
@@ -234,9 +238,14 @@ pub struct RateLimiter {
     max_keys: usize,
 }
 
-/// The offer rate limit: 5 at once, then one every 2 s per client.
-pub const OFFER_BURST: f64 = 5.0;
-pub const OFFER_PER_S: f64 = 0.5;
+/// The offer rate limit for a hub of `max_phones` slots: `(burst, per second)`. A whole crew may
+/// come in at once from ONE key (the venue's Wi-Fi reaches the hub through cloudflared with one
+/// public address, review round 3), so the burst is `max_phones` (at least 5) and the refill one
+/// per second; the hub-wide pending cap and the 3 s STUN deadline are the flood guard, and a
+/// reconnect (a valid `replaces`) spends no token at all.
+pub fn offer_rate(max_phones: usize) -> (f64, f64) {
+    (max_phones.max(5) as f64, 1.0)
+}
 /// The rate limiter's default key capacity.
 pub const RATE_LIMIT_KEYS: usize = 4096;
 
@@ -265,8 +274,33 @@ impl RateLimiter {
         self.buckets.is_empty()
     }
 
+    /// Does `key` have a token at `now`? Nothing is spent (see [`RateLimiter::spend`]).
+    pub fn peek(&mut self, key: &str, now: std::time::Instant) -> bool {
+        self.refill(key, now) >= 1.0
+    }
+
+    /// Spend one of `key`'s tokens at `now` (no-op on an empty bucket).
+    pub fn spend(&mut self, key: &str, now: std::time::Instant) {
+        if self.refill(key, now) >= 1.0 {
+            if let Some((tokens, _)) = self.buckets.get_mut(key) {
+                *tokens -= 1.0;
+            }
+        }
+    }
+
     /// May `key` make one more request at `now`? A yes spends a token.
     pub fn allow(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if self.peek(key, now) {
+            self.spend(key, now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Bring `key`'s bucket up to `now` (creating it, evicting the least recently used one when
+    /// full) and return its tokens.
+    fn refill(&mut self, key: &str, now: std::time::Instant) -> f64 {
         if !self.buckets.contains_key(key) && self.buckets.len() >= self.max_keys {
             // Evict the least recently used bucket (an O(n) scan, bounded by max_keys and only
             // on a new key, which the rate of new TCP peers bounds in turn).
@@ -286,12 +320,7 @@ impl RateLimiter {
         let refill = now.saturating_duration_since(*last).as_secs_f64() * self.per_s;
         *tokens = (*tokens + refill).min(self.burst);
         *last = now;
-        if *tokens >= 1.0 {
-            *tokens -= 1.0;
-            true
-        } else {
-            false
-        }
+        *tokens
     }
 }
 

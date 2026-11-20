@@ -11,7 +11,8 @@
 //!
 //! The route is public (cloudflared, no credential), so an offer is checked in the cheapest order:
 //! the content type (a page elsewhere cannot send JSON without a CORS preflight, and the hub
-//! answers none), the per-client rate limit, the body limit, the slot (on the media task), and only
+//! answers none), the body limit, the slot on the media task (a reconnect needs none of the caps;
+//! a fresh offer needs a token from its client's bucket and room under the pending caps), and only
 //! then the SDP parse, the DTLS certificate and the answer, on the blocking pool. Every refusal is
 //! counted on `/api/state`; a warning names the count at most every 10 s.
 
@@ -31,9 +32,8 @@ use axum::{
 
 use crate::webrtc_leg::WebrtcHandle;
 use crate::webrtc_signal::{
-    client_key, is_json_content_type, parse_display_body, parse_offer_body, PhoneId, RateLimiter,
-    RefusalLog, SignalError, MAX_SIGNAL_BODY_BYTES, OFFER_BURST, OFFER_PER_S, TRANSPORT_JANUS,
-    TRANSPORT_WEBRTC,
+    client_key, is_json_content_type, offer_rate, parse_display_body, parse_offer_body, PhoneId,
+    RateLimiter, RefusalLog, SignalError, MAX_SIGNAL_BODY_BYTES, TRANSPORT_JANUS, TRANSPORT_WEBRTC,
 };
 
 /// The offer route's guards: the per-client rate limit and the refusal log.
@@ -52,9 +52,11 @@ pub struct PhoneApi {
 }
 
 impl PhoneApi {
-    /// The routes for `leg`, with the default offer rate limit.
+    /// The routes for `leg`, with the offer rate limit sized for its slots (`offer_rate`).
     pub fn new(leg: Option<WebrtcHandle>) -> Self {
-        Self::with_rate(leg, RateLimiter::new(OFFER_BURST, OFFER_PER_S))
+        let max = leg.as_ref().map_or(0, |l| l.shared.max_phones);
+        let (burst, per_s) = offer_rate(max);
+        Self::with_rate(leg, RateLimiter::new(burst, per_s))
     }
 
     /// The routes with a given rate limiter (the tests use their own).
@@ -147,23 +149,33 @@ async fn offer(
         headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
         peer.map(|Extension(ConnectInfo(a))| a.ip()),
     );
-    let checked = (|| {
-        if !is_json_content_type(header_str(header::CONTENT_TYPE)) {
-            return Err(SignalError::UnsupportedMediaType);
-        }
-        let allowed = api
-            .guard
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .rate
-            .allow(&client, Instant::now());
-        if !allowed {
-            return Err(SignalError::RateLimited);
-        }
+    let checked = if is_json_content_type(header_str(header::CONTENT_TYPE)) {
         parse_offer_body(&body)
-    })();
+    } else {
+        Err(SignalError::UnsupportedMediaType)
+    };
+    // The bucket is only looked at here; the media task decides whether this offer is a
+    // reconnect (a valid `replaces`: no token, review round 3) or a fresh one, which spends a token
+    // once it gets a slot (a refused offer spends nothing).
+    let has_token = api
+        .guard
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .rate
+        .peek(&client, Instant::now());
     let result = match checked {
-        Ok(req) => leg.offer(req, client.clone()).await,
+        Ok(req) => {
+            let guard = api.guard.clone();
+            let key = client.clone();
+            let charge = move || {
+                guard
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .rate
+                    .spend(&key, Instant::now());
+            };
+            leg.offer(req, client.clone(), has_token, charge).await
+        }
         Err(e) => Err(e),
     };
     match result {

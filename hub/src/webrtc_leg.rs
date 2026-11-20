@@ -54,8 +54,10 @@ pub const RESERVATION_DEADLINE: Duration = Duration::from_secs(5);
 pub const RECENT_WINDOW: Duration = Duration::from_secs(120);
 /// At most this many recently connected ids are remembered.
 pub const RECENT_MAX: usize = 256;
-/// At most this many live or pending sessions per client key (review round 2 🟡3): 429 beyond.
-pub const MAX_SESSIONS_PER_CLIENT: usize = 3;
+/// At most this many PENDING (not yet connected) fresh sessions per client key: 429 beyond (review
+/// rounds 2 and 3). Connected phones never count: a whole venue's Wi-Fi reaches the hub through
+/// cloudflared under ONE key, and its crew may all be connected at once.
+pub const MAX_PENDING_PER_CLIENT: usize = 3;
 /// The end reason of a phone a reconnect replaced: its id is not a reconnect claim again.
 const REPLACED: &str = "replaced by its reconnect";
 /// How long the pending-commands queue is.
@@ -310,7 +312,10 @@ enum Command {
     Reserve {
         replaces: Option<PhoneId>,
         client: String,
-        reply: oneshot::Sender<Result<Reservation, SignalError>>,
+        /// The client's rate bucket has a token (only a fresh offer needs one).
+        has_token: bool,
+        /// The reservation and whether it is a reconnect (a valid claim: no token spent).
+        reply: oneshot::Sender<Result<(Reservation, bool), SignalError>>,
     },
     Adopt {
         reservation: Reservation,
@@ -365,18 +370,30 @@ impl WebrtcHandle {
         rx.await.map_err(|_| SignalError::Unavailable)?
     }
 
-    /// A phone's offer: the capacity first (on the media task, a few µs), the SDP parse, the
-    /// certificate and the answer on the blocking pool, then the ready `Rtc` goes to the media
-    /// task. Returns the phone's id and the hub's answer.
-    pub async fn offer(&self, req: OfferRequest, client: String) -> Result<Answered, SignalError> {
+    /// A phone's offer from `client`: the capacity first (on the media task, a few µs), the SDP
+    /// parse, the certificate and the answer on the blocking pool, then the ready `Rtc` goes to the
+    /// media task. `has_token` says whether the client's rate bucket has a token; `charge` spends
+    /// it, and is called only when a FRESH offer (not a reconnect) got a slot. Returns the phone's
+    /// id and the hub's answer.
+    pub async fn offer(
+        &self,
+        req: OfferRequest,
+        client: String,
+        has_token: bool,
+        charge: impl FnOnce(),
+    ) -> Result<Answered, SignalError> {
         let replaces = req.replaces;
-        let reservation = self
+        let (reservation, reconnect) = self
             .ask(|reply| Command::Reserve {
                 replaces,
                 client,
+                has_token,
                 reply,
             })
             .await?;
+        if !reconnect {
+            charge();
+        }
         let factory = self.factory.clone();
         let sdp = req.sdp;
         let built = tokio::task::spawn_blocking(move || factory.answer(&sdp))
@@ -459,7 +476,6 @@ pub fn start_webrtc(
         reservations: Vec::new(),
         recent: VecDeque::new(),
         unconnected_log: RefusalLog::default(),
-        send_fail: SendFailures::default(),
         table: SlotTable::new(cfg.max_phones),
         slots: cfg.slots,
         shared: cfg.shared,
@@ -542,15 +558,18 @@ struct Phone {
     changed: bool,
     /// The client key its offer came from (`webrtc_signal::client_key`).
     client: String,
+    /// The reconnect claim its offer spent, given back if it ends without connecting.
+    claim: Option<(PhoneId, Instant)>,
+    /// Its own sends' health: one phone failing never flips the state of another (review round 3).
+    send_fail: SendFailures,
 }
 
 struct PendingReservation {
     r: Reservation,
     deadline: Instant,
-    /// A reconnecting phone's offer (`replaces` matched): not held to the pending cap.
-    reconnect: bool,
-    /// The id the offer named, if any: at most one open reservation per id.
-    replaces: Option<PhoneId>,
+    /// The reconnect claim this offer spent (the old id and the time it became a claim): exempt
+    /// from the pending caps and the rate bucket; given back when the offer never connects.
+    claim: Option<(PhoneId, Instant)>,
     client: String,
 }
 
@@ -600,7 +619,6 @@ struct NetTask {
     guard: Arc<DanteGuard>,
     /// Offers that ended without connecting: one summary line at most every 10 s.
     unconnected_log: RefusalLog,
-    send_fail: SendFailures,
 }
 
 fn ice_name(s: IceConnectionState) -> &'static str {
@@ -706,7 +724,11 @@ impl NetTask {
             .iter()
             .filter(|p| !p.connected && p.ending.is_none())
             .count()
-            + self.reservations.iter().filter(|r| !r.reconnect).count()
+            + self
+                .reservations
+                .iter()
+                .filter(|r| r.claim.is_none())
+                .count()
     }
 
     fn command(&mut self, cmd: Command) {
@@ -714,9 +736,10 @@ impl NetTask {
             Command::Reserve {
                 replaces,
                 client,
+                has_token,
                 reply,
             } => {
-                let r = self.reserve(replaces, client);
+                let r = self.reserve(replaces, client, has_token);
                 let _ = reply.send(r);
             }
             Command::Adopt {
@@ -758,19 +781,26 @@ impl NetTask {
     }
 
     /// Set a slot aside for an offer from `client`. A `replaces` naming a live phone drops that
-    /// phone first; one naming a recently connected phone consumes that claim. Either makes the
-    /// offer a reconnect, never held to the pending cap; one open reservation per named id at
-    /// most (review round 2 🟡2). Every client may hold [`MAX_SESSIONS_PER_CLIENT`] live or pending
-    /// sessions (🟡3).
+    /// phone; one naming a recently connected phone takes that claim. Either makes the offer a
+    /// reconnect: exempt from the hub-wide pending cap, the per-client pending cap and the rate
+    /// bucket (review round 3: a venue's whole crew comes back at once under one key after a
+    /// restart). One open reservation per claimed id. A fresh offer needs a token and may be one
+    /// of at most [`MAX_PENDING_PER_CLIENT`] pending ones of its client. Returns the reservation
+    /// and whether it is a reconnect.
     fn reserve(
         &mut self,
         replaces: Option<PhoneId>,
         client: String,
-    ) -> Result<Reservation, SignalError> {
+        has_token: bool,
+    ) -> Result<(Reservation, bool), SignalError> {
         let now = Instant::now();
-        let mut reconnect = false;
+        let mut claim = None;
         if let Some(old) = replaces {
-            if self.reservations.iter().any(|r| r.replaces == Some(old)) {
+            if self
+                .reservations
+                .iter()
+                .any(|r| r.claim.is_some_and(|(id, _)| id == old))
+            {
                 // A second offer for the same id while the first is open: no reconnect.
             } else if let Some(i) = self
                 .phones
@@ -779,46 +809,66 @@ impl NetTask {
             {
                 self.phones[i].ending = Some(REPLACED);
                 self.sweep(now);
-                reconnect = true;
+                claim = Some((old, now));
             } else if let Some(i) = self.recent.iter().position(|(id, _)| *id == old) {
-                self.recent.remove(i);
-                reconnect = true;
+                claim = self.recent.remove(i);
             }
         }
-        let held = self
-            .phones
-            .iter()
-            .filter(|p| p.ending.is_none() && p.client == client)
-            .count()
-            + self
-                .reservations
+        if claim.is_none() {
+            if !has_token {
+                return Err(SignalError::RateLimited);
+            }
+            let pending_of_client = self
+                .phones
                 .iter()
-                .filter(|r| r.client == client)
-                .count();
-        if held >= MAX_SESSIONS_PER_CLIENT {
-            return Err(SignalError::RateLimited);
-        }
-        if !reconnect && self.pending() >= pending_cap(self.table.capacity()) {
-            return Err(SignalError::Full);
+                .filter(|p| {
+                    p.ending.is_none() && !p.connected && p.claim.is_none() && p.client == client
+                })
+                .count()
+                + self
+                    .reservations
+                    .iter()
+                    .filter(|r| r.claim.is_none() && r.client == client)
+                    .count();
+            if pending_of_client >= MAX_PENDING_PER_CLIENT {
+                return Err(SignalError::RateLimited);
+            }
+            if self.pending() >= pending_cap(self.table.capacity()) {
+                return Err(SignalError::Full);
+            }
         }
         let Some((slot, generation)) = self.table.allocate() else {
+            self.give_back(claim, now);
             return Err(SignalError::Full);
         };
         let r = Reservation { slot, generation };
         self.reservations.push(PendingReservation {
             r,
             deadline: now + RESERVATION_DEADLINE,
-            reconnect,
-            replaces: replaces.filter(|_| reconnect),
+            claim,
             client,
         });
-        Ok(r)
+        Ok((r, claim.is_some()))
+    }
+
+    /// A reconnect claim whose offer never connected goes back (review round 3): the phone's page
+    /// already names its new id, so the old one must stay valid for its next try, still bounded
+    /// by [`RECENT_WINDOW`] from when it became a claim.
+    fn give_back(&mut self, claim: Option<(PhoneId, Instant)>, now: Instant) {
+        if let Some((id, since)) = claim {
+            if now.saturating_duration_since(since) <= RECENT_WINDOW
+                && !self.recent.iter().any(|(r, _)| *r == id)
+            {
+                self.recent.push_back((id, since));
+            }
+        }
     }
 
     fn release(&mut self, r: Reservation) {
         if let Some(i) = self.reservations.iter().position(|p| p.r == r) {
-            self.reservations.swap_remove(i);
+            let claim = self.reservations.swap_remove(i).claim;
             self.table.free(r.slot, r.generation);
+            self.give_back(claim, Instant::now());
         }
     }
 
@@ -827,11 +877,12 @@ impl NetTask {
             // The reservation expired while the answer was built.
             return Err(SignalError::Unavailable);
         };
-        let client = self.reservations.swap_remove(i).client;
+        let PendingReservation { claim, client, .. } = self.reservations.swap_remove(i);
         let id = match PhoneId::random() {
             Ok(id) => id,
             Err(e) => {
                 self.table.free(r.slot, r.generation);
+                self.give_back(claim, Instant::now());
                 tracing::error!(error = %e, "webrtc: no random id for a phone");
                 return Err(SignalError::Unavailable);
             }
@@ -840,6 +891,7 @@ impl NetTask {
             Ok(d) => d,
             Err(e) => {
                 self.table.free(r.slot, r.generation);
+                self.give_back(claim, Instant::now());
                 tracing::error!(error = %e, "webrtc: opus decoder create failed");
                 return Err(SignalError::Unavailable);
             }
@@ -875,6 +927,8 @@ impl NetTask {
             ending: None,
             changed: false,
             client,
+            claim,
+            send_fail: SendFailures::default(),
         });
         self.publish();
         Ok(id)
@@ -919,13 +973,7 @@ impl NetTask {
                     phone.ending.get_or_insert("rtc error");
                 }
             }
-            if let Some(t) = poll_phone(
-                phone,
-                &self.socket,
-                &self.slots,
-                &mut self.send_fail,
-                &self.shared,
-            ) {
+            if let Some(t) = poll_phone(phone, &self.socket, &self.slots, &self.shared) {
                 next = next.min(t);
             }
             if phone.ending.is_none() && !phone.connected {
@@ -958,12 +1006,13 @@ impl NetTask {
         self.reservations.retain(|p| {
             let keep = p.deadline > now;
             if !keep {
-                expired.push(p.r);
+                expired.push((p.r, p.claim));
             }
             keep
         });
-        for r in expired {
+        for (r, claim) in expired {
             self.table.free(r.slot, r.generation);
+            self.give_back(claim, now);
         }
         if self.reservations.len() != before {
             tracing::debug!(
@@ -1013,6 +1062,14 @@ impl NetTask {
                             "webrtc: phone session ended"
                         );
                     } else {
+                        // Its reconnect claim stays valid for the phone's next try.
+                        if let Some((id, since)) = phone.claim {
+                            if now.saturating_duration_since(since) <= RECENT_WINDOW
+                                && !self.recent.iter().any(|(r, _)| *r == id)
+                            {
+                                self.recent.push_back((id, since));
+                            }
+                        }
                         self.shared
                             .sessions_never_connected
                             .fetch_add(1, Ordering::Relaxed);
@@ -1027,12 +1084,10 @@ impl NetTask {
                 }
             }
         }
-        while self
-            .recent
-            .front()
-            .is_some_and(|(_, t)| now.saturating_duration_since(*t) > RECENT_WINDOW)
-            || self.recent.len() > RECENT_MAX
-        {
+        // A claim given back keeps its original time, so the list is not in time order.
+        self.recent
+            .retain(|(_, t)| now.saturating_duration_since(*t) <= RECENT_WINDOW);
+        while self.recent.len() > RECENT_MAX {
             self.recent.pop_front();
         }
         self.phones = kept;
@@ -1083,7 +1138,6 @@ fn poll_phone(
     phone: &mut Phone,
     socket: &tokio::net::UdpSocket,
     slots: &RoomSlots,
-    fails: &mut SendFailures,
     shared: &WebrtcShared,
 ) -> Option<Instant> {
     loop {
@@ -1110,14 +1164,18 @@ fn poll_phone(
                 };
                 match crate::pktinfo::try_send_from(socket, &t.contents, t.destination, src) {
                     Ok(_) => {
-                        if let Some(count) = fails.ok() {
-                            tracing::info!(failures = count, "webrtc: sending works again");
+                        if let Some(count) = phone.send_fail.ok() {
+                            tracing::info!(
+                                phone = %phone.id.short(),
+                                failures = count,
+                                "webrtc: sending to the phone works again"
+                            );
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => {
                         shared.send_errors.fetch_add(1, Ordering::Relaxed);
-                        if let Some(count) = fails.fail() {
+                        if let Some(count) = phone.send_fail.fail() {
                             tracing::warn!(
                                 phone = %phone.id.short(),
                                 dest = %t.destination,

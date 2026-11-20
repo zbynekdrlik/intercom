@@ -1450,24 +1450,38 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   only credential: `/api/state` shows its first 8 characters.
 - **The offer route is public** (cloudflared, no credential; review round 1 🔴1, 🟡3, 🟡4). It
   checks in the cheapest order: `Content-Type: application/json` or 415 (a page elsewhere then
-  needs a CORS preflight, which the hub never answers), a token bucket per client or 429
-  (`RateLimiter`, 5 at once then one per 2 s, at most 4096 buckets with least-recently-used
-  eviction: a new client always gets a bucket of its own, never a shared one), the body limits (413
-  / 400), then a slot on the media task (`Reserve`: at most `MAX_SESSIONS_PER_CLIENT` = 3 live or
-  pending sessions per client, 429 beyond; 503 without a slot), and only then the SDP parse, the DTLS
+  needs a CORS preflight, which the hub never answers), the body limits (413 / 400), then a slot
+  on the media task (`Reserve`), and only then the SDP parse, the DTLS
   certificate and the answer on the blocking pool (`RtcFactory::answer` in `spawn_blocking`), the
   ready `Rtc` handed back (`Adopt`; a failed build `Release`s; a reservation nobody adopts is freed
-  after 5 s). Offers whose phone has not connected may hold at most `pending_cap` = half the slots;
-  an offer whose `replaces` names a live phone (dropped at once, "replaced by its reconnect") or
-  one connected within the last 120 s (`RECENT_WINDOW`) is a reconnect and is not held to that cap,
-  so a flood never locks out a reconnecting phone. A claim is SPENT by its use (review round 2
-  🟡2): a `recent` entry is removed when it admits an offer, a replaced phone's id never enters
-  `recent`, and one id has at most one open reservation. The PWA sends its last id as `replaces`.
+  after 5 s).
+- **Who may hold a slot (`reserve`, review rounds 1-3).** The venue's DNS sends the crew's phone
+  names to Cloudflare, so EVERY phone on the venue Wi-Fi arrives through cloudflared with ONE key
+  (the venue's public address or /64): a key is a venue, not a phone.
+  - A RECONNECT is an offer whose `replaces` names a live phone (dropped at once, "replaced by its
+    reconnect") or one connected within the last 120 s (`RECENT_WINDOW`). It is exempt from every
+    cap and spends no rate token, so a whole crew comes back at once after a blip. The PWA sends
+    its last id as `replaces`.
+  - A claim is SPENT by its use (round 2): a `recent` entry is removed when it admits an offer, a
+    replaced phone's id never enters `recent`, one id has at most one open reservation. It is
+    GIVEN BACK (round 3, its original time, still inside the 120 s) when the offer it admitted is
+    released (400 build failure), its reservation expires, or its phone ends without connecting:
+    the page already names its new id, so a flaky phone keeps its protection.
+  - A FRESH offer needs a token from its key's bucket (`RateLimiter`, `offer_rate(max_phones)`:
+    burst `max_phones` (at least 5), one a second; looked at with `peek` in the handler, spent
+    only when the offer got a slot; at most 4096 buckets, least-recently-used eviction, never a
+    shared one), may be one of at most `MAX_PENDING_PER_CLIENT` = 3 PENDING (not yet connected)
+    fresh offers of its key (connected phones never count), 429 beyond, and the hub-wide pending
+    offers may hold at most `pending_cap` = half the slots (503), with the 3 s STUN deadline
+    freeing them: that is the flood guard. Measured: 16 phones behind one key all connect (paced
+    by the page's retries), all 16 reconnect at once on their first try, and a flood from that
+    key neither passes the caps nor knocks one off.
   Every refusal counts in `offers_refused` (`offers_rate_limited` for the 429s); a warning names
   the count at most every 10 s (`RefusalLog`), never a line per request.
 - **The client key (`client_key`, review round 2 🟡1).** The hub listens on `0.0.0.0:8790`, so a
   LAN host can skip the box's nginx and send any header. A forwarding header counts ONLY when the
-  TCP peer is loopback (the box's nginx, which sets `X-Forwarded-For $remote_addr`: its last hop);
+  TCP peer is loopback (the box's nginx, which sets `X-Forwarded-For $remote_addr`: its last hop;
+  every address is made canonical first, so `::ffff:127.0.0.1` is loopback too);
   `CF-Connecting-IP` counts only when that nginx-set address is itself loopback (cloudflared on the
   box); a header that is not one IP address, or any other peer, keys on the TCP peer. IPv6 is keyed
   by its /64 (a v4-mapped peer by its IPv4). The test server passes the peer like the hub's own
@@ -1475,6 +1489,11 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   hub's HTTP port to loopback only (nginx and cloudflared both live on the box) would close the
   nginx bypass for good; camera-box provisioning owns `[hub].bind` / the box's front, so it stays
   `0.0.0.0:8790` here.
+- **Accepted residual: an IPv6 /48 (review round 3).** A client holding a /48 has 65 536 /64 keys,
+  so it can get a fresh rate bucket per offer. Accepted: the LRU never starves a key (a new key
+  evicts the oldest bucket, it never shares one), the per-key pending cap only matters per key,
+  and the hub-wide pending cap (half the slots) plus the 3 s STUN deadline bound what any number
+  of keys can hold; connected phones and reconnects are never affected.
 - **Network task** (`webrtc_leg.rs`, tokio): ONE UDP socket, every phone's `Rtc`; `IP_PKTINFO`
   gives each datagram's destination (str0m needs it to pair a local candidate) and the Dante guard
   drops the Dante leg first; `Rtc::accepts` demuxes. Every send names its source
@@ -1520,8 +1539,9 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   a debug line, and offers that end without connecting are a summary line at most every 10 s with
   the count (`sessions_never_connected` on `/api/state`), never a line each (review round 2 🔵4).
   ICE state changes, renames and errors are logged; never a line per packet. A send the kernel
-  refuses (not a full buffer) warns once when sending starts to fail and logs once when it works
-  again, both with the count (`SendFailures`, `send_errors` on `/api/state`).
+  refuses (not a full buffer) warns once when sending to THAT phone starts to fail and logs once
+  when it works again, both with the count (`SendFailures`, a field of each phone since round 3:
+  one failing phone never makes a healthy one log; `send_errors` on `/api/state`).
 - **Accepted residual: a forged-source STUN reflection (review round 2 🔵6).** A host that can send
   UDP with a forged source address AND knows an offer's ICE credentials (its ufrag + password, which
   only the offer's own client and the hub see) can make the hub answer a binding request "to" a
@@ -1547,7 +1567,11 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   is admitted during it; a new phone connects once the flood's slots expire after 3 s), 415 and the
   per-client 429, an offer naming a foreign address that never gets a datagram, the RTP tick
   arithmetic, `is_stun`; round 2: a reconnect claim spent once (recent and live), at most 3
-  sessions per client and forged LAN headers that do not change the key, `SendFailures`), and the
+  sessions per client and forged LAN headers that do not change the key, `SendFailures`; round 3:
+  16 phones behind one venue key connect, all reconnect at once and survive a flood from that
+  key, a flood with free slots stays inside the caps, a claim comes back after a never-connected
+  or a failed reconnect, per-phone send failures, `peek`/`spend`, `offer_rate`, the canonical
+  key), and the
   Playwright `webrtc` project (`webrtc.spec.js` + `webrtc-hub.js` + `webrtc.toml`, the REAL
   binary on the base port + 4..6, started and SIGKILLed by the spec itself): two phones, a VBAN tone
   reaches both meters, A's fake mic reaches B and never A, mic OFF silences B, rename, a closed page
