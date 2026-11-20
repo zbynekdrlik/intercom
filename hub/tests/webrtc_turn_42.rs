@@ -107,7 +107,7 @@ fn it_waits_for_credentials_and_sends_nothing_before() {
 #[test]
 fn it_allocates_with_the_long_term_credential() {
     let t0 = Instant::now();
-    let (relay, srv) = allocated(t0, opts());
+    let (mut relay, srv) = allocated(t0, opts());
     // The unauthenticated Allocate got 401 + realm/nonce, the signed one the allocation.
     assert_eq!(srv.count("allocate"), 2);
     assert_eq!(srv.alloc_user.as_deref(), Some("alice"));

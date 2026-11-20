@@ -1608,21 +1608,23 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
   mobile data reaches no host candidate, not even through its own relay. With `[webrtc].turn =
   "cloudflare"` the network task holds ONE allocation on Cloudflare's TURN (UDP to the `turn:` url
   without `transport=tcp`, `turn_udp_server`, resolved to IPv4).
-  - **Two sockets.** The phones' host candidates stay on `[webrtc].udp_bind` (fixed port,
-    IP_PKTINFO source-addressed sends, unchanged). The relay talks to the TURN server from its OWN
-    socket, `bind_turn_socket`: IPv4 `0.0.0.0:0`, an EPHEMERAL port, so every hub process is a new
-    5-tuple at the TURN server. Why: a hub that dies without releasing (a crash, a kill, a deploy's
-    restart) leaves its allocation on the server for its whole lifetime (~10 min), and on the
-    phones' fixed port the next process's Allocate got 437 "Mismatched allocation" for all that
-    time (`a_restarted_hub_allocates_at_once_while_the_old_allocation_still_lives`, RED on the
-    one-socket design: backoff, 3 failures). The TURN socket sends plain `send_to`, no source
-    address: the kernel picks it by route (the TURN server is on the internet, so the default
-    route's address), which stays the allocation's 5-tuple while the route holds. It has
-    `IP_PKTINFO` + the Dante guard like every hub UDP socket (intercom#25) and accepts only the
-    TURN server's exact address (anything else counts in `rx_refused`). Its local address is the
-    journal line `the relay's own UDP socket`. The relayed candidate's port is the server's, so
-    the box firewall needs nothing new: the TURN socket only talks out to the server and gets its
-    answers back on the same 5-tuple.
+  - **One socket PER ALLOCATION (coordinator, 21.11.2026: the root fix).** The phones' host
+    candidates stay on `[webrtc].udp_bind` (fixed port, IP_PKTINFO source-addressed sends,
+    unchanged). Every TURN allocation talks from its OWN socket (`bind_turn_socket`, `TurnSock`):
+    IPv4 `0.0.0.0:0`, an EPHEMERAL port, one per relay epoch (`TurnTransmit::epoch`; the network
+    task binds a socket on an epoch's first datagram and closes every socket
+    `TurnRelay::live_epochs` no longer names). Why: an allocation the server still holds answers an
+    Allocate from the same 5-tuple with 437 for its whole lifetime (~10 min), and three layers of
+    437 handling grew on that one spot (the hub restart on the phones' fixed port, a 437-after-
+    release retry window for rotations, `Readopt` for a passing outage, then their channel tables
+    carried over wrongly). A new 5-tuple never meets a 437 and a new allocation starts with empty
+    permission and channel tables by construction; all three layers are gone. Each socket sends
+    plain `send_to` (the kernel picks the source by route, the default route's address, which stays
+    the allocation's 5-tuple while the route holds), has `IP_PKTINFO` + the Dante guard
+    (intercom#25), and a reader task hands its datagrams (epoch, source, bytes) to the network
+    task; the relay takes only its TURN server's exact address on a live allocation's socket. The
+    live socket's local address is `webrtc.turn.local`. The relayed candidate's port is the
+    server's, so the box firewall needs nothing new.
   - **Credentials:** `feed_turn_credentials` asks the same `TurnMinter` `/api/ice` serves (its
     cache, its refresher), hands every NEW username/server over (`Command::TurnCredentials`), a
     failure once per change as the reason (`TurnUnavailable`: the facet reads `off` with it when
@@ -1637,32 +1639,29 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
   - **States** (`TurnPhase`): waiting -> allocating (unsigned Allocate, 401 realm + nonce, signed
     Allocate) -> allocated (refresh at half the lifetime, 438 retried with the new nonce up to
     twice) | backoff (an Allocate refused or unanswered after 0 / 0.5 / 1.5 / 3.5 s = 7.5 s; 1 s
-    doubling to 60 s, reset by a success). **A LOST allocation (review of phase 3)** = a 437 or no
-    answer on ANY request (Refresh, CreatePermission, ChannelBind, the keepalive), a refused
-    refresh, or an expiry (`TurnRelay::lost`): it is allocated again AT ONCE, no back-off step
-    first; a second loss within 60 s (`TURN_LOSS_AT_ONCE_WINDOW`) backs off. Before, a 437 on a
-    CreatePermission counted as a refused peer (retried in 60 s) and nothing failed the relay until
-    the next Refresh (<= 300 s) while the facet said `allocated` and answers offered a dead relayed
-    address. **The server may still hold it** (a request went unanswered for 7.5 s on a passing
-    outage, the server never lost it): the new Allocate from the same 5-tuple then gets 437, and
-    within the 60 s window the hub REFRESHES the old allocation instead (`Readopt`, its relayed
-    address back, counted as a refresh) rather than waiting out its lifetime in back-off. A ROTATION (new
-    username) releases with the OLD credential (Refresh LIFETIME 0) and allocates with the new one;
-    it waits while a connected phone is on the relay, never closer than 10 min to the old
-    credential's expiry (the minter renews at 2/3 of 24 h, so 8 h of slack). **coturn drops a
-    released allocation on its next timer pass, not at once:** the Allocate right after a release
-    got 437 "Mismatched allocation" (1-3 s on dev1), so a 437 within 10 s of a release waits 0.5 s
-    and tries again (`releasing`), never counted as a failure. Still needed with the ephemeral
-    socket: a rotation releases and allocates on the SAME socket (the coturn rotation test reads 0
-    failures only with it). A 437 on an Allocate at any other time backs off like any failure (a
-    new process never meets its predecessor's allocation any more: new port, new 5-tuple).
+    doubling to 60 s, reset by a success). **A LOST allocation** = a 437 or no answer on ANY later
+    request (Refresh, CreatePermission, ChannelBind, the keepalive), a refused refresh, or an
+    expiry (`TurnRelay::lost`): it is ABANDONED (no release on a dead path; it expires on the
+    server) and a new one is allocated AT ONCE from a new socket; a second loss within 60 s
+    (`TURN_LOSS_AT_ONCE_WINDOW`) backs off. **A ROTATION** (a new username from the minter)
+    allocates with the NEW credential on a new socket while the old allocation keeps carrying the
+    phones (`webrtc.turn.rotating`), switches the answers' relayed candidate over once it is up,
+    then sends a best-effort release (Refresh LIFETIME 0) with the OLD credential on the OLD socket
+    and closes that socket after `TURN_RETIRE_GRACE` (2 s). **A phone still on the old relay loses
+    it at the switch and reconnects through the page's media watchdog (`MEDIA_STALL_MS`, about
+    4 s)**; that is why the rotation waits while a connected phone is on the relay (a relayed
+    datagram within 30 s), never closer than 10 min to the old credential's expiry (the minter
+    renews at 2/3 of 24 h, so 8 h of slack). A rotation's new allocation that fails leaves the old
+    one in place and is tried again after 30 s (`TURN_ROTATE_RETRY`).
   - **Keepalive (review of phase 3).** An IDLE relay (no phones) sent the TURN server only its
     Refresh every 300 s, while the venue's CGNAT / conntrack drops an idle UDP mapping in 30-180 s:
     the first mobile phone's CreatePermission then left on a NEW mapping (437). Now a STUN Binding
     request goes to the TURN server whenever nothing else went there for 15 s (`TURN_KEEPALIVE`,
     any datagram to the server resets the clock, so a relay carrying media sends none); no answer
     after its retransmissions = a lost allocation. Its answer is not checked further (a Binding
-    needs no allocation): it keeps the mapping, the next request's 437 detects a loss.
+    needs no allocation): it keeps the mapping, the next request's 437 detects a loss. **It needs a
+    TURN server that answers STUN Binding:** Cloudflare and coturn do; a coturn run with
+    `--no-stun` would not, and every keepalive would then read as a lost allocation.
   - **ICE-lite takes host candidates only** (`is` 0.12 `agent.rs` `add_local_candidate`: "Reject
     non-host candidate due to ice-lite mode"). So the relayed address is added as
     `Candidate::host` (a lite agent only matches the destination a check came to and answers from
@@ -1683,8 +1682,8 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
     a rotation counts a connected phone as on the relay while a relayed datagram came within 30 s
     (`relay_recent`, `RELAY_BUSY_WINDOW`).
   - **Permissions** per IP: the GLOBAL IPv4 addresses of the live phones' kept offer candidates
-    (`offer_candidate_ips`, `set_wanted` on adopt and sweep; RFC 1918, 100.64/10, link-local and
-    loopback get none: a public TURN service answers 403 and a LAN phone reaches a host candidate;
+    (`offer_candidate_ips`, `set_wanted` on adopt and sweep; 0.0.0.0/8, RFC 1918, 100.64/10,
+    127/8, 169.254/16, 192.0.0.0/24, 198.18.0.0/15, multicast and 240/4 get none: a public TURN service answers 403 and a LAN phone reaches a host candidate;
     the test-only `TurnOptions::allow_private_peers` / hidden `--turn-private-peers` lets the
     loopback tests through), at most `8 x max_phones` (counted in `permissions_refused` beyond),
     refreshed every 240 s only while wanted (the server lets a dropped one lapse at 300 s), a
@@ -1695,35 +1694,44 @@ the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still 
     REMEMBERED 900 s after its last bind (`TURN_CHANNEL_REMEMBER`: the server keeps a binding 600 s
     and refuses its number / peer to another binding 300 s more): its late ChannelData is still
     accepted, and the same ip:port coming back reuses its number (a new number was a 400 and a
-    phone that heard nothing). A refused bind (not 437) is retried after 30 s
+    phone that heard nothing). Past the server's 600 s binding (`TURN_CHANNEL_LIFETIME`) the
+    remembered channel is NOT ready: the first send is a Send indication and binds the same number
+    again, ChannelData only after. Channels and permissions belong to ONE allocation: a new
+    allocation (a loss, a rotation) starts with empty tables. A refused bind (not 437) is retried after 30 s
     (`TURN_CHANNEL_RETRY`), Send indications meanwhile, never failed for life. The table holds at
     most 4 x `max_channels` entries (the oldest departed go first). A send to an IP without a
     permission is refused (`tx_refused`): a permission is not a check, str0m still only answers
     checks. **Accepted (review):** refused binds and permissions still being wanted keep their
     entries until their peer leaves; both tables are bounded.
-  - **`/api/state` `webrtc.turn`** (omitted with turn off): state, server, relayed,
-    lifetime_left_s, allocations, refreshes, failures, last_error, permissions,
-    permissions_refused, channels, rx/tx_packets, tx_refused. **Journal:** `relay allocated`
-    (server, relayed, lifetime), `relay failed, backing off` (error, retry_in_s), `the allocation
-    is lost, allocating again at once` (error), `the server still holds the allocation, refreshing
-    it` (relayed), `credential rotated, releasing`, `off` (reason); permissions and channels are
-    debug lines.
+  - **`/api/state` `webrtc.turn`** (omitted with turn off): state, server, local (the live
+    allocation's socket), relayed, lifetime_left_s, rotating, allocations, refreshes, failures,
+    last_error, permissions, permissions_refused, channels, rx/tx_packets, tx_refused.
+    **Journal:** `relay allocated` (server, relayed), `relay failed, backing off` (error,
+    retry_in_s), `the allocation is lost, allocating again from a new socket` (error), `credential
+    rotated, allocating with it on a new socket`, `credential rotated, the new allocation carries
+    the answers`, `the rotation's new allocation failed`, `off` (reason); sockets, permissions and
+    channels are debug lines.
   - **Not verified against Cloudflare itself:** dev1 has no TURN key and the strih boxes were not
     touched (a live event). Phase 4's first step: a hub with `turn = "cloudflare"` reads
     `webrtc.turn.state = allocated` with a relayed address, then a phone on mobile data reads
     `pair: relay`; then let the hub sit IDLE (no phone) for more than 5 min and connect a mobile
     phone again: it must connect at once, `webrtc.turn.failures` unchanged (the keepalive held the
     mapping; a loss would show as a `lost, allocating again` line and failures + 1).
-  - **Tests:** `webrtc_turn_42.rs` (the state machine against the in-process `fake_turn` server:
-    401 -> signed Allocate, refresh at half the lifetime and with `refresh_cap`, 438, a lost
-    allocation, the back-off series to 60 s, retransmissions + the 7.5 s timeout, the rotation
-    idle / busy / near expiry, a release the server drops late, permissions IPv4 + bounded +
-    refreshed while wanted, channels, wrap / unwrap, `advertise_relayed`, `turn_udp_server`,
-    `offer_candidate_ips`), `webrtc_turn_relay_42.rs` (REAL coturn, `hub/tests/coturn`: a str0m
-    phone that sees only the relay candidate, tone both ways, every datagram it got came from the
-    relayed address, `pair` relay, channels in use; refresh and rotation against coturn), and the
-    Playwright `webrtc-turn.spec.js` (two relay-only Chromium pages via `?relay=1`, the fake key
-    API + coturn + the real hub, `webrtc-turn-env.js`).
+  - **Tests:** `webrtc_turn_42.rs` (the state machine against the in-process `fake_turn` server,
+    which keys its allocation by the client's 5-tuple = the relay's socket epoch: 401 -> signed
+    Allocate, refresh at half the lifetime and with `refresh_cap`, 438, lost allocations (437 on a
+    refresh / permission / bind, no answer, the keepalive) replaced at once from a new socket, the
+    back-off series to 60 s, retransmissions + the 7.5 s timeout, the rotation idle / busy / near
+    expiry and the old relay carrying the phones until the switch, permissions global + bounded +
+    refreshed while wanted, channels (bounded, remembered, rebound past 600 s, retried after a
+    refusal, 0x4FFF), wrap / unwrap, `transmit_route`, `relay_recent`, `advertise_relayed`,
+    `turn_udp_server`, `offer_candidate_ips`), `webrtc_turn_relay_42.rs` (REAL coturn,
+    `hub/tests/coturn`: a str0m phone that sees only the relay candidate, tone both ways, every
+    datagram it got came from the relayed address, `pair` relay, channels in use; refresh and
+    rotation against coturn; a hub restart on the same `udp_bind` allocates at once; coturn frozen
+    past the keepalive timeout (`Coturn::pause`) and thawed: a new allocation from a new local
+    socket within 5 s, no back-off), and the Playwright `webrtc-turn.spec.js` (two relay-only
+    Chromium pages via `?relay=1`, the fake key API + coturn + the real hub, `webrtc-turn-env.js`).
   - **coturn for tests:** `$INTERCOM_TURNSERVER` or `turnserver` on PATH; missing = the tests FAIL.
     It listens and relays on 127.0.0.2 and denies 127.0.0.1 as a peer (the hub's host address), so
     the relay is the only path. CI installs the `coturn` package in the rust, coverage and web-e2e
