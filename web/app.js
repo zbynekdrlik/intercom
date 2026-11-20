@@ -352,10 +352,19 @@ function waitIceGathering(pc) {
   });
 }
 
+// The PeerConnection's config. `?relay=1` (test-only, honoured only when set exactly) forces
+// iceTransportPolicy "relay": the forced-relay E2E (intercom#42 phase 3) proves a phone with
+// nothing but its TURN relay, a phone on mobile data behind the venue's CGNAT, reaches the hub.
+function nativePcConfig(iceServers) {
+  const cfg = iceServers ? { iceServers } : {};
+  if (qs("relay") === "1") cfg.iceTransportPolicy = "relay";
+  return cfg;
+}
+
 async function startNative(my, iceServers) {
   let pc;
   try {
-    pc = new RTCPeerConnection(iceServers ? { iceServers } : {});
+    pc = new RTCPeerConnection(nativePcConfig(iceServers));
   } catch (e) {
     scheduleReconnect();
     return;

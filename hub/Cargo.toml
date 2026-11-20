@@ -87,6 +87,16 @@ dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.178" }
 # breaking changes and the crate is pre-1.0. `rust-crypto` = dimpl (pure-Rust DTLS) + RustCrypto
 # SRTP, so the hub still builds with no openssl and no C crypto (the default is aws-lc-rs, C).
 str0m = { version = "=0.25.0", default-features = false, features = ["rust-crypto"] }
+# The hub's own TURN relay (intercom#42 phase 3; str0m has no TURN client, its README "Turn ❌"):
+# webrtc-rs' sans-IO STUN codec (`rtc-stun`: messages, MESSAGE-INTEGRITY, FINGERPRINT, ERROR-CODE)
+# and the TURN attribute codecs of `rtc-turn` (`proto`: XOR-RELAYED/PEER-ADDRESS, LIFETIME, DATA,
+# CHANNEL-NUMBER, ChannelData). The client state machine is the hub's own (`webrtc_turn.rs`):
+# rtc-turn's `Client` keeps a permission per ip:port with no removal and refreshes all of them
+# forever (an unbounded table), hides the allocation's lifetime, and re-signs a refresh with a
+# rotated username, which RFC 5766 §6.2 answers with 441. `crypto-ring` only: `ring` 0.17 is
+# already in the lockfile; no openssl, no aws-lc. Pinned exactly like str0m (0.21 is young).
+rtc-turn = { version = "=0.21.1", default-features = false, features = ["crypto-ring"] }
+rtc-stun = { version = "=0.21.1", default-features = false, features = ["crypto-ring"] }
 
 [dev-dependencies]
 # Private scratch dirs in the integration tests (issue 1453): a kernel-atomic name removed on drop,

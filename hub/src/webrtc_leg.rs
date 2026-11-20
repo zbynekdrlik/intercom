@@ -14,11 +14,19 @@
 //! - frees a phone's slot when its ICE disconnects, it never connects, its `Rtc` dies, or it
 //!   leaves; and publishes the `/api/state` `webrtc` facet once a second.
 //!
-//! Host candidates only in this phase; the hub-side TURN relay is phase 3. Logging: one line per
-//! session start / end, ICE state change and error, never one per packet.
+//! Phase 3: with `[webrtc].turn = "cloudflare"` the task also owns the hub's own TURN allocation
+//! ([`crate::webrtc_turn::TurnRelay`], credentials from the box's [`TurnMinter`]) on a SECOND,
+//! ephemeral UDP socket (0.0.0.0:0): every hub process talks to the TURN server from a new
+//! 5-tuple, so a restarted hub allocates at once instead of meeting its predecessor's unreleased
+//! allocation (437 for up to its lifetime). Datagrams from the TURN server are unwrapped and fed to
+//! str0m from the peer to the relayed address; str0m's transmits from the relayed address are
+//! wrapped and sent to the TURN server from that socket. Every answer then carries the relayed candidate next to the host ones, and each offer's
+//! plausible addresses get a TURN permission while its phone lives. ICE-lite is unchanged: the hub
+//! only answers checks. Logging: one line per session start / end, ICE state change, TURN state
+//! change and error, never one per packet.
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,10 +44,15 @@ use crate::dante_guard::DanteGuard;
 use crate::janus_codec::RxDecoder;
 use crate::janus_pacing::{IntervalStats, FRAME_48K};
 use crate::janus_rtp::JanusCodec;
+use crate::turn::{refresh_wait_s, TurnMinter, TURN_REFRESH_RETRY_S, TURN_TTL_S};
 use crate::vban_jitter::NetworkFillStats;
 use crate::webrtc_room::{RoomSlots, TxPacket};
 use crate::webrtc_signal::{
-    filter_offer_candidates, pending_cap, OfferRequest, PhoneId, RefusalLog, SignalError, SlotTable,
+    filter_offer_candidates, offer_candidate_ips, pending_cap, OfferRequest, PhoneId, RefusalLog,
+    SignalError, SlotTable,
+};
+use crate::webrtc_turn::{
+    advertise_relayed, turn_udp_server, TurnCreds, TurnFacet, TurnOptions, TurnRelay,
 };
 
 /// An offer's slot is held this long for the phone's first valid STUN binding request (the
@@ -101,6 +114,7 @@ pub struct WebrtcShared {
     tx_interval_sd_us: AtomicU64,
     tx_interval_max_us: AtomicU64,
     phones: Mutex<Vec<PhoneFacet>>,
+    turn: Mutex<Option<TurnFacet>>,
 }
 
 /// One phone on `/api/state`.
@@ -123,6 +137,9 @@ pub struct PhoneFacet {
     pub mic_active: bool,
     /// The phone's mic ring: its resampler's ratio in ppm off 1 (the phone's clock against the hub's).
     pub mic_rate_ppm: f64,
+    /// The hub's side of the pair its last datagram took: `host` (a host candidate) or `relay`
+    /// (the hub's TURN relay, phase 3); `null` before the first.
+    pub pair: Option<&'static str>,
 }
 
 /// The `/api/state` `webrtc` facet.
@@ -162,6 +179,9 @@ pub struct WebrtcFacet {
     pub tx_interval_ms_sd: f64,
     pub tx_interval_ms_max: f64,
     pub phones: Vec<PhoneFacet>,
+    /// The hub-side TURN relay (phase 3); omitted with `[webrtc].turn` off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<TurnFacet>,
 }
 
 fn ms_to_us(ms: f64) -> u64 {
@@ -186,6 +206,7 @@ impl WebrtcShared {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let turn = self.turn.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let ld = |a: &AtomicU64| a.load(Ordering::Relaxed);
         WebrtcFacet {
             udp_bind: self.udp_bind.clone(),
@@ -211,6 +232,7 @@ impl WebrtcShared {
             tx_interval_ms_sd: ld(&self.tx_interval_sd_us) as f64 / 1000.0,
             tx_interval_ms_max: ld(&self.tx_interval_max_us) as f64 / 1000.0,
             phones,
+            turn,
         }
     }
 
@@ -234,6 +256,10 @@ impl WebrtcShared {
 
     fn publish_phones(&self, phones: Vec<PhoneFacet>) {
         *self.phones.lock().unwrap_or_else(|e| e.into_inner()) = phones;
+    }
+
+    fn publish_turn(&self, turn: Option<TurnFacet>) {
+        *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = turn;
     }
 }
 
@@ -262,12 +288,17 @@ pub struct Reservation {
     pub generation: u64,
 }
 
+/// The hub's relayed address while its TURN allocation lives.
+type RelayCandidate = Arc<Mutex<Option<SocketAddr>>>;
+
 /// What builds a phone's `Rtc` and its answer, OFF the media task (the SDP parse and the DTLS
-/// certificate are the slow part): the crypto provider and the hub's host candidates.
+/// certificate are the slow part): the crypto provider, the hub's host candidates and, while the
+/// TURN allocation lives, its relayed candidate (the network task keeps it current).
 #[derive(Debug, Clone)]
 pub struct RtcFactory {
     crypto: Arc<CryptoProvider>,
     candidates: Vec<SocketAddr>,
+    relay: RelayCandidate,
 }
 
 impl RtcFactory {
@@ -276,6 +307,7 @@ impl RtcFactory {
         RtcFactory {
             crypto: Arc::new(str0m::crypto::from_feature_flags()),
             candidates,
+            relay: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -284,10 +316,22 @@ impl RtcFactory {
         &self.candidates
     }
 
+    /// The hub's relayed address, if its TURN allocation lives.
+    pub fn relay_candidate(&self) -> Option<SocketAddr> {
+        *self.relay.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// An ICE-lite, Opus-only `Rtc` answering `sdp` (the offer's implausible candidates dropped
-    /// first): the hub never sends a connectivity check, it only answers the phone's.
-    pub fn answer(&self, sdp: &str) -> Result<(Rtc, String), SignalError> {
+    /// first): the hub never sends a connectivity check, it only answers the phone's. The answer
+    /// carries every host candidate and the relayed one while the TURN allocation lives. Also
+    /// returns the IPs of the offer's kept candidates (the TURN permissions this phone needs).
+    pub fn answer(&self, sdp: &str) -> Result<(Rtc, String, Vec<IpAddr>), SignalError> {
+        let relay = self.relay_candidate();
+        // Only the HOST addresses count as the hub's own: a phone's relayed candidate often has
+        // the hub relay's IP (the same TURN service; Cloudflare relays from shared anycast
+        // addresses), and dropping it would leave that phone without a permission.
         let (sdp, _dropped) = filter_offer_candidates(sdp, &self.candidates);
+        let peers = offer_candidate_ips(&sdp);
         let offer =
             SdpOffer::from_sdp_string(&sdp).map_err(|e| SignalError::BadOffer(e.to_string()))?;
         let mut rtc = RtcConfig::new()
@@ -304,11 +348,29 @@ impl RtcFactory {
                 Err(e) => tracing::warn!(%addr, error = %e, "webrtc: host candidate refused"),
             }
         }
+        // The relayed address joins as a HOST candidate: str0m's ICE-lite agent refuses any other
+        // kind (`is` 0.12), and a lite agent only needs to know the address a check arrives on
+        // and answer from it. The answer's line is then typed `relay` (`advertise_relayed`).
+        let mut relayed_added = None;
+        if let Some(relayed) = relay {
+            match Candidate::host(relayed, "udp") {
+                Ok(c) => {
+                    if rtc.add_local_candidate(c).is_some() {
+                        relayed_added = Some(relayed);
+                    }
+                }
+                Err(e) => tracing::warn!(%relayed, error = %e, "webrtc: relayed candidate refused"),
+            }
+        }
         let answer: SdpAnswer = rtc
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| SignalError::BadOffer(e.to_string()))?;
-        Ok((rtc, answer.to_sdp_string()))
+        let mut sdp = answer.to_sdp_string();
+        if let Some(relayed) = relayed_added {
+            sdp = advertise_relayed(&sdp, relayed);
+        }
+        Ok((rtc, sdp, peers))
     }
 }
 
@@ -325,6 +387,8 @@ enum Command {
         reservation: Reservation,
         rtc: Box<Rtc>,
         display: String,
+        /// The offer's plausible addresses (the TURN permissions the phone needs).
+        peers: Vec<IpAddr>,
         reply: oneshot::Sender<Result<PhoneId, SignalError>>,
     },
     Release {
@@ -339,6 +403,10 @@ enum Command {
         id: PhoneId,
         reply: oneshot::Sender<Result<(), SignalError>>,
     },
+    /// The relay's current credential (the minter's, or a test's).
+    TurnCredentials(TurnCreds),
+    /// No credential to be had (no TURN key, a failed mint): the reason.
+    TurnUnavailable(String),
 }
 
 impl std::fmt::Debug for Command {
@@ -349,6 +417,8 @@ impl std::fmt::Debug for Command {
             Command::Release { .. } => "Release",
             Command::Display { .. } => "Display",
             Command::Close { .. } => "Close",
+            Command::TurnCredentials(_) => "TurnCredentials",
+            Command::TurnUnavailable(_) => "TurnUnavailable",
         })
     }
 }
@@ -403,7 +473,7 @@ impl WebrtcHandle {
         let built = tokio::task::spawn_blocking(move || factory.answer(&sdp))
             .await
             .unwrap_or(Err(SignalError::Unavailable));
-        let (rtc, answer) = match built {
+        let (rtc, answer, peers) = match built {
             Ok(b) => b,
             Err(e) => {
                 let _ = self.cmd.send(Command::Release { reservation }).await;
@@ -417,6 +487,7 @@ impl WebrtcHandle {
                 reservation,
                 rtc,
                 display,
+                peers,
                 reply,
             })
             .await?;
@@ -433,6 +504,26 @@ impl WebrtcHandle {
     pub async fn close(&self, id: PhoneId) -> Result<(), SignalError> {
         self.ask(|reply| Command::Close { id, reply }).await
     }
+
+    /// Hand the TURN relay a credential (the minter's feed does this; tests call it directly with
+    /// [`TurnFeed::Manual`]). `Err` when the network task is gone. Ignored with TURN off.
+    pub async fn set_turn_credentials(&self, creds: TurnCreds) -> Result<(), SignalError> {
+        self.cmd
+            .send(Command::TurnCredentials(creds))
+            .await
+            .map_err(|_| SignalError::Unavailable)
+    }
+}
+
+/// Where the hub-side TURN relay gets its credential (phase 3).
+pub enum TurnFeed {
+    /// No relay: host candidates only.
+    Off,
+    /// The box's Cloudflare TURN key: the network task's feeder asks the minter (the same cache
+    /// `/api/ice` serves), resolves its UDP `turn:` url and hands every new credential over.
+    Cloudflare(Arc<TurnMinter>),
+    /// A relay whose credentials come through [`WebrtcHandle::set_turn_credentials`] (tests).
+    Manual,
 }
 
 /// What [`start_webrtc`] needs.
@@ -447,10 +538,19 @@ pub struct WebrtcLegConfig {
     pub dante_guard: Arc<DanteGuard>,
 }
 
-/// Start the network task on the current tokio runtime. Returns the HTTP handle and the sender the
-/// phones-room thread hands its packets to.
+/// Start the network task on the current tokio runtime, host candidates only. Returns the HTTP
+/// handle and the sender the phones-room thread hands its packets to.
 pub fn start_webrtc(
     cfg: WebrtcLegConfig,
+) -> anyhow::Result<(WebrtcHandle, mpsc::Sender<TxPacket>)> {
+    start_webrtc_turn(cfg, TurnFeed::Off, TurnOptions::for_phones(1))
+}
+
+/// [`start_webrtc`] with the hub-side TURN relay fed by `feed`, bounded by `opts`.
+pub fn start_webrtc_turn(
+    cfg: WebrtcLegConfig,
+    feed: TurnFeed,
+    opts: TurnOptions,
 ) -> anyhow::Result<(WebrtcHandle, mpsc::Sender<TxPacket>)> {
     cfg.socket.set_nonblocking(true)?;
     let local = cfg.socket.local_addr()?;
@@ -467,6 +567,17 @@ pub fn start_webrtc(
         .map(|ip| SocketAddr::new(*ip, local.port()))
         .collect();
     let factory = Arc::new(RtcFactory::new(candidates.clone()));
+    let relay_candidate = factory.relay.clone();
+    let (turn, turn_socket) = match &feed {
+        TurnFeed::Off => (None, None),
+        TurnFeed::Cloudflare(_) | TurnFeed::Manual => {
+            let relay = TurnRelay::new(opts).map_err(anyhow::Error::msg)?;
+            (Some(relay), Some(bind_turn_socket(&cfg.dante_guard)?))
+        }
+    };
+    if let TurnFeed::Cloudflare(minter) = feed {
+        tokio::spawn(feed_turn_credentials(minter, cmd_tx.clone()));
+    }
     let handle = WebrtcHandle {
         cmd: cmd_tx,
         shared: cfg.shared.clone(),
@@ -484,9 +595,101 @@ pub fn start_webrtc(
         slots: cfg.slots,
         shared: cfg.shared,
         guard: cfg.dante_guard,
+        turn,
+        turn_socket,
+        turn_send_fail: SendFailures::default(),
+        relay_candidate,
+        relay_published: None,
     };
+    task.publish();
     tokio::spawn(task.run(cmd_rx, pkt_rx));
     Ok((handle, pkt_tx))
+}
+
+/// The TURN relay's own socket: IPv4, an EPHEMERAL port, every interface. A new port per hub
+/// process is a new 5-tuple at the TURN server, so the predecessor's allocation (never released
+/// after a crash or a kill, kept for its lifetime) cannot answer this process's Allocate with 437.
+/// The kernel picks the source address by route (the TURN server is on the internet, so the
+/// default route's address); that stays the allocation's 5-tuple while the route holds. Datagrams
+/// arriving on the Dante leg are dropped like on the phones' socket (intercom#25).
+fn bind_turn_socket(guard: &DanteGuard) -> anyhow::Result<tokio::net::UdpSocket> {
+    let std_sock = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    std_sock.set_nonblocking(true)?;
+    let sock = tokio::net::UdpSocket::from_std(std_sock)?;
+    crate::pktinfo::enable_guarded(&sock, guard, "webrtc turn socket")?;
+    tracing::info!(local = %sock.local_addr()?, "webrtc turn: the relay's own UDP socket (ephemeral port, a new 5-tuple per hub process)");
+    Ok(sock)
+}
+
+/// One datagram on the TURN socket, or never without one.
+async fn recv_turn(
+    sock: Option<&tokio::net::UdpSocket>,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, Option<crate::dante_guard::PacketInfo>)> {
+    match sock {
+        Some(s) => crate::pktinfo::recv_from_with_info(s, buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The TURN server a minted credential set names: its UDP `turn:` url, resolved to IPv4.
+async fn resolve_turn_server(urls: &[String]) -> Result<SocketAddr, String> {
+    let (host, port) = turn_udp_server(urls)
+        .ok_or_else(|| "the minted credential has no UDP turn: url".to_string())?;
+    let found = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("cannot resolve the TURN server {host}: {e}"))?;
+    let mut v4 = found.filter(SocketAddr::is_ipv4);
+    v4.next()
+        .ok_or_else(|| format!("the TURN server {host} has no IPv4 address"))
+}
+
+/// The Cloudflare credential feed for the hub's own relay: ask the minter (the cache `/api/ice`
+/// serves, renewed by its own refresher) and hand the relay every NEW credential (another username
+/// or server) with its expiry; a failure is handed over as the reason, once per change. Sleeps
+/// until the cache's 2/3 point, or `TURN_REFRESH_RETRY_S` after a failure. Ends with the task.
+async fn feed_turn_credentials(minter: Arc<TurnMinter>, cmd: mpsc::Sender<Command>) {
+    let mut last: Option<(String, SocketAddr)> = None;
+    let mut last_err: Option<String> = None;
+    loop {
+        let got = match minter.current().await {
+            Ok((creds, left)) => match resolve_turn_server(&creds.urls).await {
+                Ok(server) => Ok((creds, left, server)),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        let wait = match got {
+            Ok((creds, left, server)) => {
+                let key = (creds.username.clone(), server);
+                if last.as_ref() != Some(&key) {
+                    let c = TurnCreds {
+                        server,
+                        username: creds.username.clone(),
+                        password: creds.credential.clone(),
+                        expires_at: Instant::now() + Duration::from_secs(left),
+                    };
+                    if cmd.send(Command::TurnCredentials(c)).await.is_err() {
+                        return;
+                    }
+                    last = Some(key);
+                }
+                last_err = None;
+                refresh_wait_s(left, TURN_TTL_S)
+            }
+            Err(e) => {
+                if last_err.as_deref() != Some(e.as_str()) {
+                    tracing::warn!(error = %e, "webrtc turn: no credential for the hub's relay");
+                    if cmd.send(Command::TurnUnavailable(e.clone())).await.is_err() {
+                        return;
+                    }
+                    last_err = Some(e);
+                }
+                TURN_REFRESH_RETRY_S
+            }
+        };
+        tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
+    }
 }
 
 /// Every IPv4 address of an interface that is up (`getifaddrs`), with the interface's name: the
@@ -566,6 +769,10 @@ struct Phone {
     claim: Option<(PhoneId, Instant)>,
     /// Its own sends' health: one phone failing never flips the state of another (review round 3).
     send_fail: SendFailures,
+    /// The IPs its offer named (the TURN permissions it needs, phase 3).
+    peers: Vec<IpAddr>,
+    /// Whether its last accepted datagram came through the hub's TURN relay (`None` before one).
+    via_relay: Option<bool>,
 }
 
 struct PendingReservation {
@@ -623,6 +830,15 @@ struct NetTask {
     guard: Arc<DanteGuard>,
     /// Offers that ended without connecting: one summary line at most every 10 s.
     unconnected_log: RefusalLog,
+    /// The hub's own TURN relay (phase 3), `None` with `[webrtc].turn` off.
+    turn: Option<TurnRelay>,
+    /// The relay's own socket (ephemeral port, see [`bind_turn_socket`]); `Some` iff `turn`.
+    turn_socket: Option<tokio::net::UdpSocket>,
+    /// The sends to the TURN server: a warning when they start to fail, a line when they work.
+    turn_send_fail: SendFailures,
+    /// The relayed candidate the answers carry (shared with the [`RtcFactory`]).
+    relay_candidate: RelayCandidate,
+    relay_published: Option<SocketAddr>,
 }
 
 fn ice_name(s: IceConnectionState) -> &'static str {
@@ -647,6 +863,13 @@ impl NetTask {
         mut pkt_rx: mpsc::Receiver<TxPacket>,
     ) {
         let mut buf = vec![0u8; RECV_BUF];
+        let mut turn_buf = vec![0u8; RECV_BUF];
+        // The relay socket's port, for the Dante guard's per-port refusal counts.
+        let turn_port = self
+            .turn_socket
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map_or(0, |a| a.port());
         let mut publish = tokio::time::interval(Duration::from_secs(1));
         publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
@@ -654,7 +877,8 @@ impl NetTask {
             candidates = ?self.candidates,
             max_phones = self.table.capacity(),
             pending_cap = pending_cap(self.table.capacity()),
-            "webrtc: phone leg listening (ICE-lite, host candidates only; TURN is phase 3)"
+            turn = self.turn.is_some(),
+            "webrtc: phone leg listening (ICE-lite; with turn the hub's own relayed candidate joins the host ones)"
         );
         loop {
             let next = self.drive(Instant::now());
@@ -670,6 +894,18 @@ impl NetTask {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "webrtc: socket receive failed");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                },
+                r = recv_turn(self.turn_socket.as_ref(), &mut turn_buf) => match r {
+                    Ok((n, from, info)) => {
+                        if self.guard.check_datagram(turn_port, info, from) {
+                            continue;
+                        }
+                        self.receive_turn(&turn_buf[..n], from);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "webrtc turn: socket receive failed");
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 },
@@ -692,8 +928,37 @@ impl NetTask {
     }
 
     fn receive(&mut self, data: &[u8], from: SocketAddr, dst_ip: Option<IpAddr>) {
-        let now = Instant::now();
         let destination = self.destination(dst_ip);
+        self.deliver(data, from, destination, false, Instant::now());
+    }
+
+    /// A datagram on the TURN socket: only the TURN server's exact address counts (anything else
+    /// is dropped and counted). A response moves the relay; a phone's datagram comes out
+    /// unwrapped and str0m sees it from the phone to the hub's relayed address.
+    fn receive_turn(&mut self, data: &[u8], from: SocketAddr) {
+        let now = Instant::now();
+        let Some(turn) = self.turn.as_mut().filter(|t| t.is_server(from)) else {
+            self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let got = turn.handle_datagram(data, now);
+        let relayed = turn.relayed();
+        if let (Some((peer, payload)), Some(relayed)) = (got, relayed) {
+            self.deliver(&payload, peer, relayed, true, now);
+        }
+        self.after_turn();
+    }
+
+    /// One datagram for the phones: `from` the phone (or the peer the relay unwrapped) to
+    /// `destination` (a host candidate, or the relayed address).
+    fn deliver(
+        &mut self,
+        data: &[u8],
+        from: SocketAddr,
+        destination: SocketAddr,
+        via_relay: bool,
+        now: Instant,
+    ) {
         let stun = is_stun(data);
         let Ok(contents) = data.try_into() else {
             self.shared.rx_refused.fetch_add(1, Ordering::Relaxed);
@@ -715,6 +980,10 @@ impl NetTask {
         if stun && phone.stun_at.is_none() {
             // accepts() matched the STUN message on this phone's ICE credentials.
             phone.stun_at = Some(now);
+        }
+        if phone.via_relay != Some(via_relay) {
+            phone.via_relay = Some(via_relay);
+            phone.changed = true;
         }
         if let Err(e) = phone.rtc.handle_input(input) {
             tracing::warn!(phone = %phone.id.short(), error = %e, "webrtc: input refused — dropping the phone");
@@ -752,10 +1021,24 @@ impl NetTask {
                 reservation,
                 rtc,
                 display,
+                peers,
                 reply,
             } => {
-                let r = self.adopt(reservation, *rtc, display);
+                let r = self.adopt(reservation, *rtc, display, peers);
                 let _ = reply.send(r);
+            }
+            Command::TurnCredentials(creds) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.set_credentials(creds, Instant::now());
+                }
+                self.after_turn();
+                self.publish();
+            }
+            Command::TurnUnavailable(reason) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.set_unavailable(&reason);
+                }
+                self.publish();
             }
             Command::Release { reservation } => self.release(reservation),
             Command::Display {
@@ -880,7 +1163,13 @@ impl NetTask {
         }
     }
 
-    fn adopt(&mut self, r: Reservation, rtc: Rtc, name: String) -> Result<PhoneId, SignalError> {
+    fn adopt(
+        &mut self,
+        r: Reservation,
+        rtc: Rtc,
+        name: String,
+        peers: Vec<IpAddr>,
+    ) -> Result<PhoneId, SignalError> {
         let Some(i) = self.reservations.iter().position(|p| p.r == r) else {
             // The reservation expired while the answer was built.
             return Err(SignalError::Unavailable);
@@ -937,7 +1226,11 @@ impl NetTask {
             client,
             claim,
             send_fail: SendFailures::default(),
+            peers,
+            via_relay: None,
         });
+        // Its offer's addresses get a TURN permission now, before its first check comes.
+        self.update_turn_wanted(Instant::now());
         self.publish();
         Ok(id)
     }
@@ -974,6 +1267,14 @@ impl NetTask {
     /// phones that ended and the reservations that expired. Returns when the next timeout is due.
     fn drive(&mut self, now: Instant) -> Instant {
         let mut next = now + Duration::from_millis(100);
+        // A phone on the relay holds off a credential rotation (never past the old one's expiry).
+        let busy = self
+            .phones
+            .iter()
+            .any(|p| p.connected && p.ending.is_none() && p.via_relay == Some(true));
+        if let Some(turn) = self.turn.as_mut() {
+            turn.handle_timeout(now, busy);
+        }
         for phone in &mut self.phones {
             if phone.ending.is_none() {
                 if let Err(e) = phone.rtc.handle_input(Input::Timeout(now)) {
@@ -981,7 +1282,13 @@ impl NetTask {
                     phone.ending.get_or_insert("rtc error");
                 }
             }
-            if let Some(t) = poll_phone(phone, &self.socket, &self.slots, &self.shared) {
+            if let Some(t) = poll_phone(
+                phone,
+                &self.socket,
+                self.turn.as_mut(),
+                &self.slots,
+                &self.shared,
+            ) {
                 next = next.min(t);
             }
             if phone.ending.is_none() && !phone.connected {
@@ -1007,6 +1314,11 @@ impl NetTask {
                     next = next.min(deadline);
                 }
             }
+        }
+        // What the relay has to send (its own requests, the phones' wrapped datagrams).
+        self.after_turn();
+        if let Some(t) = self.turn.as_ref().and_then(TurnRelay::poll_timeout) {
+            next = next.min(t);
         }
         // Reservations whose answer never came back (the HTTP handler went away).
         let before = self.reservations.len();
@@ -1093,8 +1405,60 @@ impl NetTask {
             self.recent.pop_front();
         }
         self.phones = kept;
+        self.update_turn_wanted(now);
         self.publish();
         true
+    }
+
+    /// The TURN permissions the live phones need: their offers' addresses.
+    fn update_turn_wanted(&mut self, now: Instant) {
+        if let Some(turn) = self.turn.as_mut() {
+            let ips: Vec<IpAddr> = self
+                .phones
+                .iter()
+                .filter(|p| p.ending.is_none())
+                .flat_map(|p| p.peers.iter().copied())
+                .collect();
+            turn.set_wanted(ips, now);
+        }
+        self.after_turn();
+    }
+
+    /// Send what the relay queued (to the TURN server, from the relay's own socket) and keep the
+    /// answers' relayed candidate current.
+    fn after_turn(&mut self) {
+        let (Some(turn), Some(sock)) = (self.turn.as_mut(), self.turn_socket.as_ref()) else {
+            return;
+        };
+        let server = turn.server();
+        while let Some(d) = turn.poll_transmit() {
+            let Some(server) = server else { continue };
+            match sock.try_send_to(&d, server) {
+                Ok(_) => {
+                    if let Some(count) = self.turn_send_fail.ok() {
+                        tracing::info!(
+                            failures = count,
+                            "webrtc turn: sending to the TURN server works again"
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    self.shared.send_errors.fetch_add(1, Ordering::Relaxed);
+                    if let Some(count) = self.turn_send_fail.fail() {
+                        tracing::warn!(%server, error = %e, failures = count, "webrtc turn: sending to the TURN server failed (logged again when it works)");
+                    }
+                }
+            }
+        }
+        let relayed = turn.relayed();
+        if relayed != self.relay_published {
+            *self
+                .relay_candidate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = relayed;
+            self.relay_published = relayed;
+        }
     }
 
     fn publish(&self) {
@@ -1116,12 +1480,15 @@ impl NetTask {
                     .last_sound
                     .is_some_and(|t| now.saturating_duration_since(t) < MIC_ACTIVE_WINDOW),
                 mic_rate_ppm: self.slots.mic_rate_ppm(p.slot),
+                pair: p.via_relay.map(|r| if r { "relay" } else { "host" }),
             })
             .collect();
         self.shared
             .phones_pending
             .store(self.pending() as u64, Ordering::Relaxed);
         self.shared.publish_phones(phones);
+        self.shared
+            .publish_turn(self.turn.as_ref().map(|t| t.facet(now)));
     }
 }
 
@@ -1139,6 +1506,7 @@ pub fn rtp_time_for(first: u64, tick: u64) -> MediaTime {
 fn poll_phone(
     phone: &mut Phone,
     socket: &tokio::net::UdpSocket,
+    mut turn: Option<&mut TurnRelay>,
     slots: &RoomSlots,
     shared: &WebrtcShared,
 ) -> Option<Instant> {
@@ -1157,6 +1525,17 @@ fn poll_phone(
         match out {
             Output::Timeout(t) => return Some(t),
             Output::Transmit(t) => {
+                // From the relayed candidate: wrapped for the TURN server (the relay refuses a
+                // peer its permissions do not cover). str0m only ever answers a check or sends
+                // on a pair the phone validated (ICE-lite).
+                if let Some(relay) = turn.as_deref_mut() {
+                    if relay.relayed() == Some(t.source) {
+                        if let Err(e) = relay.send_to(t.destination, &t.contents, Instant::now()) {
+                            tracing::debug!(phone = %phone.id.short(), dest = %t.destination, error = e, "webrtc turn: relayed send refused");
+                        }
+                        continue;
+                    }
+                }
                 // Non-blocking: a full send buffer drops this datagram (WebRTC retransmits what it
                 // must), it never stalls the task. The source is the candidate the phone talks
                 // to, so a 0.0.0.0 bind with several host IPs answers from the right one.
