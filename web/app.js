@@ -471,9 +471,10 @@ function teardownSession() {
 
 function scheduleReconnect() {
   teardownSession();
-  // +-30 % jitter (review round 4): after a hub restart a whole crew does not come back in step.
-  const jitter = 0.7 + 0.6 * Math.random();
-  const delay = Math.round(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt * jitter));
+  // Up to -30 % jitter on the capped delay (review rounds 4-5): after a hub restart a whole crew
+  // does not come back in step, also at the 4 s cap, and no delay ever exceeds the cap.
+  const capped = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  const delay = Math.round(capped * (0.7 + 0.3 * Math.random()));
   reconnectAttempt += 1;
   reconnectAt = Date.now() + delay;
   renderReconnectCountdown();

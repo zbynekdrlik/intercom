@@ -57,7 +57,8 @@ pub const RECENT_MAX: usize = 256;
 /// How many PENDING (not yet connected) fresh offers one client key may hold: half the hub-wide
 /// pending cap, at least 3; 429 beyond (review rounds 2-4). Connected phones never count: a whole
 /// venue's Wi-Fi reaches the hub through cloudflared under ONE key. The hub-wide pending cap is the
-/// real flood guard; this one only keeps one key from taking all of it.
+/// real flood guard; this one keeps one key from taking all of it on a hub of 8 or more slots. On a
+/// smaller hub (pending cap ≤ 3) the share is the whole hub-wide cap: harmless, a venue is one key.
 pub fn pending_cap_per_client(max_phones: usize) -> usize {
     (pending_cap(max_phones) / 2).max(3)
 }
@@ -810,7 +811,9 @@ impl NetTask {
             } else if let Some(i) = self
                 .phones
                 .iter()
-                .position(|p| p.id == old && p.ending.is_none())
+                // Only a phone that really connected is a claim (review round 5): a pending phone's
+                // id is in its own answer, so an attacker could name it.
+                .position(|p| p.id == old && p.ending.is_none() && p.connected)
             {
                 self.phones[i].ending = Some(REPLACED);
                 self.sweep(now);

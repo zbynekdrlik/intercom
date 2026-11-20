@@ -1458,8 +1458,9 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
 - **Who may hold a slot (`reserve`, review rounds 1-3).** The venue's DNS sends the crew's phone
   names to Cloudflare, so EVERY phone on the venue Wi-Fi arrives through cloudflared with ONE key
   (the venue's public address or /64): a key is a venue, not a phone.
-  - A RECONNECT is an offer whose `replaces` names a live phone (dropped at once, "replaced by its
-    reconnect") or one connected within the last 120 s (`RECENT_WINDOW`). It is exempt from every
+  - A RECONNECT is an offer whose `replaces` names a live phone THAT CONNECTED (dropped at once,
+    "replaced by its reconnect"; a pending phone's id, readable from its own answer, is no claim,
+    review round 5) or one connected within the last 120 s (`RECENT_WINDOW`). It is exempt from every
     cap and spends no rate token, so a whole crew comes back at once after a blip. The PWA sends
     the id of its last session that CONNECTED as `replaces` (round 4: `lastPhoneId` is set on
     connect, never on an answer, so the page always names the claim the hub keeps). A reconnecting
@@ -1476,8 +1477,10 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
     (at least 3; 4 on a 16-slot hub) PENDING fresh offers of its key (connected phones never
     count), 429 beyond, and the hub-wide pending fresh offers may hold at most `pending_cap` = half
     the slots (503), with the 3 s STUN deadline freeing them: that is the real flood guard; the
-    per-key one only keeps one key from taking all of it. The page's reconnect delay has +-30 %
-    jitter (1 -> 4 s cap kept), so a crew does not come back in step. Measured: 16 phones behind
+    per-key one keeps one key from taking all of it on a hub of 8+ slots (on a smaller hub it is the
+    whole hub-wide cap: harmless, a venue is one key). The page's reconnect delay is the capped
+    1 -> 4 s step times 0.7..1.0 (jitter applied AFTER the cap, so it also spreads a crew at the
+    cap and never exceeds 4 s; the phone.spec.js backoff test's worst case stays 19 s). Measured: 16 phones behind
     one key all connect, all 16 reconnect at once on their first try, a flood from that key
     neither passes the caps nor knocks one off, and after a hub RESTART (no claims) 10 phones
     behind one key retrying with the page's backoff in step (no jitter, the worst case) are all
