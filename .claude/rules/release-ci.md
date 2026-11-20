@@ -30,8 +30,10 @@ paths:
   `Cargo.toml`, `tray/Cargo.toml` and the `intercom-tray` entry in `tray/Cargo.lock` (the tray job
   builds `--locked`); its test `the_tray_version_equals_the_workspace_version` and the release both
   check the two versions match. The
-  CI `tray` job (GTK + AppIndicator -dev packages, fmt / clippy / test / 80 % library coverage,
-  release build) is a `release-tag` need.
+  CI `tray` job (GTK + AppIndicator + WebKitGTK 4.1 -dev packages, fmt / clippy / test / 80 %
+  library coverage, release build) is a `release-tag` need. The tray links `libwebkit2gtk-4.1.so.0`
+  since intercom#39, so `release.yml` installs the runtime `libwebkit2gtk-4.1-0` before it runs
+  `intercom-tray --version`.
 
 ## Gotchas
 

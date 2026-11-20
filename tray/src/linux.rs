@@ -1,7 +1,8 @@
 //! The Linux shell around the library: `tray-icon`'s GTK backend shows the icon through
 //! AppIndicator (the strih boxes' tint2 systray shows dstack's dtray the same way). A thread reads
 //! the hub's `/api/version` every [`POLL`]; GTK's loop shows the result and handles the menu.
-//! One tray per session (a lock in `XDG_RUNTIME_DIR`).
+//! One tray per session (a lock in `XDG_RUNTIME_DIR`). Open shows the tray's own mix window
+//! (`linux_mix`, intercom#39) in this same GTK loop; the browser is only its fallback.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::process::Command;
@@ -43,8 +44,8 @@ fn icon(up: bool) -> Result<Icon, String> {
     Icon::from_rgba(icon_rgba(up), ICON_SIZE, ICON_SIZE).map_err(|e| format!("the icon: {e}"))
 }
 
-/// Starts the browser on the page and logs how it ended (its own thread reaps it).
-fn open(url: &str) {
+/// The fallback: starts the browser on the page and logs how it ended (its own thread reaps it).
+fn open_in_browser(url: &str) {
     let launch = choose_launch(std::env::var_os("PATH").as_deref(), url, is_executable);
     tracing::info!(program = %launch.program.display(), args = ?launch.args, "opening the level page");
     match Command::new(&launch.program).args(&launch.args).spawn() {
@@ -62,7 +63,10 @@ fn open(url: &str) {
     }
 }
 
-pub fn run(control: ControlUrl) -> Result<(), String> {
+pub fn run(control: ControlUrl, open_at_start: bool) -> Result<(), String> {
+    // The X class of the mix window (its taskbar entry groups by it), set before GTK starts.
+    glib::set_prgname(Some("intercom-tray"));
+    glib::set_application_name("Interkom");
     gtk::init().map_err(|e| format!("no desktop to show the tray on (GTK): {e}"))?;
     let Some(_lock) = single_instance()? else {
         tracing::info!("another intercom-tray runs in this session; leaving");
@@ -103,6 +107,10 @@ pub fn run(control: ControlUrl) -> Result<(), String> {
 
     let mut shown = HubStatus::Unknown;
     let url = control.url.clone();
+    let mix = crate::linux_mix::MixWindow::new(&url);
+    if open_at_start {
+        mix.open(open_in_browser);
+    }
     glib::timeout_add_local(TICK, move || {
         let now = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
         if now != shown {
@@ -129,12 +137,13 @@ pub fn run(control: ControlUrl) -> Result<(), String> {
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             if ev.id == *open_item.id() {
-                open(&url);
+                mix.open(open_in_browser);
             } else if ev.id == *copy_item.id() {
                 gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&url);
                 tracing::info!(%url, "URL copied");
             } else if ev.id == *exit_item.id() {
                 tracing::info!("exit from the menu (the hub keeps running)");
+                mix.save();
                 gtk::main_quit();
                 return ControlFlow::Break;
             }

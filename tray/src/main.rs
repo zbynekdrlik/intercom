@@ -4,10 +4,13 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_mix;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: intercom-tray [--url http://127.0.0.1:8791/] | --version | --help";
+const USAGE: &str =
+    "usage: intercom-tray [--url http://127.0.0.1:8791/] [--open] | --version | --help";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -18,6 +21,8 @@ fn main() -> ExitCode {
         )
         .init();
     let mut url = intercom_tray::DEFAULT_URL.to_string();
+    // Opens the mix window at start too, as the menu's Open does (a session that wants it shown).
+    let mut open_at_start = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -29,6 +34,7 @@ fn main() -> ExitCode {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            "--open" => open_at_start = true,
             "--url" => match args.next() {
                 Some(u) => url = u,
                 None => {
@@ -53,14 +59,15 @@ fn main() -> ExitCode {
         version = env!("CARGO_PKG_VERSION"),
         url = %control.url,
         status_from = %control.addr,
+        open_at_start,
         "intercom-tray starting"
     );
-    run(control)
+    run(control, open_at_start)
 }
 
 #[cfg(target_os = "linux")]
-fn run(control: intercom_tray::ControlUrl) -> ExitCode {
-    match linux::run(control) {
+fn run(control: intercom_tray::ControlUrl, open_at_start: bool) -> ExitCode {
+    match linux::run(control, open_at_start) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
@@ -70,7 +77,7 @@ fn run(control: intercom_tray::ControlUrl) -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run(_control: intercom_tray::ControlUrl) -> ExitCode {
+fn run(_control: intercom_tray::ControlUrl, _open_at_start: bool) -> ExitCode {
     tracing::error!("intercom-tray runs on the Linux strih boxes only");
     ExitCode::FAILURE
 }
