@@ -16,6 +16,40 @@ pub const DEFAULT_SIZE: (i32, i32) = (900, 700);
 pub const MIN_SIZE: (i32, i32) = (360, 280);
 /// How long the "cannot load" page waits before the level page is loaded again.
 pub const RETRY: Duration = Duration::from_secs(3);
+
+/// The page-load retry of the mix window (review round 1): one warn per outage, a reload only
+/// while the window is shown, and a retry parked while it was hidden runs when Open raises it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RetryGate {
+    failing: bool,
+    parked: bool,
+}
+
+impl RetryGate {
+    /// A load failed. `true` = the first of this outage: log it as a warn (the rest at debug).
+    pub fn failed(&mut self) -> bool {
+        !std::mem::replace(&mut self.failing, true)
+    }
+
+    /// The page loaded: the outage is over.
+    pub fn loaded(&mut self) {
+        self.failing = false;
+        self.parked = false;
+    }
+
+    /// The retry timer fired: reload now (`true`) only if the window is shown, else park it.
+    pub fn retry_due(&mut self, visible: bool) -> bool {
+        if !visible {
+            self.parked = true;
+        }
+        visible
+    }
+
+    /// Open raised the window: reload now if a retry was parked while it was hidden.
+    pub fn raised(&mut self) -> bool {
+        std::mem::take(&mut self.parked)
+    }
+}
 /// The largest coordinate or size accepted from the state file (larger = a broken file).
 const MAX_COORD: i64 = 100_000;
 

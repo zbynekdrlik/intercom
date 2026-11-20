@@ -112,6 +112,8 @@ comment 7038129667.
   parse error, an unreadable file are warned and ignored; a missing file keeps 0 dB. Never fatal.
   `--check-config` never touches it. The next change rewrites the file with the current names
   only, carrying the migrated values, so nothing saved is lost.
+  A DOWNGRADE to a #34 hub after that rewrite finds no `program` / `kamery` in the file, so those
+  two sliders start at 0 dB there (review round 1, accepted: no downgrade is planned).
 - Written on every change by `write_atomic` (`.<name>.tmp` beside it, fsync, rename, fsync the
   directory) in
   `spawn_blocking` under the writer lock. A failed write is a warn naming the path; the value still
@@ -184,7 +186,11 @@ comment 7038129667.
     saved place (caught by the xvfb smoke, 20.11.2026).
   - The page down (WebKit `load-failed`, except `NetworkError::Cancelled`, which every replaced
     load raises) -> `mix_window::error_page` (Slovak "Hub sa nedá otvoriť … Skúšam znova o 3 s…",
-    the URL and WebKit's reason, escaped) and a reload of the URL every `RETRY` (3 s).
+    the URL and WebKit's reason, escaped) and a reload of the URL every `RETRY` (3 s), gated by
+    `mix_window::RetryGate` (review round 1: unbounded, it logged a warn every 3 s also while
+    hidden, ~29 000 lines a day): ONE warn per outage (the retries at debug, an info when the page
+    loads again), no reload while the window is hidden, the parked retry runs when Open raises it.
+    Tests: `tray/tests/tray_39_retry.rs`.
   - Fallback: the WebView fails to build -> one error line and the old browser launch
     (`lib::choose_launch`: Firefox `--new-window`, the snap `/snap/bin/firefox` even off `PATH`, then
     Chrome / Chromium `--app=`, then `xdg-open`) from then on (`mix_window::open_action`). Limit: the

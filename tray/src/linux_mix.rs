@@ -15,8 +15,8 @@ use webkit2gtk::{LoadEvent, NetworkError, WebViewExt};
 use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
 
 use intercom_tray::mix_window::{
-    error_page, load_state, open_action, place, save_state, state_path, OpenAction, Rect, RETRY,
-    WINDOW_TITLE,
+    error_page, load_state, open_action, place, save_state, state_path, OpenAction, Rect,
+    RetryGate, RETRY, WINDOW_TITLE,
 };
 use intercom_tray::{icon_rgba, ICON_SIZE};
 
@@ -27,6 +27,7 @@ struct Shown {
     window: gtk::Window,
     /// Kept alive with the window: dropping it would tear the page down.
     _webview: wry::WebView,
+    page: webkit2gtk::WebView,
 }
 
 /// The one mix window, created on the first Open. Lives on the GTK thread only.
@@ -38,6 +39,7 @@ pub struct MixWindow {
     /// The last size and position seen, written to the state file.
     last: Rc<RefCell<Option<Rect>>>,
     save_pending: Rc<Cell<bool>>,
+    retry: Rc<RefCell<RetryGate>>,
 }
 
 impl MixWindow {
@@ -60,6 +62,7 @@ impl MixWindow {
             webview_failed: Cell::new(false),
             last: Rc::new(RefCell::new(None)),
             save_pending: Rc::new(Cell::new(false)),
+            retry: Rc::new(RefCell::new(RetryGate::default())),
         })
     }
 
@@ -80,6 +83,12 @@ impl MixWindow {
                     s.window.show_all();
                     s.window.deiconify();
                     s.window.present();
+                    if self.retry.borrow_mut().raised() {
+                        tracing::info!(
+                            "reloading the level page parked while the window was hidden"
+                        );
+                        s.page.load_uri(&self.url);
+                    }
                 }
             }
             OpenAction::Create => match self.create() {
@@ -127,15 +136,40 @@ impl MixWindow {
             .map_err(|e| format!("the WebView: {e}"))?;
         let page = webview.webview();
         let url = self.url.clone();
+        {
+            let (retry, url) = (Rc::clone(&self.retry), url.clone());
+            page.connect_load_changed(move |page, ev| {
+                // The real page (not the error page, which has no such URI) finished loading.
+                if ev == LoadEvent::Finished && page.uri().is_some_and(|u| u == url) {
+                    let was_failing = *retry.borrow() != RetryGate::default();
+                    retry.borrow_mut().loaded();
+                    if was_failing {
+                        tracing::info!(uri = %url, "the level page loads again");
+                    }
+                }
+            });
+        }
+        let retry = Rc::clone(&self.retry);
+        let win = window.clone();
         page.connect_load_failed(move |page, _ev: LoadEvent, failing, err| {
             // A load replaced by another (the retry, a click) is not a failure.
             if err.matches(NetworkError::Cancelled) {
                 return false;
             }
-            tracing::warn!(uri = %failing, error = %err, "the level page did not load; retrying");
+            if retry.borrow_mut().failed() {
+                tracing::warn!(uri = %failing, error = %err, "the level page did not load; retrying every 3 s");
+            } else {
+                tracing::debug!(uri = %failing, error = %err, "the level page still does not load");
+            }
             page.load_html(&error_page(&url, err.message()), None);
-            let (page, url) = (page.clone(), url.clone());
-            glib::timeout_add_local_once(RETRY, move || page.load_uri(&url));
+            let (page, url, retry, win) = (page.clone(), url.clone(), Rc::clone(&retry), win.clone());
+            glib::timeout_add_local_once(RETRY, move || {
+                if retry.borrow_mut().retry_due(win.is_visible()) {
+                    page.load_uri(&url);
+                } else {
+                    tracing::debug!("mix window hidden: the retry waits for the next Open");
+                }
+            });
             true
         });
 
@@ -187,6 +221,7 @@ impl MixWindow {
         Ok(Shown {
             window,
             _webview: webview,
+            page,
         })
     }
 }
