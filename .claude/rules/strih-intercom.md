@@ -1419,12 +1419,13 @@ signalling with it. A skipped frame is dropped, never queued. Tests: `hub/tests/
   showed the live cam1 picture through the HTTPS front at ~9.3 fps; stop the transient hub right
   after — it is a second sender of stream `cam1` into cam1's headset.
 
-## The in-hub WebRTC phone leg (intercom#42, phases 1 + 2)
+## The in-hub WebRTC phone leg (intercom#42, phases 1-3)
 
 Owner decision B (20.11.2026): the hub ITSELF is the phones' WebRTC endpoint, no Janus. Design:
 issue 42 comment 7041415746. Per box `adapter = "webrtc"` on the `phones` participant; `janus`
-stays the fallback by config until an event ran clean (phase 4 switches strih-snv; phase 3 adds
-the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_42.rs`).
+stays the fallback by config until an event ran clean (phase 4 switches strih-snv; phase 3 added
+the hub-side TURN relay, "The hub's own TURN relay" below; both TOMLs are still `janus`, pinned by
+`webrtc_signal_42.rs`).
 
 - **Crate:** `str0m = "=0.25.0"`, `default-features = false`, `features = ["rust-crypto"]`
   (sans-IO ICE + DTLS + SRTP; pinned exactly, pre-1.0). No openssl. **But `rust-crypto` is not
@@ -1439,7 +1440,8 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   interface, never loopback, link-local, 100.64/10 (the tailnet), a public address, a
   `docker`/`br-`/`veth`/`virbr`/`tailscale`/`tun`/`wg`... interface or the Dante leg; the answer
   goes to anonymous POSTers, so it must not leak an internal address),
-  `max_phones` (default 16, 1..=64), `turn` RESERVED (any value fails the load until phase 3).
+  `max_phones` (default 16, 1..=64), `turn` = `"cloudflare"` | `"off"` (default off; anything
+  else fails the load; `WebrtcConfig::turn_mode`, phase 3).
   `Matrix::from_toml`: `webrtc` only on role `phones`, 2 in / 2 out, at most one, never together
   with a `janus` participant, and the table iff the adapter.
 - **Signalling** (`webrtc_http.rs`, merged next to `http::router`, so `AppState` is unchanged):
@@ -1521,10 +1523,13 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   candidates are filtered anyway (`filter_offer_candidates`: UDP, port >= 1024, unicast, not the
   hub's own, at most 8; `.local` kept). str0m's lite agent drops a pair 15 s after its last check
   (`RECENT_BINDING_REQUEST`), which is the "ICE disconnected" drop of a vanished phone. **Phase 3
-  (TURN) stays lite:** the hub's relayed candidate goes into the answer like a host one, the hub
-  creates a TURN permission per plausible offer candidate address (that is what the filter keeps
-  them for) and answers the phone's checks that arrive through the relay; it still never initiates
-  a check.
+  (TURN) stays lite:** the hub's relayed address goes into the answer, the hub creates a TURN
+  permission per plausible offer candidate IP (that is what the filter keeps them for) and answers
+  the phone's checks that arrive through the relay; it still never initiates a check. "Not the
+  hub's own" compares the HOST candidates only: a phone's relay candidate often has the hub
+  relay's IP (one TURN service, shared anycast addresses), and dropping it would leave that phone
+  without its permission (found by the forced-relay E2E; `webrtc_turn_relay_42` puts its phone on
+  coturn's own IP to pin it).
 - **Slot deadlines.** A phone's slot is held 3 s (`STUN_DEADLINE`) for its first valid STUN
   binding request (`is_stun` + `Rtc::accepts`), then 10 s (`CONNECT_DEADLINE`) for ICE + DTLS. A
   phone is also dropped on leave, ICE `Disconnected`, a dead `Rtc`, an rtc error or its replace;
@@ -1563,6 +1568,8 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   offer (3 s without a valid check, 13 s with), DTLS and media need a two-way path the forger does
   not have, and source forging is a LAN-only capability on the venue network, which the hub already
   treats as trusted (the VBAN legs accept any LAN sender, issue 1431). Accepted, not mitigated.
+- **PWA test switch (phase 3):** `?relay=1` (exactly) sets `iceTransportPolicy: "relay"` on the
+  native PeerConnection (`nativePcConfig`); without it the browser picks any path.
 - **PWA** (`web/app.js`): `fetchTransport()` before EVERY session (a failed read keeps the last
   answer, default `janus`); `webrtc` -> `startNative`: one `RTCPeerConnection` (the `/api/ice`
   servers when TURN is on), one `sendrecv` audio transceiver with an empty sender (or the kept mic
@@ -1597,6 +1604,77 @@ the hub-side TURN relay; both TOMLs are still `janus`, pinned by `webrtc_signal_
   spec serves one still frame for `/interkom.mjpeg` (this hub has no `[video]`; its 503 would be a
   console line). During the kill window only `Failed to load resource: net::ERR_CONNECTION_REFUSED`
   lines are allowed; outside it the console must be empty.
+- **The hub's own TURN relay (phase 3, `webrtc_turn.rs`).** The venue uplink is CGNAT: a phone on
+  mobile data reaches no host candidate, not even through its own relay. With `[webrtc].turn =
+  "cloudflare"` the network task holds ONE allocation on Cloudflare's TURN (UDP to the `turn:` url
+  without `transport=tcp`, `turn_udp_server`, resolved to IPv4) on the leg's ONE socket.
+  - **Credentials:** `feed_turn_credentials` asks the same `TurnMinter` `/api/ice` serves (its
+    cache, its refresher), hands every NEW username/server over (`Command::TurnCredentials`), a
+    failure once per change as the reason (`TurnUnavailable`: the facet reads `off` with it when
+    the box has no key). The key never leaves the hub; the password never reaches a log, Debug or
+    the facet. The minter moved before `start_webrtc_leg` in `main.rs`; `--turn-api` (hidden,
+    default Cloudflare's) is the E2E seam.
+  - **Own state machine, rtc-turn's codecs.** `rtc-stun` / `rtc-turn` 0.21.1 (`crypto-ring`, ring
+    was in the lockfile; no openssl; aws-lc only from str0m's dimpl as before) supply the message
+    codecs. rtc-turn's `Client` was read and rejected: a permission per ip:port with no removal,
+    all refreshed forever (an unbounded table), the lifetime hidden, and `update_credentials`
+    re-signs the allocation with a new username, which RFC 5766 §6.2 answers 441.
+  - **States** (`TurnPhase`): waiting -> allocating (unsigned Allocate, 401 realm + nonce, signed
+    Allocate) -> allocated (refresh at half the lifetime, 438 retried with the new nonce up to
+    twice) | backoff (any error answer, no answer after 0 / 0.5 / 1.5 / 3.5 s = 7.5 s, a 437 on a
+    refresh = the allocation is gone; 1 s doubling to 60 s, reset by a success). A ROTATION (new
+    username) releases with the OLD credential (Refresh LIFETIME 0) and allocates with the new one;
+    it waits while a connected phone is on the relay, never closer than 10 min to the old
+    credential's expiry (the minter renews at 2/3 of 24 h, so 8 h of slack). **coturn drops a
+    released allocation on its next timer pass, not at once:** the Allocate right after a release
+    got 437 "Mismatched allocation" (1-3 s on dev1), so a 437 within 10 s of a release waits 0.5 s
+    and tries again (`releasing`), never counted as a failure. A 437 at any other time (the previous
+    hub process's allocation, kept until its lifetime ends) backs off like any failure.
+  - **ICE-lite takes host candidates only** (`is` 0.12 `agent.rs` `add_local_candidate`: "Reject
+    non-host candidate due to ice-lite mode"). So the relayed address is added as
+    `Candidate::host` (a lite agent only matches the destination a check came to and answers from
+    it), and `advertise_relayed` rewrites exactly that SDP line to `typ relay raddr 0.0.0.0 rport
+    0` with priority (65535 << 8) | 255: below every host candidate, so a phone on the venue Wi-Fi
+    nominates the host pair, never the relay.
+  - **Demux (`NetTask::receive`):** a datagram from the TURN server's exact address goes to the
+    relay; a Data indication / ChannelData comes out as (peer, payload) and is fed to str0m from the
+    peer TO the relayed address (`deliver`). A transmit whose `source` is the relayed address is
+    wrapped (`send_to`) and sent to the server from the IP the server's answers arrive on
+    (`turn_local`, IP_PKTINFO). The rest is phase 2 unchanged. Every phone records whether its last
+    datagram came through the relay: `/api/state` `phones[].pair` = `host` / `relay`.
+  - **Permissions** per IP: the IPv4 addresses of the live phones' kept offer candidates
+    (`offer_candidate_ips`, `set_wanted` on adopt and sweep), at most `8 x max_phones` (counted in
+    `permissions_refused` beyond), refreshed every 240 s only while wanted (the server lets a
+    dropped one lapse at 300 s), a refused one retried after 60 s. **Channels:** the first relayed
+    send to a peer is a Send indication and starts a ChannelBind; ChannelData after, at most
+    `2 x max_phones`, rebound after 300 s while used, dropped with their peer's IP. A send to an IP
+    without a permission is refused (`tx_refused`): a permission is not a check, str0m still only
+    answers checks.
+  - **`/api/state` `webrtc.turn`** (omitted with turn off): state, server, relayed,
+    lifetime_left_s, allocations, refreshes, failures, last_error, permissions,
+    permissions_refused, channels, rx/tx_packets, tx_refused. **Journal:** `relay allocated`
+    (server, relayed, lifetime), `relay failed, backing off` (error, retry_in_s), `credential
+    rotated, releasing`, `off` (reason); permissions and channels are debug lines.
+  - **Not verified against Cloudflare itself:** dev1 has no TURN key and the strih boxes were not
+    touched (a live event). Phase 4's first step: a hub with `turn = "cloudflare"` reads
+    `webrtc.turn.state = allocated` with a relayed address, then a phone on mobile data reads
+    `pair: relay`.
+  - **Tests:** `webrtc_turn_42.rs` (the state machine against the in-process `fake_turn` server:
+    401 -> signed Allocate, refresh at half the lifetime and with `refresh_cap`, 438, a lost
+    allocation, the back-off series to 60 s, retransmissions + the 7.5 s timeout, the rotation
+    idle / busy / near expiry, a release the server drops late, permissions IPv4 + bounded +
+    refreshed while wanted, channels, wrap / unwrap, `advertise_relayed`, `turn_udp_server`,
+    `offer_candidate_ips`), `webrtc_turn_relay_42.rs` (REAL coturn, `hub/tests/coturn`: a str0m
+    phone that sees only the relay candidate, tone both ways, every datagram it got came from the
+    relayed address, `pair` relay, channels in use; refresh and rotation against coturn), and the
+    Playwright `webrtc-turn.spec.js` (two relay-only Chromium pages via `?relay=1`, the fake key
+    API + coturn + the real hub, `webrtc-turn-env.js`).
+  - **coturn for tests:** `$INTERCOM_TURNSERVER` or `turnserver` on PATH; missing = the tests FAIL.
+    It listens and relays on 127.0.0.2 and denies 127.0.0.1 as a peer (the hub's host address), so
+    the relay is the only path. CI installs the `coturn` package in the rust, coverage and web-e2e
+    jobs. On dev1 (no root): `apt-get download coturn libmysqlclient21`, `dpkg -x` both into a
+    scratch dir, and point `INTERCOM_TURNSERVER` at a wrapper that sets `LD_LIBRARY_PATH` to its
+    `usr/lib/x86_64-linux-gnu` and execs its `usr/bin/turnserver`.
 - **Gotchas:** a top-level `display` binding inside `tracing::info!(... = %display ...)` collides
   with tracing's `display` helper (E0277): rename the binding. Chromium answers a stereo
   `opus/48000/2` rtpmap; the hub encodes and decodes mono, which Opus allows.

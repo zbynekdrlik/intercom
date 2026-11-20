@@ -80,6 +80,11 @@ struct Args {
     #[arg(long, default_value = TURN_CONFIG_DEFAULT)]
     turn_config: PathBuf,
 
+    /// The Cloudflare TURN key API the minter calls (intercom#42 phase 3: the forced-relay E2E
+    /// points it at a fake that mints a local coturn's credentials). Production keeps the default.
+    #[arg(long, default_value = CLOUDFLARE_TURN_API, hide = true)]
+    turn_api: String,
+
     /// Only load and check the routing TOML (`--config`) and exit: 0 = this hub binary runs it,
     /// non-zero names why not (issue 1438: setup-strih installs a new routing file only when the
     /// installed hub loads it, so an older hub never crash-loops on an adapter it does not know).
@@ -255,7 +260,15 @@ async fn main() -> Result<()> {
 
     // --- The in-hub WebRTC phone leg (intercom#42): the hub itself is the phones' WebRTC
     // endpoint. Exclusive with Janus (the matrix refuses both); see `start_webrtc_leg`.
-    let (phone_leg, webrtc_state) = match start_webrtc_leg(&matrix, &jitter, &dante_guard)? {
+    // The box's TURN credentials (issue 1453): `/api/ice` for the pages and, with
+    // `[webrtc].turn = "cloudflare"`, the hub's own relay (intercom#42 phase 3).
+    let turn = Arc::new(TurnMinter::load(
+        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+        &args.turn_config,
+        &args.turn_api,
+    ));
+    turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
+    let (phone_leg, webrtc_state) = match start_webrtc_leg(&matrix, &jitter, &dante_guard, &turn)? {
         Some(leg) => {
             phones_ring = Some((leg.phones_id, leg.ring));
             (Some(leg.handle), Some(leg.state))
@@ -433,12 +446,6 @@ async fn main() -> Result<()> {
         .await?;
     }
 
-    let turn = Arc::new(TurnMinter::load(
-        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-        &args.turn_config,
-        CLOUDFLARE_TURN_API,
-    ));
-    turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
     let state = AppState {
         live: live_rx,
         video: video_state,
@@ -593,11 +600,15 @@ fn start_webrtc_leg(
     matrix: &Matrix,
     jitter: &Arc<Mutex<Vec<JitterBuffer>>>,
     dante_guard: &Arc<DanteGuard>,
+    turn: &Arc<TurnMinter>,
 ) -> Result<Option<WebrtcLeg>> {
     use intercom_hub::webrtc_leg::{
-        local_ipv4_addrs, start_webrtc, WebrtcLegConfig, WebrtcShared, WebrtcStateRef,
+        local_ipv4_addrs, start_webrtc_turn, TurnFeed, WebrtcLegConfig, WebrtcShared,
+        WebrtcStateRef,
     };
     use intercom_hub::webrtc_room::{spawn_phones_room, PhonesRoom, RoomIo, RoomSlots};
+    use intercom_hub::webrtc_signal::TurnMode;
+    use intercom_hub::webrtc_turn::TurnOptions;
     let (Some(pid), Some(cfg)) = (matrix.webrtc_participant(), matrix.webrtc.as_ref()) else {
         return Ok(None);
     };
@@ -623,14 +634,23 @@ fn start_webrtc_leg(
         RING_TARGET_FRAMES,
         RING_CAP_FRAMES,
     )));
-    let (handle, packets) = start_webrtc(WebrtcLegConfig {
-        socket,
-        host_ips,
-        max_phones: cfg.max_phones,
-        slots: slots.clone(),
-        shared: shared.clone(),
-        dante_guard: dante_guard.clone(),
-    })?;
+    // Phase 3: the hub's own relayed candidate from the box's TURN key (default off).
+    let feed = match cfg.turn_mode() {
+        TurnMode::Off => TurnFeed::Off,
+        TurnMode::Cloudflare => TurnFeed::Cloudflare(turn.clone()),
+    };
+    let (handle, packets) = start_webrtc_turn(
+        WebrtcLegConfig {
+            socket,
+            host_ips,
+            max_phones: cfg.max_phones,
+            slots: slots.clone(),
+            shared: shared.clone(),
+            dante_guard: dante_guard.clone(),
+        },
+        feed,
+        TurnOptions::for_phones(cfg.max_phones),
+    )?;
     let room = PhonesRoom::new(RoomIo {
         bus: ring.clone(),
         slots,
@@ -656,6 +676,7 @@ fn start_webrtc_leg(
     tracing::info!(
         participant = pid,
         max_phones = cfg.max_phones,
+        turn = ?cfg.turn_mode(),
         "webrtc: in-hub phone leg enabled for the phones participant"
     );
     Ok(Some(WebrtcLeg {
