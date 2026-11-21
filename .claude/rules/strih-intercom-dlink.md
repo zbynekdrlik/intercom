@@ -211,3 +211,11 @@ and the box's nginx keeps `127.0.0.1:8790`.
 - Tests: `hub/tests/dante_guard_25.rs`. It drives the real `IP_PKTINFO` on loopback (`lo` as the
   dlink iface) and the real accept loop (`DANTE_SUBNET` 127.0.0.0/8: closed with no byte; another
   subnet: 200).
+
+## The deployed latency terms (intercom#46, 21.11.2026)
+
+- strih-pp: `receive_buffer_ms = 3.5`, so P = 4.5 ms (was the default 13.04 ms), on dstack#381's
+  latency review (the owner's directive of 21.11: lower every Dante receiver with a stable margin;
+  dstack measures and runs it). Its evidence: max arrival 2.14 ms, 0 late since 18.11. A late
+  packet in dstack's next-day read means back to the default. Pinned in `hub/tests/dlink_5.rs`.
+- strih-snv: default terms (50 late, 6.39 ms max; no margin). Change only on dstack's review.
