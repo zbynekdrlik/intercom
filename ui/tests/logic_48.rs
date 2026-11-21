@@ -273,3 +273,17 @@ fn a_poll_never_overwrites_a_busy_strip() {
     s.begin_send().unwrap();
     assert!(!s.poll(&level("cam1", 0.0, false)), "in flight");
 }
+
+// Review of #48 phase A: a throttle timer the browser refused to set left `timer` true, so that
+// strip's `input` never scheduled a send again. The page now calls `schedule_failed` and sends at
+// once.
+#[test]
+fn a_throttle_timer_that_could_not_be_set_never_blocks_the_strip() {
+    let mut s = StripState::new(&level("cam2", 0.0, false));
+    assert!(s.input("-1"));
+    s.schedule_failed();
+    assert!(!s.timer, "no timer is pending");
+    assert_eq!(s.begin_send().unwrap().db, -1.0, "it is sent at once");
+    s.finish_send(SendOutcome::Failed);
+    assert!(s.input("-2"), "the next move schedules again");
+}
