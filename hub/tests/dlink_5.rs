@@ -1212,3 +1212,34 @@ fn a_latency_term_at_either_end_of_the_range_is_accepted() {
     assert_eq!(ms_to_ns(0.0000009), None);
     assert_eq!(ms_to_ns(1000.000001), None);
 }
+
+// intercom#46 (dstack#381, the owner's latency review of 21.11.2026): strih-pp's Dante receiver
+// had a stable margin (max arrival 2.14 ms, 0 late since 18.11), so its P drops from 13.04 ms to
+// 4.5 ms = the default 1 ms network latency + a 3.5 ms receive buffer. strih-snv had late packets
+// (6.39 ms max) and keeps its default terms.
+#[test]
+fn the_deployed_receive_latency_is_4_5_ms_on_strih_pp_and_unchanged_on_strih_snv() {
+    let pp = Matrix::from_toml(include_str!("../../intercom.strih-pp.toml"))
+        .unwrap()
+        .dlink
+        .unwrap();
+    assert_eq!(
+        (pp.network_latency_ms, pp.receive_buffer_ms),
+        (None, Some(3.5))
+    );
+    let split = pp.link_config(48_000).split().unwrap();
+    assert_eq!(split.receive_buffer_ns, 3_500_000);
+    assert_eq!(
+        split.latency_ns, 4_500_000,
+        "P = 1 ms network + 3.5 ms buffer"
+    );
+    let snv = Matrix::from_toml(include_str!("../../intercom.strih-snv.toml"))
+        .unwrap()
+        .dlink
+        .unwrap();
+    assert_eq!(
+        (snv.network_latency_ms, snv.receive_buffer_ms),
+        (None, None),
+        "strih-snv keeps its default terms (late packets, no margin)"
+    );
+}
