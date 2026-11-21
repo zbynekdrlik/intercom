@@ -51,6 +51,7 @@ pub mod pktinfo;
 pub mod return_addr;
 pub mod state;
 pub mod turn;
+pub mod ui_assets;
 pub mod vban_classify;
 pub mod vban_io;
 pub mod vban_jitter;

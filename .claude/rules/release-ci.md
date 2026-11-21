@@ -5,6 +5,8 @@ paths:
   - "Cargo.lock"
   - "hub/tests/hub_unit_provisioning_1345.rs"
   - "tests/e2e/**"
+  - "ui/Cargo.toml"
+  - "hub/build.rs"
 ---
 
 # CI and the release camera-box pins (intercom#1)
@@ -35,6 +37,17 @@ paths:
   since intercom#39, so `release.yml` installs the runtime `libwebkit2gtk-4.1-0` before it runs
   `intercom-tray --version`.
 
+- **`ui/` (the Leptos web UI, intercom#48) is its own workspace too** (root `exclude`, its own
+  `Cargo.lock`, version `0.0.0`: the page shows the HUB's version, so a bump never touches it).
+  `hub/build.rs` embeds `ui/dist` and FAILS without it, so every job that builds the hub (`rust`,
+  `coverage`) installs the wasm32 target + `trunk@0.22.2,wasm-bindgen@0.2.130` (taiki-e) and runs
+  `trunk build --release --locked` in `ui/` first. The `ui` job (a `release-tag` need): fmt, clippy
+  wasm32 + host, `cargo test` (host logic), `wasm-bindgen-test` in headless Chrome (the runner's
+  `$CHROMEWEBDRIVER/chromedriver`), `trunk build`, and a check that the wasm-bindgen CLI equals
+  `ui/Cargo.lock`'s (the crate pins `wasm-bindgen = "=0.2.130"`: bump the pin and both ci.yml
+  lines together). `web-e2e` gets the UI inside the rust job's hub artifact; `release.yml` builds
+  nothing and refuses a binary without the embedded shell (`data-page="{{PAGE}}"`).
+
 ## Gotchas
 
 - A called workflow sees the CALLER's `github` context (`event_name` push, `ref` main). Tell the
@@ -57,9 +70,13 @@ paths:
   out twice when the mirror served ~110 kB/s.
   A container job's `run:` steps default to `sh -e` (dash: `set -o pipefail` fails, exit 2), so
   the job sets `defaults.run.shell: bash` (`bash -eo pipefail`).
+- Every local hub build needs `ui/dist` first: `cd ui && trunk build --release` (intercom#48).
 - E2E: `cd tests/e2e && npm ci && INTERKOM_E2E_PORT=18792 npx playwright test`. Port 8792 is held
   by another account. Playwright 1.49.1's WebKit (`webkit-2104`) is not in `/opt/ms-playwright`, so
   the three iPhone specs run on CI only (`playwright install` into this account is hook-blocked).
+  `levels-webkit` runs locally on a newer engine: `npm install --no-save @playwright/test@1.58.0`
+  into a scratch dir and run its `cli.js` with `NODE_PATH` there and
+  `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright` (1.58 = `webkit-2248`, present); CI's 2104 stays the gate.
 - Since intercom#34 the E2E run also starts the REAL hub (`start-levels-hub.js`, the `levels`
   project): build `cargo build --release -p intercom-hub` first, or set `INTERCOM_HUB_BIN`, also for
   a `--project=phone` run (Playwright starts every webServer). On CI the `web-e2e` job `needs: rust`
