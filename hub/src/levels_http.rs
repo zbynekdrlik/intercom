@@ -6,9 +6,11 @@
 //! It is served by the same accept loop as the main listener ([`crate::http_serve::serve`], the
 //! Dante guard included).
 //!
-//! Routes: `GET /` (the page, `web/levels.html`, version substituted), `GET /levels.js`,
-//! `GET /levels.css`, `GET /favicon.svg`, `GET /api/version`, `GET /api/levels` (every slider +
-//! the trimmed outputs' meters), `PUT /api/levels/{name}` with `{"db": <f32>, "muted": <bool>}`.
+//! Routes: `GET /` (the Leptos UI's shell with `data-page="levels"` and the hub version,
+//! intercom#48) and its files (`/intercom-ui.js`, `/intercom-ui_bg.wasm`, `/levels.css`, embedded
+//! from `ui/dist` by `hub/build.rs`, see [`crate::ui_assets`]), `GET /favicon.svg`,
+//! `GET /api/version`, `GET /api/levels` (every slider + the trimmed outputs' meters),
+//! `PUT /api/levels/{name}` with `{"db": <f32>, "muted": <bool>}`.
 //! A change takes effect on the next mix block (an atomic store) and is written to `levels_file`
 //! atomically off the async runtime.
 
@@ -23,7 +25,7 @@ use axum::{
     extract::{ConnectInfo, Path, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::get,
     Router,
 };
@@ -37,26 +39,14 @@ use crate::state::HubState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const LEVELS_HTML: &str = include_str!("../../web/levels.html");
-const LEVELS_JS: &str = include_str!("../../web/levels.js");
-const LEVELS_CSS: &str = include_str!("../../web/levels.css");
 const FAVICON_SVG: &str = include_str!("../../web/favicon.svg");
 
-pub const LEVELS_JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
-pub const LEVELS_CSS_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 pub const SVG_CONTENT_TYPE: &str = "image/svg+xml";
 
-/// The page with the hub version substituted (read from the DOM after a deploy).
+/// The mixer page: the Leptos UI's shell naming the `levels` page, with the hub version (read
+/// from the DOM after a deploy).
 pub fn levels_index() -> String {
-    LEVELS_HTML.replace("{{VERSION}}", VERSION)
-}
-/// The page's script.
-pub fn levels_js_asset() -> &'static str {
-    LEVELS_JS
-}
-/// The page's stylesheet.
-pub fn levels_css_asset() -> &'static str {
-    LEVELS_CSS
+    crate::ui_assets::ui_shell(crate::ui_assets::PAGE_LEVELS)
 }
 
 /// What the control routes share.
@@ -102,10 +92,7 @@ pub struct PutAnswer {
 }
 
 pub fn control_router(state: ControlState) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/levels.js", get(levels_js))
-        .route("/levels.css", get(levels_css))
+    crate::ui_assets::ui_routes(crate::ui_assets::PAGE_LEVELS)
         .route("/favicon.svg", get(favicon))
         .route("/api/version", get(version))
         .route("/api/levels", get(get_levels))
@@ -208,21 +195,6 @@ async fn spawn_level_controls(
         }
     });
     Ok(())
-}
-
-async fn index() -> impl IntoResponse {
-    ([(header::CACHE_CONTROL, "no-store")], Html(levels_index()))
-}
-
-async fn levels_js() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, LEVELS_JS_CONTENT_TYPE)], LEVELS_JS)
-}
-
-async fn levels_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, LEVELS_CSS_CONTENT_TYPE)],
-        LEVELS_CSS,
-    )
 }
 
 async fn favicon() -> impl IntoResponse {

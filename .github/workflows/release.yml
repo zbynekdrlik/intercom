@@ -37,6 +37,9 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
+      # The hub binary carries its web UI (ui/dist embedded by hub/build.rs, intercom#48): the rust
+      # job ran `trunk build --release` before it built the hub, so nothing is built here and the
+      # tarball's members stay the same.
       - name: Download the caller run's intercom-hub build
         uses: actions/download-artifact@v4
         with:
@@ -70,6 +73,9 @@ jobs:
             echo "::error::the binary for ${TAG} reports ${got} -- refusing to publish it"
             exit 1
           fi
+          # The embedded Leptos shell (intercom#48): a hub without its level page never ships.
+          grep -aqF 'data-page="{{PAGE}}"' target/release/intercom-hub || {
+            echo "::error::intercom-hub carries no web UI shell (ui/dist was not embedded)"; exit 1; }
           chmod +x target/release/intercom-tray
           tray="$(target/release/intercom-tray --version | awk '{print $NF}')"
           echo "tag ${TAG}, intercom-tray --version ${tray}"

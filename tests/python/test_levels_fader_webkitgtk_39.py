@@ -3,12 +3,15 @@
 Playwright's WebKit and Chromium both honour it, so no browser test sees the bug; an Xvfb run of the
 real tray showed three variants: writing-mode = horizontal (broken), `appearance: slider-vertical`
 = vertical but deprecated in Chromium (a console warning), a -90deg rotated range = vertical
-everywhere. The page must use the rotated range and never depend on the other two."""
+everywhere. The page must use the rotated range and never depend on the other two.
+
+intercom#48: the page is the Leptos UI (`ui/`): the stylesheet `ui/levels.css`, the strip markup in
+the `StripView` component (`ui/src/levels.rs`)."""
 
 import re
 from pathlib import Path
 
-WEB = Path(__file__).resolve().parents[2] / "web"
+UI = Path(__file__).resolve().parents[2] / "ui"
 
 
 def _rule(css: str, selector: str) -> str:
@@ -18,16 +21,16 @@ def _rule(css: str, selector: str) -> str:
 
 
 def test_the_fader_never_relies_on_writing_mode_or_slider_vertical():
-    css = (WEB / "levels.css").read_text()
+    css = (UI / "levels.css").read_text()
     assert "writing-mode" not in css, "WebKitGTK draws a writing-mode range horizontally"
     assert "slider-vertical" not in css, "deprecated in Chromium: a console warning"
 
 
 def test_the_fader_is_a_rotated_range_inside_an_upright_box():
-    css = (WEB / "levels.css").read_text()
-    html = (WEB / "levels.html").read_text()
+    css = (UI / "levels.css").read_text()
+    view = (UI / "src" / "levels.rs").read_text()
     assert re.search(
-        r'<div class="strip-fader">\s*<input class="strip-slider" data-role="slider" type="range"', html
+        r'<div class="strip-fader">\s*<input\s+class="strip-slider"\s+data-role="slider"\s+type="range"', view
     ), "the range sits in its own upright box"
     box = _rule(css, ".strip-fader")
     assert "position: relative" in box

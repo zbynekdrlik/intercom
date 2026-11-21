@@ -10,11 +10,14 @@
 members = ["vban", "hub"]
 # The tray (intercom#34) is its own workspace with its own lockfile: its GTK tree (glib-macros ->
 # proc-macro-crate) pins toml_datetime =0.6.3, which would pull the hub's own `toml` down to 0.8.2.
-exclude = ["tray"]
+# The web UI (intercom#48, `ui/`, Leptos CSR -> WASM by Trunk) is its own workspace too: the
+# coverage gate (`cargo llvm-cov --workspace`) must not count browser-only component code, and the
+# Leptos tree stays out of this lockfile. hub/build.rs embeds its Trunk output, `ui/dist`.
+exclude = ["tray", "ui"]
 resolver = "2"
 
 [workspace.package]
-version = "1.9.33"
+version = "1.9.34"
 
 # The dlink device's rate converter (dstack-resample -> rubato) runs on its real-time pump. Built
 # unoptimised (cargo test, CI's llvm-cov) a 96 -> 48 kHz block took 2.3-3.3 ms against its 1.33 ms

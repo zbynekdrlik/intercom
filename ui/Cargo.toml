@@ -1,0 +1,61 @@
+# The intercom web UI (intercom#48): Leptos CSR, built to WASM by Trunk (`trunk build --release` ->
+# `ui/dist/`), embedded in the hub binary at build time (`hub/build.rs`) and served by its axum
+# listeners. The root component picks the page from the `data-page` attribute the hub writes into
+# the shell; phase A serves only the cutters' level mixer (`levels`) on the loopback `:8791`.
+#
+# Its own workspace (root `exclude = ["ui"]`, its own Cargo.lock), like `tray/`: the hub's
+# `cargo llvm-cov --workspace` gate would otherwise count the browser-only component code it can
+# never run on the host, and the Leptos tree stays out of the hub's lockfile. The version shown on
+# the page is the hub's (the `data-version` the hub writes into the shell), so this crate carries no
+# release version and a version bump never touches it.
+[package]
+name = "intercom-ui"
+version = "0.0.0"
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "The intercom hub's web UI: Leptos CSR -> WASM (Trunk)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/zbynekdrlik/intercom"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The house Web UI row (leptos 0.8.x; crates.io 0.8.23, read 21.11.2026).
+leptos = { version = "0.8.23", features = ["csr"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pinned exactly: Trunk's `wasm-bindgen` CLI and `wasm-bindgen-test-runner` must be this version
+# (CI installs `wasm-bindgen@` the same one and checks it against Cargo.lock).
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "CssStyleDeclaration",
+    "Document",
+    "DomTokenList",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Headers",
+    "NodeList",
+    "Request",
+    "RequestCache",
+    "RequestInit",
+    "Response",
+    "Window",
+] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# The page is embedded in the hub binary: small without binaryen (`data-wasm-opt="0"`, no download).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
