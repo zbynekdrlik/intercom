@@ -1,0 +1,20 @@
+# intercom#48: `trunk build --release` (Trunk 0.22) -> ui/dist, which hub/build.rs embeds into the
+# hub binary. Stable file names (no hash): the hub serves every UI file with `Cache-Control:
+# no-store`, so a new hub never meets a stale cached script, and the routes stay fixed.
+[build]
+target = "index.html"
+dist = "dist"
+filehash = false
+# The app's preload: the bindings only. Trunk's default also preloads the WASM module
+# (`as="fetch"`): WebKit (the tray's window, Playwright's `levels-webkit`) warns in the console a
+# few seconds after load that it was preloaded for nothing (fohmixer, the same fix).
+pattern_preload = '<link rel="modulepreload" href="{base}{js}" crossorigin="anonymous">'
+
+[watch]
+watch = ["src", "index.html", "levels.css"]
+ignore = ["./target", "./dist"]
+
+[serve]
+address = "127.0.0.1"
+port = 8080
+open = false

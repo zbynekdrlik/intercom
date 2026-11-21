@@ -5,7 +5,8 @@ paths:
   - "hub/src/engine.rs"
   - "hub/src/http_serve.rs"
   - "hub/tests/levels_34.rs"
-  - "web/levels.*"
+  - "ui/**"
+  - "hub/src/ui_assets.rs"
   - "tests/e2e/levels*"
   - "tests/e2e/start-levels-hub.js"
   - "intercom.strih-snv.toml"
@@ -89,7 +90,13 @@ comment 7038129667.
   (the tray's default, intercom#39) and a 1366-wide screen; a narrower window scrolls the strip row inside its own box, never the page. There is no
   per-source meter (the hub measures participants, not slider sources). It never writes to the
   console: failures are the status line.
-- Routes: `GET /`, `/levels.js`, `/levels.css`, `/favicon.svg`, `/api/version`, `GET /api/levels`
+- **The page is the Leptos UI since intercom#48** (`ui/`, crate `intercom-ui`, `.claude/rules/web-ui.md`):
+  `ui/src/levels.rs` (the components + the `fetch` wiring), `ui/src/logic.rs` (plain Rust: the
+  formats, the meter, the status line, a strip's send state machine), `ui/levels.css` (the old
+  stylesheet unchanged). The behaviour, the `data-role` hooks and the Slovak texts are exactly
+  `web/levels.*`'s (deleted): `levels.spec.js` ran unchanged against it.
+- Routes: `GET /` (the UI shell, `data-page="levels"` + `data-version`), `/intercom-ui.js`,
+  `/intercom-ui_bg.wasm`, `/levels.css` (all `no-store`), `/favicon.svg`, `/api/version`, `GET /api/levels`
   (`{version, levels: [{name, label, dst, sources, db, muted, min_db, max_db, points, master}], outputs:
   [{participant, out_level_dbfs}]}`), `PUT /api/levels/{name}` with exactly `{"db": f32, "muted":
   bool}` -> 200 with the slider + `saved`, 400 for a bad body or a value outside the range (nothing
@@ -158,12 +165,19 @@ comment 7038129667.
   (2.52.6 on the boxes), which ignores it and draws a tiny horizontal slider (live 20.11.2026);
   Playwright's WebKit and Chromium both honour it, so no browser test saw it. Not `appearance:
   slider-vertical` either (deprecated in Chromium: a console warning). Pinned statically in
-  `tests/python/test_levels_fader_webkitgtk_39.py`; the click geometry (top = max, bottom = min,
+  `tests/python/test_levels_fader_webkitgtk_39.py` (`ui/levels.css` + the `StripView` markup in
+  `ui/src/levels.rs`); the click geometry (top = max, bottom = min,
   middle = mid) in `levels.spec.js` "every engine", run in Chromium and the `levels-webkit` project.
   Check a page change in REAL WebKitGTK: the tray `--open --url http://127.0.0.1:<port>/` under
   `xvfb-run` + `import -window root` (the smoke recipe in the tray section).
 - Gotcha: a Playwright drag from the bottom edge of a fader first lands mid-range, so assert the end
   value, not the path.
+- **The intercom#48 tray check (21.11.2026):** the release hub with `levels.toml` (via
+  `start-levels-hub.js`, `INTERCOM_HUB_BIN`), four sliders PUT to distinct values (FOH +6, Kamera 3
+  -30, Click -60, Master +3 muted), the tray `--open` under `xvfb-run` + openbox, `import -window
+  root` after 8 s. The Leptos page and the old `web/levels.*` page (a 1.9.32 hub) gave the same
+  picture: upright faders, knobs at their values, 604 of 1.5 M pixels different, all in the dB
+  text's antialiasing.
 
 ## The tray icon `intercom-tray` (owner 19.11.2026: "ikonka na otvorenie dole v bare")
 

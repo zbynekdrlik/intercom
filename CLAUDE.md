@@ -1,8 +1,8 @@
 # intercom
 
 The strih/stream intercom: the mix-minus hub (`hub/`, crate `intercom-hub`), the shared VBAN codec
-(`vban/`, crate `intercom-vban`), the phone PWA (`web/`, embedded in the hub binary) and the routing
-TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs/HANDOVER.md`.
+(`vban/`, crate `intercom-vban`), the phone PWA (`web/`, embedded in the hub binary), the Leptos web UI
+(`ui/`, crate `intercom-ui`: the cutters' level page since intercom#48) and the routing TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs/HANDOVER.md`.
 
 ## Release contract with camera-box
 
@@ -21,6 +21,7 @@ TOMLs (`intercom.*.toml`). Split from camera-box on 2026-11-01; start with `docs
 - hub mix / VBAN / Janus / egress -> `.claude/rules/strih-intercom.md`, `strih-intercom-hub-mix.md`
 - HDMI audio leg -> `.claude/rules/strih-intercom-hdmi-leg.md`
 - the cutters' level sliders (loopback `:8791`, `[[level]]`, `levels_file`) -> `.claude/rules/strih-intercom-levels.md`
+- the Leptos web UI (`ui/`, Trunk -> `ui/dist`, embedded by `hub/build.rs`) -> `.claude/rules/web-ui.md`
 - card (ALSA) leg -> `.claude/rules/strih-intercom-alsa-leg.md`
 - the hub's Dante device (dstack dlink) -> `.claude/rules/strih-intercom-dlink.md`
 - the cameramen's Discord thread (`scripts/discord_thread.py`, mention-only, owner's rule) -> `.claude/rules/discord-thread.md`

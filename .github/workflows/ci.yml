@@ -61,9 +61,26 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ui
+
+      # intercom#48: hub/build.rs embeds the Leptos UI (ui/dist) and FAILS without it, so the UI is
+      # built before any hub clippy / test / build. Trunk and the wasm-bindgen CLI are pinned (the
+      # CLI must equal ui/Cargo.toml's `wasm-bindgen =` pin; the ui job checks it).
+      - name: Trunk + wasm-bindgen (the web UI build)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.2,wasm-bindgen@0.2.130
+
+      - name: Build the web UI (trunk build --release -> ui/dist)
+        working-directory: ui
+        run: trunk build --release --locked
 
       # The `opus` crate builds its bundled libopus with cmake and links it statically.
       - name: Ensure cmake (bundled libopus build)
@@ -178,6 +195,73 @@ jobs:
           if-no-files-found: error
           path: tray/target/release/intercom-tray
 
+  ui:
+    name: Web UI (intercom-ui, Leptos -> WASM, its own workspace)
+    # intercom#48: the Leptos CSR crate in ui/ (its own workspace and lockfile, like tray/). The three
+    # test tiers: the plain-Rust logic on the host (cargo test), the components in headless Chrome
+    # (wasm-bindgen-test), and the E2E (the web-e2e job, on the hub binary that embeds ui/dist).
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-16
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui
+
+      - name: Trunk + wasm-bindgen (the build and the browser test runner)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.2,wasm-bindgen@0.2.130
+
+      # The runner must equal the crate's wasm-bindgen exactly, or the tests refuse to start.
+      - name: wasm-bindgen CLI equals the lockfile's
+        run: |
+          set -euo pipefail
+          lock="$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/version = |"/, ""); print}' Cargo.lock)"
+          cli="$(wasm-bindgen --version | awk '{print $2}')"
+          echo "Cargo.lock ${lock}, CLI ${cli}"
+          [ "$lock" = "$cli" ] || { echo "::error::wasm-bindgen CLI ${cli} != Cargo.lock ${lock}: bump both (ui/Cargo.toml pin, ci.yml)"; exit 1; }
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (wasm32, the shipped target)
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+
+      - name: Clippy (host, the logic tests)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test the logic (host)
+        run: cargo test --locked
+
+      # The runner image ships Chrome and its chromedriver ($CHROMEWEBDRIVER).
+      - name: Test the components (wasm-bindgen-test, headless Chrome)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: |
+          set -euo pipefail
+          export CHROMEDRIVER="${CHROMEWEBDRIVER}/chromedriver"
+          "$CHROMEDRIVER" --version
+          cargo test --target wasm32-unknown-unknown --locked
+
+      - name: trunk build --release
+        run: |
+          set -euo pipefail
+          trunk build --release --locked
+          ls -l dist
+          test -s dist/intercom-ui_bg.wasm
+
   coverage:
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-24.04
@@ -190,11 +274,27 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: llvm-tools-preview
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: coverage
+          workspaces: |
+            .
+            ui
+
+      # intercom#48: hub/build.rs embeds the Leptos UI (ui/dist) and FAILS without it, so the UI is
+      # built before any hub clippy / test / build. Trunk and the wasm-bindgen CLI are pinned (the
+      # CLI must equal ui/Cargo.toml's `wasm-bindgen =` pin; the ui job checks it).
+      - name: Trunk + wasm-bindgen (the web UI build)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.2,wasm-bindgen@0.2.130
+
+      - name: Build the web UI (trunk build --release -> ui/dist)
+        working-directory: ui
+        run: trunk build --release --locked
 
       - name: Ensure cmake (bundled libopus build)
         run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
@@ -237,7 +337,8 @@ jobs:
     # double. Chromium at a phone viewport, and WebKit (the iPhone engine) for the service-worker
     # picture specs (issue 1379). Every test asserts an empty browser console. The cutter's level
     # page (intercom#34) and the in-hub WebRTC phone leg (intercom#42, the `webrtc` project, which
-    # starts and kills that hub itself) run on the REAL hub: the release binary the rust job built.
+    # starts and kills that hub itself) run on the REAL hub: the release binary the rust job built,
+    # which embeds the Leptos level page (ui/dist, intercom#48).
     needs: rust
     runs-on: ubuntu-24.04
     # A bound, not a band-aid: the whole job takes 2-3 min. On 4.11.2026 `playwright install
@@ -292,7 +393,7 @@ jobs:
   release-tag:
     name: Tag vX.Y.Z
     if: github.ref == 'refs/heads/main'
-    needs: [version-check, rust, tray, coverage, python, web-e2e]
+    needs: [version-check, rust, tray, ui, coverage, python, web-e2e]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

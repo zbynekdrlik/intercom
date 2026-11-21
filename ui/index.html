@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interkom — hlasitosti strihača</title>
+  <link data-trunk rel="css" href="levels.css" />
+  <!-- data-integrity="none": Chrome ignores `integrity` on a WASM fetch and warns in the console
+       (crbug.com/981419); the files are same-origin and embedded in the hub binary. -->
+  <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="0" data-integrity="none" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+</head>
+<!-- The hub writes the page's name and its own version here when it serves the shell
+     (hub/src/ui_assets.rs). intercom#34 + #38: the `levels` page is the cutter's own mix of what
+     plays in their headphones, served only on the notebook's loopback (http://127.0.0.1:8791/). -->
+<body data-page="{{PAGE}}" data-version="{{VERSION}}">
+</body>
+</html>
