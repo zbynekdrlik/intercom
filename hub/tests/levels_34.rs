@@ -8,8 +8,7 @@ use intercom_hub::dante_guard::DanteGuard;
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::levels::{write_atomic, DEFAULT_CONTROL_BIND, DEFAULT_LEVELS_FILE};
 use intercom_hub::levels_http::{
-    control_router, levels_body, levels_css_asset, levels_index, levels_js_asset,
-    start_level_controls, ControlState,
+    control_router, levels_body, levels_index, start_level_controls, ControlState,
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
@@ -669,20 +668,16 @@ fn api_state_carries_the_levels_and_the_outputs_meter() {
 
 // ---- the control routes ---------------------------------------------------------------------
 
+// intercom#48: the page is the Leptos UI (ui/, embedded from ui/dist by hub/build.rs).
 #[test]
 fn the_page_assets_are_embedded_with_the_version() {
     let html = levels_index();
     assert!(!html.contains("{{VERSION}}"));
-    assert!(html.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
-    assert!(html.contains("data-role=\"version\""));
-    assert!(html.contains("/levels.js"));
+    assert!(!html.contains("{{PAGE}}"));
+    assert!(html.contains(&format!("data-version=\"{}\"", env!("CARGO_PKG_VERSION"))));
+    assert!(html.contains("data-page=\"levels\""));
+    assert!(html.contains("/intercom-ui.js"));
     assert!(html.contains("lang=\"sk\""));
-    assert!(levels_js_asset().contains("/api/levels"));
-    assert!(
-        !levels_js_asset().contains("console."),
-        "the page never writes to the console"
-    );
-    assert!(levels_css_asset().contains(".strip"));
 }
 
 struct Control {
@@ -762,9 +757,9 @@ async fn the_page_and_its_assets_are_served() {
     let m = matrix();
     let c = control(&m).await;
     for (path, ctype, needle) in [
-        ("/", "text/html", "data-role=\"strips\""),
-        ("/levels.js", "text/javascript", "/api/levels"),
-        ("/levels.css", "text/css", ".strip"),
+        ("/", "text/html", "data-page=\"levels\""),
+        ("/intercom-ui.js", "text/javascript", "_bg.wasm"),
+        ("/levels.css", "text/css", ".strip-slider"),
         ("/favicon.svg", "image/svg+xml", "<svg"),
         (
             "/api/version",
@@ -778,9 +773,19 @@ async fn the_page_and_its_assets_are_served() {
         assert!(t.starts_with(ctype), "{path}: {t}");
         assert!(r.text().await.unwrap().contains(needle), "{path}");
     }
-    // The phone PWA's routes are not on this listener.
-    let r = reqwest::get(format!("{}/api/state", c.base)).await.unwrap();
-    assert_eq!(r.status().as_u16(), 404);
+    // The WASM module, uncached like every UI file (fixed names across hub versions).
+    let r = reqwest::get(format!("{}/intercom-ui_bg.wasm", c.base))
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-type"], "application/wasm");
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    assert_eq!(&r.bytes().await.unwrap()[..4], b"\0asm");
+    // The phone PWA's routes are not on this listener, nor the hand-written page of before #48.
+    for path in ["/api/state", "/levels.js", "/index.html"] {
+        let r = reqwest::get(format!("{}{path}", c.base)).await.unwrap();
+        assert_eq!(r.status().as_u16(), 404, "{path}");
+    }
 }
 
 #[tokio::test]
