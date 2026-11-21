@@ -66,23 +66,6 @@ fn the_fader_snaps_to_half_db_and_stays_in_its_range() {
 }
 
 #[test]
-fn the_fader_maps_db_to_its_height_and_back() {
-    assert_eq!(fader_fraction(12.0, -60.0, 12.0), 1.0, "max at the top");
-    assert_eq!(fader_fraction(-60.0, -60.0, 12.0), 0.0, "min at the bottom");
-    assert_eq!(fader_fraction(-24.0, -60.0, 12.0), 0.5);
-    assert_eq!(fader_fraction(40.0, -60.0, 12.0), 1.0);
-    assert_eq!(fader_fraction(0.0, 0.0, 0.0), 0.0, "an empty range");
-    assert_eq!(fader_db_at(0.5, -60.0, 12.0), -24.0);
-    assert_eq!(fader_db_at(1.0, -60.0, 12.0), 12.0);
-    assert_eq!(fader_db_at(-1.0, -60.0, 12.0), -60.0);
-    for tenth in 0..=10 {
-        let f = f64::from(tenth) / 10.0;
-        let db = fader_db_at(f, -60.0, 12.0);
-        assert!((fader_fraction(db, -60.0, 12.0) - f).abs() <= 0.25 / 72.0 + 1e-12);
-    }
-}
-
-#[test]
 fn the_meter() {
     let none = meter_view(&[]);
     assert_eq!(none.db_attr, "-120");

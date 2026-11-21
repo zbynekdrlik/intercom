@@ -156,21 +156,6 @@ pub fn fader_db(value: &str, min_db: f64, max_db: f64, fallback: f64) -> f64 {
     snapped.clamp(min_db, max_db)
 }
 
-/// Where a dB value sits on a fader, 0.0 (min, bottom) .. 1.0 (max, top).
-pub fn fader_fraction(db: f64, min_db: f64, max_db: f64) -> f64 {
-    if max_db <= min_db {
-        return 0.0;
-    }
-    ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0)
-}
-
-/// The dB value at a fader fraction (the inverse of [`fader_fraction`]), snapped to the step.
-pub fn fader_db_at(fraction: f64, min_db: f64, max_db: f64) -> f64 {
-    let raw = min_db + fraction.clamp(0.0, 1.0) * (max_db - min_db);
-    let snapped = min_db + ((raw - min_db) / FADER_STEP_DB).round() * FADER_STEP_DB;
-    snapped.clamp(min_db, max_db)
-}
-
 /// The output meter as the page shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeterView {
