@@ -341,6 +341,11 @@ impl StripState {
         }
     }
 
+    /// The browser refused the throttle timer: nothing is pending, the caller sends at once.
+    pub fn schedule_failed(&mut self) {
+        self.timer = false;
+    }
+
     /// The throttle timer fired.
     pub fn timer_fired(&mut self) {
         self.timer = false;

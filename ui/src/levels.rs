@@ -164,11 +164,16 @@ impl Mixer {
                     h.state.update_value(|s| s.timer_fired());
                     self.send(h);
                 };
-                if let Ok(handle) = set_timeout_with_handle(
+                match set_timeout_with_handle(
                     fire,
                     Duration::from_millis(u64::from(SEND_THROTTLE_MS)),
                 ) {
-                    h.timer.set_value(Some(handle));
+                    Ok(handle) => h.timer.set_value(Some(handle)),
+                    // No timer: never leave the strip waiting for one, send now.
+                    Err(_) => {
+                        h.state.update_value(|s| s.schedule_failed());
+                        self.send(h);
+                    }
                 }
             }
             SendAction::Now { cancel } => {
