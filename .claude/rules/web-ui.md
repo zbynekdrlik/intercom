@@ -45,6 +45,16 @@ then `web/app.js` is maintained as is and the phone listener (`:8790`) serves `w
   `dist` is missing, has no `index.html` with both placeholders, no `.wasm`, no `.js`, or a file of
   an unknown type; dotfiles (`.trunk-lock`) are skipped. `rerun-if-changed` on the dist dir and
   every file: a new `trunk build` re-embeds.
+- **A stale dist fails too** (review of phase A): `build_ui::check_fresh` lists the page's sources
+  (`ui/src/**`, `ui/index.html`, `ui/*.css`, `ui/Cargo.toml`, `ui/Trunk.toml`; not the tests, not
+  `ui/Cargo.lock`), emits `rerun-if-changed` for each, and refuses the build when one is newer than
+  `ui/dist/index.html` (Trunk writes it last), naming the file and the trunk command. Without it an
+  edit to `ui/src` followed by a plain hub build embedded the OLD page silently. On CI the checkout
+  stamps every source before the job's `trunk build`, so it never trips there.
+- **A dist file on a hub route fails too**: `HUB_ROUTES` (`/`, `/favicon.svg`) and the `/api/`
+  prefix are the control router's own handlers; a UI file there would be a duplicate axum route,
+  which panics at start. Keep `HUB_ROUTES` in step with `levels_http::control_router` (and with the
+  phone router when phase B serves the UI on `:8790`).
 - So EVERY hub build needs `cd ui && trunk build --release` first: locally, in CI's `rust` and
   `coverage` jobs (`.claude/rules/release-ci.md`). `release.yml` refuses a hub binary without the
   shell (`grep -aF 'data-page="{{PAGE}}"'`).

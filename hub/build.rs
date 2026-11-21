@@ -1,5 +1,6 @@
 // Embeds the Leptos UI (`ui/dist`, built by Trunk) into the hub binary (intercom#48). A missing
-// or incomplete `ui/dist` FAILS the build: never a hub without its page, never a silent fallback.
+// or incomplete `ui/dist`, a UI source newer than it (edited, not rebuilt) or a dist file on a hub
+// route FAILS the build: never a hub without its page or with a stale one, never a silent fallback.
 // The logic lives in build_ui.rs so the hub's tests pin it (hub/tests/ui_embed_48.rs).
 
 #[path = "build_ui.rs"]
@@ -14,6 +15,16 @@ fn main() {
     println!("cargo:rerun-if-changed=build_ui.rs");
     // A directory: cargo rescans every file in it, so a new `trunk build` re-embeds.
     println!("cargo:rerun-if-changed={}", dist.display());
+    // The page's sources too: an edit without `trunk build` must fail here, not embed the old page.
+    let ui = manifest.join("../ui");
+    println!("cargo:rerun-if-changed={}", ui.join("src").display());
+    let sources = match build_ui::check_fresh(&ui) {
+        Ok(sources) => sources,
+        Err(e) => panic!("intercom-hub: cannot embed the web UI: {e}"),
+    };
+    for s in &sources {
+        println!("cargo:rerun-if-changed={}", s.display());
+    }
     let files = match build_ui::collect(&dist) {
         Ok(files) => files,
         Err(e) => panic!("intercom-hub: cannot embed the web UI: {e}"),

@@ -3,8 +3,10 @@
 //
 // The hub serves the Leptos UI Trunk built into `ui/dist` (`trunk build --release` in `ui/`). Every
 // file there is compiled into the binary with `include_bytes!`, so the box needs no file at run
-// time. A missing or incomplete `dist` FAILS the hub build: a hub without its page, or with a stale
-// one from some earlier build, never ships silently.
+// time. The hub build FAILS when `dist` is missing or incomplete, when a UI source is newer than
+// the built page (`check_fresh`: edited, never rebuilt), or when a dist file would take a route the
+// hub serves itself: a hub without its page, with a stale one, or one that would panic at start
+// never ships silently.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,11 @@ pub struct DistFile {
 
 /// The placeholders the hub fills in the shell when it serves it.
 pub const SHELL_PLACEHOLDERS: [&str; 2] = ["{{PAGE}}", "{{VERSION}}"];
+
+/// Routes the hub's own handlers serve next to the UI files (`levels_http::control_router`): a dist
+/// file there would be a duplicate route, which panics axum's router at start. `/api/` is a prefix.
+pub const HUB_ROUTES: [&str; 2] = ["/", "/favicon.svg"];
+pub const HUB_ROUTE_PREFIX: &str = "/api/";
 
 /// The command that makes `ui/dist`.
 pub const BUILD_HINT: &str = "build the UI first: `cd ui && trunk build --release` (intercom#48)";
@@ -58,6 +65,12 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<DistFile>) -> Result<(), String>
         if path.is_dir() {
             walk(&path, &route, out)?;
             continue;
+        }
+        if HUB_ROUTES.contains(&route.as_str()) || route.starts_with(HUB_ROUTE_PREFIX) {
+            return Err(format!(
+                "{}: the UI file's route {route} is one the hub serves itself (rename it in ui/)",
+                path.display()
+            ));
         }
         let Some(content_type) = content_type(&name) else {
             return Err(format!(
@@ -130,4 +143,67 @@ pub fn render(files: &[DistFile]) -> String {
     }
     out.push_str("];\n");
     out
+}
+
+/// The files under `ui/` that make the page: `src/**`, `index.html`, every top-level `*.css`,
+/// `Cargo.toml`, `Trunk.toml` (sorted). Not the tests, `dist/` or `target/`.
+pub fn ui_sources(ui: &Path) -> Result<Vec<PathBuf>, String> {
+    fn rs_tree(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("read {}: {e}", dir.display()))?
+                .path();
+            if path.is_dir() {
+                rs_tree(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    rs_tree(&ui.join("src"), &mut out)?;
+    let entries = std::fs::read_dir(ui).map_err(|e| format!("read {}: {e}", ui.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("read {}: {e}", ui.display()))?
+            .path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let wanted = match name.as_deref() {
+            Some("index.html" | "Cargo.toml" | "Trunk.toml") => true,
+            Some(n) => n.ends_with(".css"),
+            None => false,
+        };
+        if wanted && path.is_file() {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The page's sources (for `rerun-if-changed`), or why `ui/dist` is stale: a source newer than
+/// `dist/index.html` (Trunk writes it last) means the UI was edited and never rebuilt, so the hub
+/// would embed the OLD page.
+pub fn check_fresh(ui: &Path) -> Result<Vec<PathBuf>, String> {
+    let shell = ui.join("dist/index.html");
+    let built = std::fs::metadata(&shell)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("{}: {e}: {BUILD_HINT}", shell.display()))?;
+    let sources = ui_sources(ui)?;
+    for src in &sources {
+        let changed = std::fs::metadata(src)
+            .and_then(|m| m.modified())
+            .map_err(|e| format!("{}: {e}", src.display()))?;
+        if changed > built {
+            let rel = src.strip_prefix(ui).unwrap_or(src);
+            return Err(format!(
+                "ui/dist is stale: ui/{} changed after the last UI build ({}): {BUILD_HINT}",
+                rel.display(),
+                shell.display()
+            ));
+        }
+    }
+    Ok(sources)
 }

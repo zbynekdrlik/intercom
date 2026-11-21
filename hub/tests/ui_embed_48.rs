@@ -10,6 +10,7 @@ mod build_ui;
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use intercom_hub::ui_assets::{ui_file, ui_files, ui_shell, PAGE_LEVELS};
 
@@ -155,4 +156,121 @@ fn the_shell_names_its_page_and_the_hub_version() {
         !html.contains(r#"rel="preload" href="/intercom-ui_bg.wasm""#),
         "no WASM preload: WebKit warns about it in the console"
     );
+}
+
+// Review of #48 phase A: a dist file at a route the hub serves itself (the favicon, the API) would
+// panic axum's router at start (a duplicate route); refused at build time.
+#[test]
+fn a_dist_file_on_a_route_the_hub_serves_fails_the_build() {
+    for (name, route) in [
+        ("favicon.svg", "/favicon.svg"),
+        ("api/levels.json", "/api/levels.json"),
+        ("api/version", "/api/version"),
+    ] {
+        let mut files = complete();
+        files.push((name, "<svg/>"));
+        let dir = dist_with(&files);
+        let err = build_ui::collect(dir.path()).unwrap_err();
+        assert!(err.contains(route), "{name}: {err}");
+        assert!(err.contains("the hub serves"), "{name}: {err}");
+    }
+}
+
+fn touch(path: &Path, at: SystemTime) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    if !path.exists() {
+        fs::write(path, "x").unwrap();
+    }
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+/// A ui/ tree: the sources at `src_at`, a built dist/index.html at `dist_at`.
+fn ui_tree(src_at: SystemTime, dist_at: SystemTime) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let ui = dir.path();
+    for f in [
+        "src/lib.rs",
+        "src/levels.rs",
+        "index.html",
+        "levels.css",
+        "Cargo.toml",
+        "Trunk.toml",
+    ] {
+        touch(&ui.join(f), src_at);
+    }
+    // Neither the tests nor the target dir make the page.
+    touch(
+        &ui.join("tests/logic_48.rs"),
+        dist_at + Duration::from_secs(60),
+    );
+    touch(&ui.join("target/x.rlib"), dist_at + Duration::from_secs(60));
+    touch(&ui.join("dist/index.html"), dist_at);
+    dir
+}
+
+// Review of #48 phase A: build.rs watched only ui/dist, so a hub build after editing ui/src
+// without `trunk build` embedded the OLD page silently. A source newer than the built shell now
+// fails the build, naming the file and the command.
+#[test]
+fn a_ui_source_newer_than_the_built_page_fails_the_build() {
+    let t0 = SystemTime::now() - Duration::from_secs(3600);
+    let fresh = ui_tree(t0, t0 + Duration::from_secs(10));
+    let ui = fresh.path();
+    let sources = build_ui::check_fresh(ui).unwrap();
+    let mut names: Vec<String> = sources
+        .iter()
+        .map(|p| p.strip_prefix(ui).unwrap().display().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Cargo.toml",
+            "Trunk.toml",
+            "index.html",
+            "levels.css",
+            "src/levels.rs",
+            "src/lib.rs"
+        ],
+        "every input of the page, nothing else"
+    );
+
+    for stale in [
+        "src/levels.rs",
+        "index.html",
+        "levels.css",
+        "Cargo.toml",
+        "Trunk.toml",
+    ] {
+        let tree = ui_tree(t0, t0 + Duration::from_secs(10));
+        touch(&tree.path().join(stale), t0 + Duration::from_secs(20));
+        let err = build_ui::check_fresh(tree.path()).unwrap_err();
+        assert!(err.contains(stale), "{stale}: {err}");
+        assert!(err.contains("trunk build --release"), "{stale}: {err}");
+    }
+    // A new source file counts too.
+    let tree = ui_tree(t0, t0 + Duration::from_secs(10));
+    touch(
+        &tree.path().join("src/new.rs"),
+        t0 + Duration::from_secs(20),
+    );
+    let err = build_ui::check_fresh(tree.path()).unwrap_err();
+    assert!(err.contains("src/new.rs"), "{err}");
+    // No built page at all: the error names the command.
+    let tree = ui_tree(t0, t0);
+    fs::remove_file(tree.path().join("dist/index.html")).unwrap();
+    let err = build_ui::check_fresh(tree.path()).unwrap_err();
+    assert!(err.contains("trunk build --release"), "{err}");
+}
+
+// The checkout's own ui/dist is fresh (the local order: trunk build, then the hub).
+#[test]
+fn the_checkouts_ui_dist_is_newer_than_its_sources() {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui");
+    build_ui::check_fresh(&ui).unwrap();
 }
