@@ -2,6 +2,7 @@
 paths:
   - "scripts/discord_thread.py"
   - "tests/python/test_discord_thread_36.py"
+  - "scripts/discord_watch.sh"
 ---
 
 # The cameramen's Discord thread (intercom#36, airuleset#1377)
@@ -39,3 +40,12 @@ paths:
   every other thread belong to shading or nobody: never read them, never post there, never widen
   the CLI constant. A tag of the bot in another thread is not for intercom. The bot's display
   name is "shading" in every thread; that does not make the message shading's.
+- **ALWAYS WATCH THE THREAD while the session runs (owner 22.11.2026: "akym sposobom si checkujes
+  oznacenie discord bota kedze som ti teraz napisal a totalne neriesi!!").** A tag of the bot must
+  be noticed within a minute, also during an event (the owner's tag of 06:57 went unseen for an
+  hour because nothing polled after the 19.11 wait ended). So keep ONE background watcher running:
+  `secret exec … -- bash scripts/discord_watch.sh` (`run_in_background`); it polls `read
+  --mentions-only` every 30 s and EXITS on a tag, printing it, which wakes the session. After
+  answering, start it again at once; on exit 2 (a Discord error) or its 10 h bound, start it again
+  and check why. After a session restart / compaction: check it runs (`pgrep -af discord_watch`)
+  before anything else.
