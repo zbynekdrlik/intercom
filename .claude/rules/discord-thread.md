@@ -3,6 +3,7 @@ paths:
   - "scripts/discord_thread.py"
   - "tests/python/test_discord_thread_36.py"
   - "scripts/discord_watch.sh"
+  - "scripts/event_watch.py"
 ---
 
 # The cameramen's Discord thread (intercom#36, airuleset#1377)
@@ -49,3 +50,16 @@ paths:
   answering, start it again at once; on exit 2 (a Discord error) or its 10 h bound, start it again
   and check why. After a session restart / compaction: check it runs (`pgrep -af discord_watch`)
   before anything else.
+- **EVENT DAY (owner 22.11.2026: "minimalne v den eventu o ktorom by ti mal davat vediet cambox by
+  si mal byt k dispozicii a podla potreby aktivne assistovat").** camera-box tells intercom when an
+  event starts (prep) and ends. From that message to the end:
+  - the Discord watcher runs (above) and every tag is answered at once in the thread;
+  - `python3 scripts/event_watch.py` runs in the background: it polls both hubs' public
+    `/api/state` every 30 s and EXITS on an anomaly (a hub stops answering, `lost_ticks`, an
+    underrun/overrun burst, the Janus leg leaving the room or rejoining, the WebRTC relay not
+    `allocated` or its failures growing, a phone's ICE failed); then look at that box at once
+    (MCP read-only, journal), fix what is ours (a hub restart is the work, `approval-scope.md`),
+    tell camera-box / dstack what is theirs, say in the thread what happened if a cameraman is hit,
+    and start the watcher again. Its fetch sets its own User-Agent: Cloudflare 403s urllib's.
+  - After the event: read the logs (nginx `/janus` + `GET /` reloads, cloudflared, the hub) for
+    the open tickets before camera-box installs anything.
