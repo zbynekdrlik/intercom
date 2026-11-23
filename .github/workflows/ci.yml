@@ -89,6 +89,10 @@ jobs:
       # intercom#42 phase 3: the hub-side TURN relay tests run a REAL TURN server (coturn's
       # turnserver as a user process on loopback, hub/tests/coturn); a missing one fails them.
       - name: coturn (the TURN relay tests)
+        # A stuck apt fetch must fail fast (23.11.2026: one hung 1.5 h under the 6 h job default).
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=5 update
@@ -302,6 +306,10 @@ jobs:
       # intercom#42 phase 3: the hub-side TURN relay tests run a REAL TURN server (coturn's
       # turnserver as a user process on loopback, hub/tests/coturn); a missing one fails them.
       - name: coturn (the TURN relay tests)
+        # A stuck apt fetch must fail fast (23.11.2026: one hung 1.5 h under the 6 h job default).
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=5 update
@@ -378,6 +386,10 @@ jobs:
           python3 --version
       # intercom#42 phase 3: webrtc-turn.spec.js runs a REAL TURN server (coturn's turnserver).
       - name: coturn (the forced-relay spec)
+        # A stuck apt fetch must fail fast (23.11.2026: one hung 1.5 h under the 6 h job default).
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           apt-get -o Acquire::Retries=5 update
