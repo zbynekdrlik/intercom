@@ -1570,6 +1570,13 @@ the end).
   offer (3 s without a valid check, 13 s with), DTLS and media need a two-way path the forger does
   not have, and source forging is a LAN-only capability on the venue network, which the hub already
   treats as trusted (the VBAN legs accept any LAN sender, issue 1431). Accepted, not mitigated.
+- **Coming back (intercom#36, event 22.11.2026).** An iPhone (iOS 18.7, Brave) locked or switched
+  away is dropped by the hub after 15 s, yet back on the page WebKit still says "connected" for
+  ~30 s, and a browser with no inbound audio stats entry left the media watchdog blind: the
+  cameraman reloaded 11 times in one morning. Now after the page was hidden, or frozen (a gap in its
+  own 1 s ticks), for `RESUME_CHECK_MS` (5 s), `confirmMediaOrRebuild` reads the inbound audio
+  packets twice `RESUME_PROBE_MS` (1.2 s) apart: no growth, or no way to tell, rebuilds the session
+  at once. Tests: `webrtc.spec.js` "coming back to the page…" and "a page the phone froze…".
 - **PWA test switch (phase 3):** `?relay=1` (exactly) sets `iceTransportPolicy: "relay"` on the
   native PeerConnection (`nativePcConfig`); without it the browser picks any path.
 - **PWA** (`web/app.js`): `fetchTransport()` before EVERY session (a failed read keeps the last
