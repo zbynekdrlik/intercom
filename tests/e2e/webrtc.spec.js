@@ -249,6 +249,35 @@ test("a page the phone froze (a gap in its own clock) rebuilds a session whose a
   expect(seen, "browser console must stay completely clean").toEqual([]);
 });
 
+// Review of PR #50: the check must KEEP a session whose audio still flows (real stats).
+test("coming back to the page keeps a session whose audio still flows", async ({ page }) => {
+  const seen = watchConsole(page);
+  await preparePage(page, "Kamera 1");
+  await page.goto(`${hubCtl.BASE_URL}/`);
+  await expectConnected(page);
+  const before = await sessionsStarted();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(6000);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(3000); // the probe's 1.2 s, with margin
+  expect(await sessionsStarted(), "a live session is kept").toBe(before);
+  // A freeze (a gap in the page's own clock) with live audio keeps it too.
+  await page.evaluate(() => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + 20000;
+  });
+  await page.waitForTimeout(3500);
+  expect(await sessionsStarted(), "a live session survives a freeze").toBe(before);
+  await expectConnected(page);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("killing the hub and starting it again reconnects the page by itself", async ({ page }) => {
   test.setTimeout(90000);
   const seen = watchConsole(page);

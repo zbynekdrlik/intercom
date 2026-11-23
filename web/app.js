@@ -264,6 +264,9 @@ let watchdogTimer = null;
 let iceTimer = null;
 // The native (in-hub WebRTC) session, intercom#42: its PeerConnection and the id the hub gave it.
 let nativePc = null;
+// A session exists (starting or up) from startSession until teardownSession: reconnectNow and the
+// resume check never start a second one in the window before janus / nativePc are set.
+let sessionLive = false;
 let phoneId = null;
 // The id of this page's last native session that really CONNECTED: the next offer names it as
 // `replaces`, so the hub counts a reconnect as an established phone, never as one of the
@@ -279,6 +282,7 @@ function currentPc() {
 
 // Start (or restart) the session. Called at boot, by the reconnect timer, and on "come back".
 function startSession() {
+  sessionLive = true;
   clearTimeout(reconnectTimer);
   reconnectTimer = null;
   reconnectAt = 0;
@@ -452,6 +456,7 @@ function leaveHub(id) {
 
 // Drop the current session silently: bump the generation first so none of its callbacks act.
 function teardownSession() {
+  sessionLive = false;
   gen += 1;
   clearTimeout(watchdogTimer);
   clearTimeout(iceTimer);
@@ -505,7 +510,7 @@ function renderReconnectCountdown() {
 // A reason to try right now (network back, page visible again) short-circuits the backoff.
 function reconnectNow() {
   if (connEl.dataset.state === "connected") return;
-  if (!reconnectTimer && (janus || nativePc)) return; // an attempt is already in flight
+  if (!reconnectTimer && sessionLive) return; // an attempt is already in flight
   teardownSession();
   startSession();
 }
@@ -1273,13 +1278,19 @@ async function refreshVersion() {
 
 // ---- Coming back (network restored, screen on again) ---------------------------------------
 // Back after a while: a "connected" session is only kept once its audio is seen to flow again.
+let probing = false;
 function confirmMediaOrRebuild() {
   const pc = currentPc();
   if (!pc || !mediaUp || connEl.dataset.state !== "connected") {
     reconnectNow();
     return;
   }
+  if (probing) return; // one probe at a time (a return and a freeze tick together)
+  probing = true;
   const my = gen;
+  const done = () => {
+    probing = false;
+  };
   const rebuild = () => {
     if (my !== gen) return;
     setConn("reconnecting", "obnovujem spojenie…");
@@ -1288,13 +1299,15 @@ function confirmMediaOrRebuild() {
   };
   const sample = () => pc.getStats().then(inboundAudioPackets, () => null);
   sample().then((first) => {
-    if (my !== gen) return;
+    if (my !== gen) return done();
     if (first === null) {
+      done();
       rebuild(); // this browser cannot tell: never trust a session that may be dead
       return;
     }
     setTimeout(() => {
       sample().then((second) => {
+        done();
         if (my !== gen) return;
         if (second === null || second <= first) rebuild();
       });
@@ -1303,7 +1316,10 @@ function confirmMediaOrRebuild() {
 }
 window.addEventListener("online", reconnectNow);
 let hiddenAt = 0;
+let lastTick = Date.now();
 document.addEventListener("visibilitychange", () => {
+  // The freeze tick only catches a freeze WITHOUT a visibility event (review of PR #50).
+  lastTick = Date.now();
   if (document.visibilityState !== "visible") {
     hiddenAt = Date.now();
     return;
@@ -1315,7 +1331,6 @@ document.addEventListener("visibilitychange", () => {
   else reconnectNow();
 });
 // A frozen page (iOS can freeze one without a visibility event) shows as a gap in its own ticks.
-let lastTick = Date.now();
 setInterval(() => {
   const now = Date.now();
   const gap = now - lastTick;

@@ -1577,6 +1577,12 @@ the end).
   own 1 s ticks), for `RESUME_CHECK_MS` (5 s), `confirmMediaOrRebuild` reads the inbound audio
   packets twice `RESUME_PROBE_MS` (1.2 s) apart: no growth, or no way to tell, rebuilds the session
   at once. Tests: `webrtc.spec.js` "coming back to the page…" and "a page the phone froze…".
+  One probe at a time (`probing`), the freeze tick reset by every visibility event (so a return is
+  one check, not two), and `sessionLive` (startSession until teardownSession) guards `reconnectNow`
+  against a second session in the window before janus / nativePc exist. A live session is kept
+  (pinned: "coming back to the page keeps a session whose audio still flows"). Accepted: on a
+  browser with no inbound audio stats a VISIBLE main-thread stall of 5 s+ also rebuilds (~1 s of
+  audio, never a loop: it needs a new gap).
 - **PWA test switch (phase 3):** `?relay=1` (exactly) sets `iceTransportPolicy: "relay"` on the
   native PeerConnection (`nativePcConfig`); without it the browser picks any path.
 - **PWA** (`web/app.js`): `fetchTransport()` before EVERY session (a failed read keeps the last
