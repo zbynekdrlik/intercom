@@ -45,6 +45,13 @@ const ANSWER_TIMEOUT_MS = 10000; // an offer Janus has not answered by then rebu
 // WebSocket or ICE event for a long time, and Janus's audiobridge sends 50 packets/s, silence too.
 const MEDIA_CHECK_MS = 1000;
 const MEDIA_STALL_MS = 4000;
+// intercom#36, the event of 22.11.2026: an iPhone locked or switched away is dropped by the hub
+// after 15 s, yet back on the page WebKit still says "connected" for ~30 s, and a browser without an
+// inbound audio stats entry leaves the watchdog blind. So after the page was away (hidden) or
+// frozen (a gap in its own timer ticks) for RESUME_CHECK_MS, the audio is checked AT ONCE: no new
+// packet within RESUME_PROBE_MS (or no way to tell) rebuilds the session.
+const RESUME_CHECK_MS = 5000;
+const RESUME_PROBE_MS = 1200;
 // issue 1453: the hub's TURN servers are fetched before each session; a slow hub never holds the
 // join longer than this (then the session starts with janus.js's default ICE servers). Longer than
 // the hub's own 5 s bound on a Cloudflare mint (hub/src/turn.rs TURN_MINT_TIMEOUT), so a
@@ -257,6 +264,9 @@ let watchdogTimer = null;
 let iceTimer = null;
 // The native (in-hub WebRTC) session, intercom#42: its PeerConnection and the id the hub gave it.
 let nativePc = null;
+// A session exists (starting or up) from startSession until teardownSession: reconnectNow and the
+// resume check never start a second one in the window before janus / nativePc are set.
+let sessionLive = false;
 let phoneId = null;
 // The id of this page's last native session that really CONNECTED: the next offer names it as
 // `replaces`, so the hub counts a reconnect as an established phone, never as one of the
@@ -272,6 +282,7 @@ function currentPc() {
 
 // Start (or restart) the session. Called at boot, by the reconnect timer, and on "come back".
 function startSession() {
+  sessionLive = true;
   clearTimeout(reconnectTimer);
   reconnectTimer = null;
   reconnectAt = 0;
@@ -445,6 +456,7 @@ function leaveHub(id) {
 
 // Drop the current session silently: bump the generation first so none of its callbacks act.
 function teardownSession() {
+  sessionLive = false;
   gen += 1;
   clearTimeout(watchdogTimer);
   clearTimeout(iceTimer);
@@ -498,7 +510,7 @@ function renderReconnectCountdown() {
 // A reason to try right now (network back, page visible again) short-circuits the backoff.
 function reconnectNow() {
   if (connEl.dataset.state === "connected") return;
-  if (!reconnectTimer && (janus || nativePc)) return; // an attempt is already in flight
+  if (!reconnectTimer && sessionLive) return; // an attempt is already in flight
   teardownSession();
   startSession();
 }
@@ -1265,12 +1277,66 @@ async function refreshVersion() {
 }
 
 // ---- Coming back (network restored, screen on again) ---------------------------------------
+// Back after a while: a "connected" session is only kept once its audio is seen to flow again.
+let probing = false;
+function confirmMediaOrRebuild() {
+  const pc = currentPc();
+  if (!pc || !mediaUp || connEl.dataset.state !== "connected") {
+    reconnectNow();
+    return;
+  }
+  if (probing) return; // one probe at a time (a return and a freeze tick together)
+  probing = true;
+  const my = gen;
+  const done = () => {
+    probing = false;
+  };
+  const rebuild = () => {
+    if (my !== gen) return;
+    setConn("reconnecting", "obnovujem spojenie…");
+    teardownSession();
+    startSession();
+  };
+  const sample = () => pc.getStats().then(inboundAudioPackets, () => null);
+  sample().then((first) => {
+    if (my !== gen) return done();
+    if (first === null) {
+      done();
+      rebuild(); // this browser cannot tell: never trust a session that may be dead
+      return;
+    }
+    setTimeout(() => {
+      sample().then((second) => {
+        done();
+        if (my !== gen) return;
+        if (second === null || second <= first) rebuild();
+      });
+    }, RESUME_PROBE_MS);
+  });
+}
 window.addEventListener("online", reconnectNow);
+let hiddenAt = 0;
+let lastTick = Date.now();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
+  // The freeze tick only catches a freeze WITHOUT a visibility event (review of PR #50).
+  lastTick = Date.now();
+  if (document.visibilityState !== "visible") {
+    hiddenAt = Date.now();
+    return;
+  }
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
-  reconnectNow();
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  if (away >= RESUME_CHECK_MS) confirmMediaOrRebuild();
+  else reconnectNow();
 });
+// A frozen page (iOS can freeze one without a visibility event) shows as a gap in its own ticks.
+setInterval(() => {
+  const now = Date.now();
+  const gap = now - lastTick;
+  lastTick = now;
+  if (gap >= RESUME_CHECK_MS && document.visibilityState === "visible") confirmMediaOrRebuild();
+}, 1000);
 setInterval(renderReconnectCountdown, 500);
 // Closing or leaving the page frees the phone's slot on the hub at once (intercom#42).
 // A page that goes into the back/forward cache (`persisted`) keeps its PeerConnection: no leave.

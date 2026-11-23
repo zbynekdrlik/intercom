@@ -181,6 +181,103 @@ test("two phones: each hears the cutter's tone, and A's mic reaches B but never 
   await ctxA.close();
 });
 
+// intercom#36/#42, the event of 22.11.2026: an iPhone (iOS 18.7, Brave) lost the audio whenever it
+// was locked or switched away; the hub dropped it ("ICE disconnected"), and back on the page it
+// stayed "Pripojené" over silence until the cameraman reloaded it, 11 times in a morning. WebKit
+// reports the dead pair only ~30 s later, and a browser without an inbound audio stats entry left
+// the media watchdog blind. Coming back must check the audio AT ONCE and rebuild a dead session.
+async function sessionsStarted() {
+  return (await hubState()).webrtc.sessions_started;
+}
+
+async function blindStats(page) {
+  // The browser reports no inbound audio entry (the Brave/WebKit case): the watchdog cannot see.
+  await page.evaluate(() => {
+    const pc = currentPc();
+    const real = pc.getStats.bind(pc);
+    pc.getStats = async () => {
+      const r = await real();
+      const out = new Map();
+      r.forEach((v, k) => {
+        if (v.type !== "inbound-rtp") out.set(k, v);
+      });
+      return out;
+    };
+  });
+}
+
+test("coming back to the page after a while rebuilds a session whose audio cannot be confirmed", async ({ page }) => {
+  const seen = watchConsole(page);
+  await preparePage(page, "Kamera 5");
+  await page.goto(`${hubCtl.BASE_URL}/`);
+  await expectConnected(page);
+  const before = await sessionsStarted();
+  await blindStats(page);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(6000);
+  expect(await sessionsStarted(), "nothing rebuilds while the page is away").toBe(before);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect
+    .poll(sessionsStarted, { message: "back on the page: a fresh session at once", timeout: 3000 })
+    .toBeGreaterThan(before);
+  await expectConnected(page);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
+test("a page the phone froze (a gap in its own clock) rebuilds a session whose audio cannot be confirmed", async ({ page }) => {
+  const seen = watchConsole(page);
+  await preparePage(page, "Kamera 6");
+  await page.goto(`${hubCtl.BASE_URL}/`);
+  await expectConnected(page);
+  const before = await sessionsStarted();
+  await blindStats(page);
+  // iOS can freeze a page without a visibility event: the next timer tick finds 20 s missing.
+  await page.evaluate(() => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + 20000;
+  });
+  await expect
+    .poll(sessionsStarted, { message: "after the freeze: a fresh session at once", timeout: 4000 })
+    .toBeGreaterThan(before);
+  await expectConnected(page);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
+// Review of PR #50: the check must KEEP a session whose audio still flows (real stats).
+test("coming back to the page keeps a session whose audio still flows", async ({ page }) => {
+  const seen = watchConsole(page);
+  await preparePage(page, "Kamera 1");
+  await page.goto(`${hubCtl.BASE_URL}/`);
+  await expectConnected(page);
+  const before = await sessionsStarted();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(6000);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(3000); // the probe's 1.2 s, with margin
+  expect(await sessionsStarted(), "a live session is kept").toBe(before);
+  // A freeze (a gap in the page's own clock) with live audio keeps it too.
+  await page.evaluate(() => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + 20000;
+  });
+  await page.waitForTimeout(3500);
+  expect(await sessionsStarted(), "a live session survives a freeze").toBe(before);
+  await expectConnected(page);
+  expect(seen, "browser console must stay completely clean").toEqual([]);
+});
+
 test("killing the hub and starting it again reconnects the page by itself", async ({ page }) => {
   test.setTimeout(90000);
   const seen = watchConsole(page);
