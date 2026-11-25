@@ -17,7 +17,7 @@ exclude = ["tray", "ui"]
 resolver = "2"
 
 [workspace.package]
-version = "1.9.36"
+version = "1.9.37"
 
 # The dlink device's rate converter (dstack-resample -> rubato) runs on its real-time pump. Built
 # unoptimised (cargo test, CI's llvm-cov) a 96 -> 48 kHz block took 2.3-3.3 ms against its 1.33 ms
