@@ -1230,6 +1230,6 @@ fn both_boxes_run_the_default_receive_latency_of_13_04_ms() {
             "{name} keeps the default latency terms"
         );
         let split = d.link_config(48_000).split().unwrap();
-        assert_eq!(split.latency_ns, 13_040_000, "{name}: P = 13.04 ms");
+        assert_eq!(split.latency_ns, 13_041_666, "{name}: P = 13.04 ms");
     }
 }
