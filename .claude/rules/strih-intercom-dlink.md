@@ -214,8 +214,8 @@ and the box's nginx keeps `127.0.0.1:8790`.
 
 ## The deployed latency terms (intercom#46, 21.11.2026)
 
-- strih-pp: `receive_buffer_ms = 3.5`, so P = 4.5 ms (was the default 13.04 ms), on dstack#381's
-  latency review (the owner's directive of 21.11: lower every Dante receiver with a stable margin;
-  dstack measures and runs it). Its evidence: max arrival 2.14 ms, 0 late since 18.11. A late
-  packet in dstack's next-day read means back to the default. Pinned in `hub/tests/dlink_5.rs`.
+- strih-pp: default terms (P = 13.04 ms). It ran `receive_buffer_ms = 3.5` (P = 4.5 ms) from 25.11
+  to 27.11.2026; dstack's 24 h read had 1 late packet and 4.24 ms peaks, so dstack#381's rule put it
+  back. A later step down needs a day with max arrival <= P/2 (about 9 ms), after the PP link is clean
+  (dstack#487). Pinned in `hub/tests/dlink_5.rs`.
 - strih-snv: default terms (50 late, 6.39 ms max; no margin). Change only on dstack's review.
